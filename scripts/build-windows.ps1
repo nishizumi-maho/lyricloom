@@ -216,7 +216,7 @@ $guiExe = Join-Path $appDir 'LyricLoom.exe'
 $workerExe = Join-Path $appDir 'LyricLoomWorker.exe'
 if (-not (Test-Path $guiExe)) { throw "Missing $guiExe." }
 if (-not (Test-Path $workerExe)) { throw "Missing $workerExe." }
-if (-not (Test-Path (Join-Path $appDir '_internal\tools\bin\whisper-cli.exe'))) {
+if (-not (Test-Path -PathType Leaf (Join-Path $appDir '_internal\tools\bin\whisper-cli.exe'))) {
     throw 'whisper-cli.exe was not bundled under _internal\tools\bin.'
 }
 
@@ -274,3 +274,4 @@ if (-not $SkipInstaller) {
     Write-Host "  Setup:    $setupVersioned"
     Write-Host "  Stable:   $setupStable"
 }
+

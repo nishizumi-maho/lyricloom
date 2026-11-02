@@ -97,7 +97,7 @@ jobs:
           if (-not (Test-Path 'dist\LyricLoom\LyricLoomWorker.exe')) {
             throw 'The PyInstaller worker executable is missing.'
           }
-          if (-not (Test-Path 'dist\LyricLoom\_internal\tools\bin\whisper-cli.exe')) {
+          if (-not (Test-Path -PathType Leaf 'dist\LyricLoom\_internal\tools\bin\whisper-cli.exe')) {
             throw 'The bundled whisper-cli.exe is missing.'
           }
           if (-not (Test-Path 'dist\LyricLoom-Setup.exe')) {
@@ -226,3 +226,4 @@ jobs:
           overwrite_files: true
           generate_release_notes: true
           prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
+

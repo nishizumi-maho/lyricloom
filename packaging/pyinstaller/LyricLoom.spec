@@ -53,13 +53,19 @@ def add_collection(package: str) -> None:
 
 
 def add_tree(source: Path, destination: str) -> None:
-    """Copy a small source tree verbatim into the bundle."""
+    """Copy a small source tree verbatim into the bundle.
+
+    PyInstaller's datas entries are ``(source_file, destination_directory)``, not
+    ``(source_file, destination_file)``; passing the file name as the destination would create a
+    directory named ``utils.py`` and break the runtime import.
+    """
     if not source.is_dir():
         return
     for path in sorted(source.rglob("*")):
         if path.is_file() and "__pycache__" not in path.parts:
-            relative = path.relative_to(source).as_posix()
-            datas.append((str(path), f"{destination}/{relative}"))
+            relative_parent = path.relative_to(source).parent
+            target = destination if str(relative_parent) == "." else f"{destination}/{relative_parent.as_posix()}"
+            datas.append((str(path), target))
 
 
 # --------------------------------------------------------------------------- heavy runtime
@@ -162,7 +168,7 @@ if whisper_cli is None:
     )
 
 for path in whisper_files:
-    datas.append((str(path), f"tools/bin/{path.name}"))
+    datas.append((str(path), "tools/bin"))
 
 # --------------------------------------------------------------------------- Analysis and executables
 entry_script = ROOT / "packaging" / "pyinstaller" / "entry.py"
