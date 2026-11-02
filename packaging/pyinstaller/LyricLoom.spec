@@ -93,6 +93,8 @@ hiddenimports += [
     "onnxruntime",
     "onnxruntime.capi._pybind_state",
     "librosa",
+    "resampy",
+    "samplerate",
     "g2p_en",
     "nltk",
     "inflect",

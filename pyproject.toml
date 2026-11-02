@@ -43,6 +43,8 @@ dependencies = [
     "inflect",
     "unidecode",
     "librosa",
+    "resampy",
+    "samplerate",
 ]
 
 [project.optional-dependencies]

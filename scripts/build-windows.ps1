@@ -57,7 +57,8 @@ $buildDir = Join-Path $root 'build'
 $toolsBin = Join-Path $root 'tools\bin'
 $whisperSource = Join-Path $root 'tools\src\whisper.cpp'
 $whisperCli = Join-Path $toolsBin 'whisper-cli.exe'
-$venvScripts = Split-Path -Parent $python
+$pythonDir = Split-Path -Parent $python
+$venvScripts = if ((Split-Path -Leaf $pythonDir) -eq 'Scripts') { $pythonDir } else { Join-Path $pythonDir 'Scripts' }
 
 if ($Vulkan -and $CpuOnly) {
     throw 'Use either -Vulkan or -CpuOnly, not both.'
