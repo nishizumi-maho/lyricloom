@@ -6,29 +6,28 @@ This page documents the files, tags and backup behavior. The exact output for a 
 
 ## Files next to a song
 
-For `01 - Reweave.flac` in `D:\Music\Artist\Album\`:
+For `01 - Synthetic Song.flac` in `D:\Music\Artist\Album\`:
 
 | File | When it is written | Purpose |
 |---|---|---|
-| `01 - Reweave.lrc` | Every successful run | The enhanced lyric with word timing. |
-| `01 - Reweave.original.lrc` | When the lyric came from an online source (not transcription or pasted lyrics) | The official lyric as found, kept for reference and recovery. |
-| `01 - Reweave.japanese.lrc` | When the lyric contains Japanese | The Japanese-script version, even if the main `.lrc` is romaji. |
-| `01 - Reweave.romaji.lrc` | When the lyric contains Japanese | The romanized version, even if the main `.lrc` is Japanese. |
-| `01 - Reweave.lrc.bak`, `.bak1`, ... | When an existing main `.lrc` is replaced | Backups of earlier main `.lrc` files. |
+| `01 - Synthetic Song.lrc` | Every successful run | The enhanced lyric with word timing. |
+| `01 - Synthetic Song.original.lrc` | When the lyric came from an online source (not transcription or pasted lyrics) | The official lyric as found, kept for reference and recovery. |
+| `01 - Synthetic Song.japanese.lrc` | When the lyric contains Japanese | The Japanese-script version, even if the main `.lrc` is romaji. |
+| `01 - Synthetic Song.romaji.lrc` | When the lyric contains Japanese | The romanized version, even if the main `.lrc` is Japanese. |
+| `01 - Synthetic Song.lrc.bak`, `.bak1`, ... | When an existing main `.lrc` is replaced | Backups of earlier main `.lrc` files. |
 
 The audio file itself is never modified.
 
 ## A complete example
 
 ```lrc
-[ti:Reweave]
-[ar:鈴木このみ]
+[ti:Synthetic Song]
+[ar:Demo Artist]
 [re:LyricLoom 2.0.0]
 [#source:uta-net conf:0.94]
 [#engine:7]
-[00:22.98]<00:22.98>言<00:23.10>葉<00:23.30>が<00:23.50>人<00:24.05>を<00:24.30>結<00:24.62>い<00:24.90>つ<00:25.12>け<00:25.30>る<00:25.62>
-[00:26.10]<00:26.10>よ<00:26.30>う<00:26.55>に<00:27.10>
-```
+[00:22.98]<00:22.98>こ<00:23.10>れ<00:23.30>は<00:23.50>合<00:24.05>成<00:24.30>の<00:24.62>歌<00:24.90>詞<00:25.12>で<00:25.30>す<00:25.62>
+[00:26.10]<00:26.10>例<00:26.30>で<00:26.55>す<00:27.10>
 
 Times are illustrative. What matters is the structure:
 
@@ -50,7 +49,7 @@ Tags are written at the top, in this order when present:
 
 | Tag | Example | Meaning |
 |---|---|---|
-| `[ti:...]` | `[ti:Reweave]` | Track title from the audio tags. Falls back to the file stem. |
+| `[ti:...]` | `[ti:Synthetic Song]` | Track title from the audio tags. Falls back to the file stem. |
 | `[ar:...]` | `[ar:鈴木このみ]` | Artist from the audio tags. May be empty if the file has no artist tag. |
 | `[re:...]` | `[re:LyricLoom 2.0.0]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
 | `[#source:...]` | `[#source:uta-net conf:0.94]` | Where the lyric came from, followed by the track confidence. Sources include `lrclib`, `netease`, `qq`, `utaten`, `genius`, `websearch`, `transcription` and `manual`. |
@@ -106,8 +105,8 @@ The official lyric is kept as `<song>.original.lrc` so that a later edit or repr
 The file contains:
 
 ```lrc
-[ti:Reweave]
-[ar:鈴木このみ]
+[ti:Synthetic Song]
+[ar:Demo Artist]
 [#source:uta-net]
 ```
 
@@ -144,9 +143,9 @@ Notes:
 When LyricLoom replaces an existing **main** `.lrc`, it first renames it:
 
 ```text
-01 - Reweave.lrc       -> 01 - Reweave.lrc.bak
-01 - Reweave.lrc       -> 01 - Reweave.lrc.bak1   (if .bak exists)
-01 - Reweave.lrc       -> 01 - Reweave.lrc.bak2   (if .bak1 exists)
+01 - Synthetic Song.lrc       -> 01 - Synthetic Song.lrc.bak
+01 - Synthetic Song.lrc       -> 01 - Synthetic Song.lrc.bak1   (if .bak exists)
+01 - Synthetic Song.lrc       -> 01 - Synthetic Song.lrc.bak2   (if .bak1 exists)
 ```
 
 The write itself is atomic: LyricLoom writes a temporary file and renames it into place. A crash during the write should leave either the old file or the new one, not a truncated `.lrc`.

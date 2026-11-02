@@ -27,7 +27,7 @@ BLOCK_S = 2.0                # blocks short enough that the drift inside one is 
 FIT_STEP = 4                 # the filter is fitted on every 4th sample: as good, 4x faster
 # The subtraction is used when the instrumental cancels for real: at least MIN_CLEAN_S seconds
 # (intro, solos, outro) where what is left is CLEAN_DB below the mix. An unrelated or remastered
-# instrumental never gets there; the matching one reaches ~-45 dB on Suzuki Konomi's "Redo".
+# instrumental never gets there; a matching instrumental reaches about -45 dB on a clean studio mix.
 CLEAN_DB = -25.0
 MIN_CLEAN_S = 3.0
 _SILENT_DB = -40.0

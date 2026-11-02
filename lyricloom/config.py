@@ -278,8 +278,8 @@ ALIGN_WSL_PYTHON = SEPARATOR_WSL_PYTHON
 ALIGN_WSL_ENV = {"TORCH_HOME": str(setting("wsl_torch_home", "/opt/lyricloom/models/torch")),
                  **SEPARATOR_WSL_ENV}
 
-# English songs: LyricsAlignment-MTL (trained on sung vocals) times the words; on Adele and Arctic
-# Monkeys it put 92-99% of words within 300 ms of human timing vs 69-82% for CTC. The inference
+# English songs: LyricsAlignment-MTL (trained on sung vocals) times the words; on English pop test
+# tracks it put 92-99% of words within 300 ms of human timing vs 69-82% for CTC. The inference
 # code is vendored (MIT); the 66 MB checkpoint is downloaded on first use.
 MTL_REPO = Path(__file__).resolve().parent / "vendor" / "mtl"
 MTL_CHECKPOINT = MODELS / "mtl" / "checkpoints" / "checkpoint_MTL"

@@ -217,17 +217,16 @@ Allow about **6 GB** for the models and extra space for the work cache and kept 
 
 ## Output format
 
-For `01 - Reweave.flac`, LyricLoom writes `01 - Reweave.lrc` next to the audio:
+For `01 - Synthetic Song.flac`, LyricLoom writes `01 - Synthetic Song.lrc` next to the audio:
 
 ```lrc
-[ti:Reweave]
-[ar:鈴木このみ]
+[ti:Synthetic Song]
+[ar:Demo Artist]
 [re:LyricLoom 2.0.0]
 [#source:uta-net conf:0.94]
 [#engine:7]
-[00:22.98]<00:22.98>言<00:23.10>葉<00:23.30>が<00:23.50>人<00:24.05>を<00:24.30>結<00:24.62>い<00:24.90>つ<00:25.12>け<00:25.30>る<00:25.62>
-```
-
+[00:22.98]<00:22.98>こ<00:23.10>れ<00:23.30>は<00:23.50>合<00:24.05>成<00:24.30>の<00:24.62>歌<00:24.90>詞<00:25.12>で<00:25.30>す<00:25.62>
+[00:26.10]<00:26.10>例<00:26.30>で<00:26.55>す<00:27.10>
 - `[mm:ss.xx]` is the line start.
 - Each `<mm:ss.xx>` is the start of the word or segment that follows it.
 - A final `<mm:ss.xx>` with no text marks the end of the last segment.

@@ -39,7 +39,7 @@ def parse_page(html_text: str) -> str:
 
 
 def parse_page_title(html_text: str) -> tuple[str, str]:
-    """(artist, title) from the page's og:title, e.g. "鈴木このみ (Konomi Suzuki) – Reweave"."""
+    """(artist, title) from the page's og:title, e.g. "Artist - Title"."""
     tag = BeautifulSoup(html_text, "html.parser").find("meta", property="og:title")
     content = (tag.get("content") if tag else "") or ""
     artist, sep, title = content.partition(" – ")
