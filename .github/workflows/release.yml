@@ -83,9 +83,26 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
+      - name: Fetch prebuilt whisper.cpp
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/ggerganov/whisper.cpp/releases/download/v1.9.2/whisper-bin-x64.zip'
+          $zip = Join-Path $env:RUNNER_TEMP 'whisper-bin-x64.zip'
+          $dir = Join-Path $env:RUNNER_TEMP 'whisper-bin-x64'
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          New-Item -ItemType Directory -Force 'tools\bin' | Out-Null
+          Get-ChildItem -LiteralPath $dir -Recurse -File |
+            Where-Object { $_.Extension -in '.exe', '.dll' } |
+            Copy-Item -Destination 'tools\bin' -Force
+          if (-not (Test-Path -PathType Leaf 'tools\bin\whisper-cli.exe')) {
+            throw 'whisper-cli.exe was not found in the prebuilt archive.'
+          }
+
       - name: Build Windows release
         shell: pwsh
-        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -SkipWhisper
 
       - name: Verify Windows artifacts
         shell: pwsh
