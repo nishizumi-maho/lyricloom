@@ -26,7 +26,7 @@ Whisper transcribes the isolated vocals with word timestamps. LyricLoom uses tha
 - check that a candidate lyric really matches what is sung;
 - provide the lyric text itself when no public source has an acceptable version.
 
-It runs through **whisper.cpp**, not the Python `openai-whisper` package. The Windows build normally includes a Vulkan-enabled `whisper-cli`; on Linux you build or install it yourself (see [docs/install-linux.md](install-linux.md#build-whisper-cli)).
+It runs through **whisper.cpp**, not the Python `openai-whisper` package. The Windows installer ships a CPU `whisper-cli`; a locally built Vulkan or CUDA build can replace it for GPU transcription. On Linux you build or install it yourself (see [docs/install-linux.md](install-linux.md#build-whisper-cli)).
 
 The model is downloaded from the `ggerganov/whisper.cpp` repository on Hugging Face. LyricLoom checks the published SHA-256 when it downloads the file. If Hugging Face's checksum endpoint is unavailable, it falls back to the checksum pinned in the source.
 

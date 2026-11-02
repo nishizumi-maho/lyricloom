@@ -13,7 +13,7 @@ What runs where:
 | Stage | Where it runs with WSL/ROCm enabled |
 |---|---|
 | Library scan, lyrics search, writing `.lrc` | Windows |
-| Whisper transcription (`whisper-cli`) | Windows, using the bundled Vulkan build when available |
+| Whisper transcription (`whisper-cli`) | Windows, using the installed build (Vulkan if available; the release installer ships CPU) |
 | Vocal separation (Mel-Band RoFormer) | WSL 2 / ROCm |
 | MMS_FA forced alignment | WSL 2 / ROCm |
 | English singing model (LyricsAlignment-MTL) | WSL 2 / ROCm |

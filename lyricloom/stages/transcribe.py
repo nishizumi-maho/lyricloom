@@ -1,5 +1,5 @@
-"""Whisper large-v3 through whisper.cpp (Vulkan). Used for anchors and for checking lyrics,
-and as the lyrics themselves only when no source has them."""
+"""Whisper large-v3 through whisper.cpp (CPU by default; a Vulkan build can use the GPU). Used for
+anchors and for checking lyrics, and as the lyrics themselves only when no source has them."""
 from __future__ import annotations
 
 import json
