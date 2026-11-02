@@ -63,6 +63,8 @@ def test_titles_come_from_the_tags(tmp_path):
     f = FLAC(str(a))
     f["title"], f["artist"] = "Synthetic Song", "Test Artist"
     f.save()
+    a.with_suffix(".lrc").write_text(
+        "[re:LyricLoom 2.0.0]\n[#source:demo conf:0.90]\n[00:01.00]x\n", encoding="utf-8")
     row = read_status(a)
     assert (row.artist, row.title) == ("Test Artist", "Synthetic Song")
 

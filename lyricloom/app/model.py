@@ -37,19 +37,21 @@ def _flac_tags(audio: Path) -> tuple[str, str] | None:
 
     Mutagen loads every metadata block, including embedded cover art. A library with a few very
     large scans then spends minutes in the first scan. The Vorbis comment is a small block near the
-    start, so this reads it directly and skips the rest. Returns None when the layout is unusual;
-    the caller then falls back to mutagen.
+    start, so this reads it directly and skips the rest. An unusual or corrupt layout returns empty
+    strings instead of falling back to mutagen, so one bad file cannot stall the whole scan.
     """
     try:
         with audio.open("rb") as f:
             if f.read(4) != b"fLaC":
-                return None
+                return "", ""
             while True:
                 header = f.read(4)
                 if len(header) != 4:
-                    return None
+                    return "", ""
                 last, block_type = header[0] & 0x80, header[0] & 0x7F
                 size = int.from_bytes(header[1:4], "big")
+                if size > 64_000_000:
+                    return "", ""      # a corrupt or absurd metadata block: do not read it
                 if block_type == 4:  # VORBIS_COMMENT
                     data = f.read(size)
                     vendor_len = struct.unpack_from("<I", data, 0)[0]
@@ -67,10 +69,10 @@ def _flac_tags(audio: Path) -> tuple[str, str] | None:
                             values[key.upper()] = value.strip()
                     return values.get("ARTIST", ""), values.get("TITLE", "")
                 if last:
-                    return None
+                    return "", ""
                 f.seek(size, 1)
     except (OSError, struct.error, IndexError):
-        return None
+        return "", ""
 
 
 def _tags(audio: Path) -> tuple[str, str]:
@@ -98,10 +100,13 @@ def _tags(audio: Path) -> tuple[str, str]:
 
 
 def read_status(audio: Path) -> TrackRow:
-    tag_artist, tag_title = _tags(audio)
+    lrc = audio.with_suffix(".lrc")
+    # Reading tags opens every audio file; on a large external library that is the slowest part of
+    # the first scan. Pending tracks use the Artist/Album/Track folder layout instead; once a track
+    # has a .lrc (or is loaded/processed) the real tags are read.
+    tag_artist, tag_title = _tags(audio) if lrc.exists() else ("", "")
     folder = audio.parent.parent.name if audio.parent.parent != audio.parent else ""
     row = TrackRow(audio, tag_artist or folder, tag_title or audio.stem, "pending")
-    lrc = audio.with_suffix(".lrc")
     if not lrc.exists():
         return row
     meta = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace")).meta
