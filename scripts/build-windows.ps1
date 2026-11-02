@@ -30,10 +30,16 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 $venv = Join-Path $root '.venv'
-$python = Join-Path $venv 'Scripts\python.exe'
+$python = if ($env:LYRICLOOM_PYTHON) { $env:LYRICLOOM_PYTHON } else { Join-Path $venv 'Scripts\python.exe' }
 if (-not (Test-Path $python)) {
-    throw 'Python virtual environment not found. Run scripts/setup-dev.ps1 first.'
+    $onPath = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($onPath) {
+        $python = $onPath.Source
+    } else {
+        throw 'Python not found. Run scripts/setup-dev.ps1, or set LYRICLOOM_PYTHON to a Python 3.11 interpreter.'
+    }
 }
+$python = (Resolve-Path $python).Path
 
 $pyVersion = (& $python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
 if ($pyVersion -ne '3.11') {
@@ -51,7 +57,7 @@ $buildDir = Join-Path $root 'build'
 $toolsBin = Join-Path $root 'tools\bin'
 $whisperSource = Join-Path $root 'tools\src\whisper.cpp'
 $whisperCli = Join-Path $toolsBin 'whisper-cli.exe'
-$venvScripts = Join-Path $venv 'Scripts'
+$venvScripts = Split-Path -Parent $python
 
 if ($Vulkan -and $CpuOnly) {
     throw 'Use either -Vulkan or -CpuOnly, not both.'

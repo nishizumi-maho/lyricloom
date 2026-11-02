@@ -25,8 +25,16 @@ cd "$ROOT"
 
 PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
 if [[ ! -x "$PYTHON" ]]; then
-    echo "Python virtual environment not found at $PYTHON." >&2
-    echo "Run scripts/setup-dev.sh first, or set PYTHON=/path/to/python3.11." >&2
+    # A release runner installs the dependencies into the system Python, not a project .venv.
+    for candidate in python3.11 python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            PYTHON="$(command -v "$candidate")"
+            break
+        fi
+    done
+fi
+if [[ ! -x "$PYTHON" ]]; then
+    echo "Python 3.11 was not found. Run scripts/setup-dev.sh, or set PYTHON=/path/to/python3.11." >&2
     exit 1
 fi
 
