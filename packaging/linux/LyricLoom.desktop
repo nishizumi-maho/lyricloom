@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=LyricLoom
+GenericName=Lyrics Synchronizer
+Comment=Create word-by-word synced LRC lyrics
+Exec=lyricloom
+Icon=audio-x-generic
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+Keywords=lyrics;karaoke;lrc;alignment;subtitles;
+StartupNotify=true

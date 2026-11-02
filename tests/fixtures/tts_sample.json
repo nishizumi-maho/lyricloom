@@ -1,0 +1,65 @@
+﻿{
+    "text":  "the quiet river carries every broken promise back to the silver morning where we started",
+    "words":  [
+                  {
+                      "text":  "quiet",
+                      "start_ms":  230
+                  },
+                  {
+                      "text":  "carries",
+                      "start_ms":  1065
+                  },
+                  {
+                      "text":  "river",
+                      "start_ms":  740
+                  },
+                  {
+                      "text":  "the",
+                      "start_ms":  120
+                  },
+                  {
+                      "text":  "every",
+                      "start_ms":  1565
+                  },
+                  {
+                      "text":  "broken",
+                      "start_ms":  1880
+                  },
+                  {
+                      "text":  "promise",
+                      "start_ms":  2365
+                  },
+                  {
+                      "text":  "back",
+                      "start_ms":  2895
+                  },
+                  {
+                      "text":  "to",
+                      "start_ms":  3255
+                  },
+                  {
+                      "text":  "the",
+                      "start_ms":  3380
+                  },
+                  {
+                      "text":  "silver",
+                      "start_ms":  3480
+                  },
+                  {
+                      "text":  "morning",
+                      "start_ms":  3960
+                  },
+                  {
+                      "text":  "where",
+                      "start_ms":  4440
+                  },
+                  {
+                      "text":  "we",
+                      "start_ms":  4700
+                  },
+                  {
+                      "text":  "started",
+                      "start_ms":  4875
+                  }
+              ]
+}

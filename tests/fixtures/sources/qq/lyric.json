@@ -1,0 +1,7 @@
+{
+  "retcode": 0,
+  "code": 0,
+  "subcode": 0,
+  "lyric": "[ti:Synthetic Song]\n[ar:Test Artist]\n[al:Synthetic Album]\n[by:]\n[offset:0]\n[00:00.32]Synthetic Song - Test Artist\n[00:00.97]Lyrics by：Test Writer\n[00:01.33]Composed by：Test Composer\n[00:05.00]This is a synthetic line for the parser\n[00:08.00]Another invented line for the test\n[00:11.00]Nothing here is a real song\n",
+  "trans": ""
+}

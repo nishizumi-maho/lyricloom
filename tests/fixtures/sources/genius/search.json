@@ -1,0 +1,62 @@
+{
+  "meta": {"status": 200},
+  "response": {
+    "sections": [
+      {
+        "type": "top_hit",
+        "hits": [
+          {
+            "type": "song",
+            "result": {
+              "title": "Test Singer - Synthetic Song (Romanized)",
+              "primary_artist": {"name": "Genius Romanizations"},
+              "url": "https://genius.com/Genius-romanizations-test-singer-synthetic-song-romanized-lyrics"
+            }
+          }
+        ]
+      },
+      {
+        "type": "song",
+        "hits": [
+          {
+            "type": "song",
+            "result": {
+              "title": "Test Singer - Synthetic Song (Romanized)",
+              "primary_artist": {"name": "Genius Romanizations"},
+              "url": "https://genius.com/Genius-romanizations-test-singer-synthetic-song-romanized-lyrics"
+            }
+          },
+          {
+            "type": "song",
+            "result": {
+              "title": "Synthetic Song (Test Translation)",
+              "primary_artist": {"name": "Test Translator"},
+              "url": "https://genius.com/Test-singer-synthetic-song-translation-lyrics"
+            }
+          },
+          {
+            "type": "song",
+            "result": {
+              "title": "Synthetic Song",
+              "primary_artist": {"name": "Test Singer"},
+              "url": "https://genius.com/Test-singer-synthetic-song-lyrics"
+            }
+          }
+        ]
+      },
+      {
+        "type": "lyric",
+        "hits": [
+          {
+            "type": "song",
+            "result": {
+              "title": "Synthetic Song",
+              "primary_artist": {"name": "Test Singer"},
+              "url": "https://genius.com/Test-singer-synthetic-song-lyrics"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

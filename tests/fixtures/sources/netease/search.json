@@ -1,0 +1,20 @@
+{
+  "result": {
+    "songs": [
+      {
+        "id": 1,
+        "name": "Synthetic Song",
+        "dt": 237000,
+        "ar": [{"name": "Test Artist"}],
+        "al": {"name": "Synthetic Album"}
+      },
+      {
+        "id": 2,
+        "name": "Another Synthetic Song",
+        "dt": 180000,
+        "ar": [{"name": "Test Artist"}],
+        "al": {"name": "Synthetic Album"}
+      }
+    ]
+  }
+}

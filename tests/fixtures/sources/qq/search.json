@@ -1,0 +1,32 @@
+{
+  "code": 0,
+  "data": {
+    "song": {
+      "list": [
+        {
+          "songname": "Synthetic Song (Test Version)",
+          "songmid": "test0001",
+          "interval": 236,
+          "singer": [{"name": "Test Artist"}]
+        },
+        {
+          "songname": "Synthetic Song",
+          "songmid": "test0002",
+          "interval": 237,
+          "singer": [{"name": "Test Artist"}]
+        },
+        {
+          "songname": "Another Synthetic Song",
+          "songmid": "test0003",
+          "interval": 203,
+          "singer": [{"name": "Test Artist"}]
+        }
+      ]
+    }
+  },
+  "message": "",
+  "notice": "",
+  "subcode": 0,
+  "time": 0,
+  "tips": ""
+}

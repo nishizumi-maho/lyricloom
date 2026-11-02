@@ -1,0 +1,55 @@
+name: Bug report
+description: Something is broken or produces wrong timing
+title: "[Bug]: "
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please do not attach copyrighted audio or lyrics. A short synthetic sample or a description is enough.
+  - type: input
+    id: version
+    attributes:
+      label: LyricLoom version
+      description: Shown in Help > About or by `lyricloom --version`.
+      placeholder: "2.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - Windows with WSL/ROCm
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include the exact steps and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Diagnostics
+      description: Paste the output of `lyricloom doctor` (remove personal paths if you prefer).
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: For a single song, the relevant `log.txt` from the work cache; for a crash, the terminal output.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I am using the latest release.
+        - label: I searched existing issues.

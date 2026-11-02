@@ -1,0 +1,16 @@
+{
+  "sgc": false,
+  "sfy": false,
+  "qfy": false,
+  "transUser": {"id": 1, "status": 99, "demand": 1, "userid": 1, "nickname": "test-user", "uptime": 0},
+  "lyricUser": {"id": 2, "status": 99, "demand": 0, "userid": 2, "nickname": "test-contributor", "uptime": 0},
+  "lrc": {
+    "version": 4,
+    "lyric": "{\"t\":0,\"c\":[{\"tx\":\"作词: \"},{\"tx\":\"Test Writer\"}]}\n{\"t\":1000,\"c\":[{\"tx\":\"作曲: \"},{\"tx\":\"Test Composer\"}]}\n[00:01.00]試験用の歌詞が流れる\n[00:03.00]空の向こうへ響いてゆく\n[00:05.00]\n[00:06.00]これはテストの歌\n[00:08.00]何度でも繰り返す"
+  },
+  "tlyric": {
+    "version": 1,
+    "lyric": "[by:test-user]\n[00:01.00]这是测试用的歌词\n[00:03.00]向天空的另一边回响\n[00:06.00]这是一首测试歌曲"
+  },
+  "code": 200
+}
