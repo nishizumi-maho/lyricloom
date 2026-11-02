@@ -31,6 +31,7 @@ namespace MusicBeePlugin
         private double[] _emph = new double[0];
         private Star[] _stars = new Star[0];
         private double _wallSec;
+        private string _nextSong = "";
 
         // colours
         private Color _lit, _head, _unlit, _dim, _glow, _accent;
@@ -51,21 +52,29 @@ namespace MusicBeePlugin
             public bool IsBreak;
         }
 
-        private struct Star { public double X, Y, Phase, Speed, Size; public bool Sparkle; }
+        private struct Star
+        {
+            public double X, Y, Phase, Speed, Size;
+            public bool Sparkle;
+        }
 
         public KaraokeScene(Settings s) { Apply(s); }
 
         public void Apply(Settings s)
         {
             _s = s;
-            _lit = Settings.ParseColor(s.LitColor, Color.FromRgb(255, 206, 92));
-            _head = Settings.ParseColor(s.HeadColor, Color.FromRgb(255, 255, 235));
-            _unlit = Settings.ParseColor(s.UnlitColor, Color.FromRgb(148, 150, 178));
-            _dim = Settings.ParseColor(s.DimColor, Color.FromRgb(78, 80, 104));
-            _glow = Settings.ParseColor(s.GlowColor, Color.FromRgb(255, 180, 60));
-            _accent = Settings.ParseColor(s.AccentColor, Color.FromRgb(140, 120, 255));
-            _sky = new LinearGradientBrush(Settings.ParseColor(s.BackgroundTop, Color.FromRgb(10, 10, 24)),
-                                           Settings.ParseColor(s.BackgroundBottom, Color.FromRgb(22, 16, 44)), 90);
+            // A random theme overrides the colour fields for this song. Otherwise a named preset is used
+            // directly; picking one in the settings window also copies its colours into the fields so
+            // the colour rows show it, and editing a colour switches the preset label to "Custom".
+            var theme = s.RandomTheme ? Themes.ForSong(_title) : Themes.Get(s.Theme);
+            _lit = Settings.ParseColor(theme?.Lit ?? s.LitColor, Color.FromRgb(255, 206, 92));
+            _head = Settings.ParseColor(theme?.Head ?? s.HeadColor, Color.FromRgb(255, 255, 235));
+            _unlit = Settings.ParseColor(theme?.Unlit ?? s.UnlitColor, Color.FromRgb(148, 150, 178));
+            _dim = Settings.ParseColor(theme?.Dim ?? s.DimColor, Color.FromRgb(78, 80, 104));
+            _glow = Settings.ParseColor(theme?.Glow ?? s.GlowColor, Color.FromRgb(255, 180, 60));
+            _accent = Settings.ParseColor(theme?.Accent ?? s.AccentColor, Color.FromRgb(140, 120, 255));
+            _sky = new LinearGradientBrush(Settings.ParseColor(theme?.BackgroundTop ?? s.BackgroundTop, Color.FromRgb(10, 10, 24)),
+                                           Settings.ParseColor(theme?.BackgroundBottom ?? s.BackgroundBottom, Color.FromRgb(22, 16, 44)), 90);
             _sky.Freeze();
             _face = new Typeface(new FontFamily(string.IsNullOrWhiteSpace(s.FontFamily) ? "Segoe UI" : s.FontFamily),
                                  FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
@@ -81,7 +90,16 @@ namespace MusicBeePlugin
             _emph = new double[_lines.Count];
             _blocks = null;
             _scrollReady = false;
+            _nextSong = "";
+            if (_s.RandomTheme) Apply(_s);
         }
+
+        public void SetNextSong(string next) => _nextSong = next ?? "";
+
+        /// <summary>Loop range in lyric time, drawn as a small badge; NaN means no loop.</summary>
+        public double LoopStart = double.NaN, LoopEnd = double.NaN;
+
+        public Color Accent => _accent;
 
         public bool HasLines => _lines.Count > 0;
 
@@ -100,7 +118,9 @@ namespace MusicBeePlugin
         private void EnsureLayout(Size size)
         {
             if (_blocks != null && size == _size) return;
-            if (size != _size || _stars.Length == 0) MakeStars(size);
+            // The star positions are normalised, so they do not need to be regenerated for a resize:
+            // reshuffling the whole sky every time the user drags the window edge looks like a glitch.
+            if (_stars.Length == 0) MakeStars(size);
             _size = size;
             _basePx = Math.Max(18, Math.Min(110, size.Height / 13)) * Math.Max(0.4, Math.Min(2.5, _s.TextScale));
             var width = Math.Max(80, (size.Width - 2 * Margin(size)) / 1.09);   // room for the current line growing
@@ -122,8 +142,16 @@ namespace MusicBeePlugin
 
         private static double Margin(Size size) => Math.Max(24, size.Width * 0.05);
 
-        private FormattedText Text(string s, double px) =>
-            new FormattedText(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, _face, px, Brushes.White, _dpi);
+        private FormattedText Text(string s, double px, double maxWidth = double.PositiveInfinity)
+        {
+            var ft = new FormattedText(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, _face, px, Brushes.White, _dpi);
+            if (!double.IsInfinity(maxWidth) && maxWidth > 0)
+            {
+                ft.MaxTextWidth = maxWidth;
+                ft.Trimming = TextTrimming.CharacterEllipsis;
+            }
+            return ft;
+        }
 
         /// <summary>Greedy wrap on spaces (or between characters for text without spaces).</summary>
         private List<Row> Wrap(string text, double px, double width)
@@ -176,7 +204,8 @@ namespace MusicBeePlugin
             _stars = Enumerable.Range(0, Math.Max(0, Math.Min(900, n))).Select(_ => new Star
             {
                 X = rnd.NextDouble(), Y = rnd.NextDouble(), Phase = rnd.NextDouble() * 6.28,
-                Speed = 0.6 + rnd.NextDouble() * 1.8, Size = 0.6 + rnd.NextDouble() * 1.4, Sparkle = rnd.NextDouble() < 0.18
+                Speed = 0.6 + rnd.NextDouble() * 1.8, Size = 0.6 + rnd.NextDouble() * 1.4,
+                Sparkle = rnd.NextDouble() < 0.18
             }).ToArray();
         }
 
@@ -221,7 +250,6 @@ namespace MusicBeePlugin
             EnsureLayout(size);
             if (layer == Layer.Sky) { DrawSky(dc, size); return; }
 
-            if (_s.ShowHeader && !LyricsOnly && layer == Layer.Text) DrawHeader(dc, size);
             if (_s.ShowProgress && !LyricsOnly && !HideProgress) DrawProgress(dc, size, t, layer);
             if (_blocks.Count == 0)
             {
@@ -233,6 +261,7 @@ namespace MusicBeePlugin
             var cur = Timeline.CurrentIndex(_lines, t);
             if (cur < 0 && layer == Layer.Text) DrawCountdown(dc, size, t, mid);
 
+            var headerBottom = _s.ShowHeader && !LyricsOnly ? Math.Min(size.Height * 0.22, 180) : 0;
             for (var i = 0; i < _blocks.Count; i++)
             {
                 var b = _blocks[i];
@@ -241,12 +270,23 @@ namespace MusicBeePlugin
                 var center = top + b.Height / 2;
                 var near = Math.Max(0, 1 - Math.Abs(center - mid) / (size.Height * 0.5));
                 var fade = Smooth(Math.Min(1, near * 2.2));      // fade out towards the edges
+                if (headerBottom > 0 && center < headerBottom)
+                    fade *= Smooth(Math.Max(0, Math.Min(1, (center - headerBottom * 0.35) / (headerBottom * 0.65))));
                 if (fade <= 0.01) continue;
                 var e = _emph.Length > i ? _emph[i] : 0;
                 var scale = _s.GrowCurrentLine ? 1 + 0.08 * Smooth(e) : 1;
                 dc.PushTransform(new ScaleTransform(scale, scale, size.Width / 2, center));
                 DrawBlock(dc, layer, size, b, _lines[i], top, near, e, t, i == cur, fade);
                 dc.Pop();
+            }
+
+            if (_s.LineBursts && _s.ShowStars) DrawLineBursts(dc, layer, size, t, mid);
+            if (layer == Layer.Text)
+            {
+                DrawNextSong(dc, size, t);
+                DrawEnding(dc, size, t);
+                if (_s.ShowHeader && !LyricsOnly) DrawHeader(dc, size);
+                DrawLoopBadge(dc, size);
             }
         }
 
@@ -334,15 +374,47 @@ namespace MusicBeePlugin
         {
             dc.DrawRectangle(_sky, null, new Rect(size));
             if (!_s.ShowStars) return;
-            var starColor = Color.FromRgb(170, 172, 220);
+            DrawStars(dc, size, _wallSec);
+            if (_s.ShowShootingStars) DrawShootingStars(dc, size, _wallSec);
+        }
+
+        private void DrawStars(DrawingContext dc, Size size, double t)
+        {
+            var starColor = Mix(Color.FromRgb(170, 172, 220), _accent, 0.22);
             foreach (var st in _stars)
             {
-                var b = (Math.Sin(_wallSec * st.Speed + st.Phase) + 1) / 2;
+                var b = (Math.Sin(t * st.Speed + st.Phase) + 1) / 2;
                 var brush = Solid(Fade(starColor, 0.12 + 0.75 * b * b));
                 var p = new Point(st.X * size.Width, st.Y * size.Height);
                 if (st.Sparkle) DrawSparkle(dc, brush, p, 2.2 + st.Size * 2.4 * (0.7 + 0.3 * b));
                 else dc.DrawEllipse(brush, null, p, st.Size, st.Size);
             }
+        }
+
+        private void DrawShootingStars(DrawingContext dc, Size size, double t)
+        {
+            const double period = 17.0;
+            var index = (int)Math.Floor(t / period);
+            var local = t - index * period;
+            if (local > 1.1) return;
+            var h1 = Hash(index * 17 + 3);
+            var h2 = Hash(index * 17 + 9);
+            var h3 = Hash(index * 17 + 15);
+            var startX = 0.12 + h1 * 0.7;
+            var startY = 0.05 + h2 * 0.25;
+            var len = 0.07 + h3 * 0.09;
+            var fade = Math.Sin(Math.PI * Math.Min(1, local / 1.1));
+            var p0 = new Point((startX - len) * size.Width, (startY - len * 0.36) * size.Height);
+            var p1 = new Point((startX + local * 0.45) * size.Width, (startY + local * 0.16) * size.Height);
+            var brush = Solid(Fade(Color.FromRgb(255, 255, 236), fade * 0.85));
+            dc.DrawLine(new Pen(brush, Math.Max(1.2, size.Height / 540.0)), p0, p1);
+            dc.DrawEllipse(brush, null, p1, Math.Max(1.2, size.Height / 480.0), Math.Max(1.2, size.Height / 480.0));
+        }
+
+        private static double Hash(int n)
+        {
+            var x = Math.Sin(n * 12.9898) * 43758.5453;
+            return x - Math.Floor(x);
         }
 
         /// <summary>Four-point star of radius 1 at the origin, shared by every sparkle.</summary>
@@ -374,13 +446,73 @@ namespace MusicBeePlugin
             dc.Pop();
         }
 
+        private void DrawLineBursts(DrawingContext dc, Layer layer, Size size, double t, double mid)
+        {
+            if (_blocks == null) return;
+            var glow = layer == Layer.Glow;
+            var color = glow ? _glow : _head;
+            for (var i = 0; i < _lines.Count; i++)
+            {
+                var line = _lines[i];
+                if (line.IsBreak || line.EndMs <= line.StartMs || i >= _blocks.Count) continue;
+                var age = t - line.EndMs;
+                if (age < 0 || age > 0.8) continue;
+                var b = _blocks[i];
+                var cx = size.Width / 2;
+                var cy = mid + b.Top + b.Height / 2 - _scroll;
+                var progress = age / 0.8;
+                var alpha = 1 - progress;
+                var count = glow ? 6 : 11;
+                for (var k = 0; k < count; k++)
+                {
+                    var angle = k * 2.399963 + i * 0.73;
+                    var dist = (8 + _basePx * 1.4 * Smooth(progress)) * (0.55 + 0.45 * Hash(i * 37 + k));
+                    var p = new Point(cx + Math.Cos(angle) * dist, cy + Math.Sin(angle) * dist);
+                    var r = Math.Max(1, _basePx * 0.035 * (1 - progress * 0.45));
+                    dc.DrawEllipse(Solid(Fade(color, alpha * (glow ? 0.55 : 0.85))), null, p, r, r);
+                }
+            }
+        }
+
+        private void DrawLoopBadge(DrawingContext dc, Size size)
+        {
+            if (double.IsNaN(LoopStart)) return;
+            var px = Math.Max(11, _basePx * 0.28);
+            var ft = Text("⟲  loop", px);
+            ft.SetForegroundBrush(Solid(Fade(_accent, 0.8)));
+            var x = size.Width - Margin(size) - ft.Width;
+            var y = Math.Max(10, size.Height * 0.045);
+            dc.DrawText(ft, new Point(x, y));
+        }
+
+        private void DrawNextSong(DrawingContext dc, Size size, double t)
+        {
+            if (!_s.PartyMode || !_s.ShowNextSong || string.IsNullOrEmpty(_nextSong) || _songMs <= 0) return;
+            if (t < _songMs - 15000) return;
+            var px = Math.Max(11, _basePx * 0.3);
+            var ft = Text("A seguir: " + _nextSong, px, size.Width - 2 * Margin(size));
+            ft.SetForegroundBrush(Solid(Fade(_unlit, 0.78)));
+            var y = size.Height - Math.Max(38, size.Height * 0.1) - ft.Height;
+            dc.DrawText(ft, new Point((size.Width - ft.Width) / 2, y));
+        }
+
+        private void DrawEnding(DrawingContext dc, Size size, double t)
+        {
+            if (!_s.PartyMode || _songMs <= 0 || !string.IsNullOrEmpty(_nextSong)) return;
+            if (t < _songMs - 2500) return;
+            var px = Math.Max(12, _basePx * 0.38);
+            var pulse = (Math.Sin(_wallSec * 3) + 1) / 2;
+            DrawCentered(dc, size, "✦  thanks for singing  ✦", px, Mix(_accent, _head, 0.35 + 0.5 * pulse),
+                         size.Height - Math.Max(44, size.Height * 0.12));
+        }
+
         private void DrawHeader(DrawingContext dc, Size size)
         {
             if (string.IsNullOrEmpty(_title)) return;
             var px = Math.Max(13, _basePx * 0.42);
             var c = Mix(_accent, _head, (Math.Sin(_wallSec * 1.3) + 1) / 4);
             var y = Math.Max(10, size.Height * 0.045);
-            var ft = Text(_title, px);
+            var ft = Text(_title, px, size.Width - 2 * Margin(size) - px * 3);
             ft.SetForegroundBrush(Solid(c));
             var x = (size.Width - ft.Width) / 2;
             dc.DrawText(ft, new Point(x, y));
@@ -431,6 +563,47 @@ namespace MusicBeePlugin
             var ft = Text(s, px);
             ft.SetForegroundBrush(Solid(c));
             dc.DrawText(ft, new Point((size.Width - ft.Width) / 2, cy - ft.Height / 2));
+        }
+
+        // ---------------------------------------------------------------- interaction
+
+        /// <summary>The line under a point in the window, or -1. Used for click-to-seek.</summary>
+        public int LineAt(Point p, Size size, double t)
+        {
+            EnsureLayout(size);
+            if (_blocks == null) return -1;
+            var mid = size.Height / 2;
+            for (var i = 0; i < _blocks.Count; i++)
+            {
+                var top = mid + _blocks[i].Top - _scroll;
+                if (p.Y >= top && p.Y <= top + _blocks[i].Height) return i;
+            }
+            return -1;
+        }
+
+        public int CurrentLine(double t) => Timeline.CurrentIndex(_lines, t);
+
+        public double LineStart(int index) =>
+            index >= 0 && index < _lines.Count ? _lines[index].StartMs : double.NaN;
+
+        /// <summary>Start and end of a line, or of a short run of lines (for a practice loop).</summary>
+        public (double Start, double End) LineRange(int index, int count)
+        {
+            if (index < 0 || index >= _lines.Count) return (double.NaN, double.NaN);
+            count = Math.Max(1, count);
+            var start = _lines[index].StartMs;
+            var end = _lines[index].EndMs;
+            var taken = 1;
+            for (var k = index + 1; k < _lines.Count && taken < count; k++)
+            {
+                if (_lines[k].IsBreak) break;
+                end = Math.Max(end, _lines[k].EndMs);
+                taken++;
+            }
+            if (_lines[index].IsBreak && index + 1 < _lines.Count)
+                end = Math.Max(end, _lines[index + 1].StartMs);
+            if (end <= start) end = start + 1500;
+            return (start, end);
         }
 
         // ---------------------------------------------------------------- helpers

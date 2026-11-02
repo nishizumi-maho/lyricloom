@@ -13,6 +13,8 @@ namespace MusicBeePlugin
     {
         public Action PlayPause, Previous, Next;
         public Action<double> Seek;          // ms
+        public Action<float> SetVolume;      // 0..1
+        public Action<bool> SetMute;
     }
 
     /// <summary>Play/pause, ±10 s, previous/next and a seek bar along the bottom of the karaoke window.
@@ -23,10 +25,12 @@ namespace MusicBeePlugin
         private readonly PlayerControls _controls;
         private readonly SeekBar _seek;
         private readonly TextBlock _played = TimeText(), _length = TimeText();
-        private readonly Button _playPause;
+        private readonly Button _playPause, _mute;
+        private readonly Slider _volume;
         private readonly System.Windows.Threading.DispatcherTimer _hideTimer;
         private double _positionMs, _durationMs;
-        private bool _shown, _playing;
+        private bool _shown, _playing, _muteState;
+        private bool _updatingVolume;
 
         public TransportBar(PlayerControls controls, Color accent)
         {
@@ -39,11 +43,28 @@ namespace MusicBeePlugin
 
             _seek = new SeekBar(accent) { Height = 22, Margin = new Thickness(10, 0, 10, 0) };
             _seek.SeekRequested += f => { if (_durationMs > 0) _controls.Seek?.Invoke(f * _durationMs); };
+            _volume = new Slider
+            {
+                Minimum = 0, Maximum = 1, Value = 1, Width = 72, Height = 22, Focusable = false,
+                IsMoveToPointEnabled = true, ToolTip = "Volume", VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(2, 0, 2, 0)
+            };
+            _volume.ValueChanged += (s, e) =>
+            {
+                if (!_updatingVolume) _controls.SetVolume?.Invoke((float)e.NewValue);
+            };
+            _mute = IconButton("\uE767", "Mute (M)", 13, () => _controls.SetMute?.Invoke(!_muteState));
+            var volumeRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            volumeRow.Children.Add(_mute);
+            volumeRow.Children.Add(_volume);
+
             var seekRow = new DockPanel();
             DockPanel.SetDock(_played, Dock.Left);
             DockPanel.SetDock(_length, Dock.Right);
             seekRow.Children.Add(_played);
             seekRow.Children.Add(_length);
+            DockPanel.SetDock(volumeRow, Dock.Right);
+            seekRow.Children.Add(volumeRow);
             seekRow.Children.Add(_seek);
 
             _playPause = IconButton("", "Play / pause (space)", 30, () => _controls.PlayPause?.Invoke());
@@ -65,6 +86,9 @@ namespace MusicBeePlugin
 
         public bool IsShown => _shown;
 
+        /// <summary>The seek fill follows the current theme's accent colour.</summary>
+        public void SetAccent(Color accent) => _seek.SetAccent(accent);
+
         public void Jump(double deltaMs)
         {
             if (_durationMs <= 0) return;
@@ -72,7 +96,7 @@ namespace MusicBeePlugin
         }
 
         /// <summary>Called by the window every frame with the player's state.</summary>
-        public void Update(double positionMs, double durationMs, bool playing)
+        public void Update(double positionMs, double durationMs, bool playing, float volume, bool mute)
         {
             _positionMs = positionMs;
             _durationMs = durationMs;
@@ -80,6 +104,18 @@ namespace MusicBeePlugin
             {
                 _playing = playing;
                 ((TextBlock)_playPause.Content).Text = playing ? "" : "";
+            }
+            if (mute != _muteState)
+            {
+                _muteState = mute;
+                ((TextBlock)_mute.Content).Text = mute ? "\uE74F" : "\uE767";
+            }
+            if (!_volume.IsMouseCaptureWithin)
+            {
+                if (float.IsNaN(volume) || float.IsInfinity(volume)) volume = 1;
+                _updatingVolume = true;
+                _volume.Value = Math.Max(0, Math.Min(1, volume));
+                _updatingVolume = false;
             }
             if (!_shown) return;
             _seek.Fraction = durationMs > 0 ? positionMs / durationMs : 0;
@@ -148,15 +184,24 @@ namespace MusicBeePlugin
         /// <summary>Thin progress line; click or drag to seek (the seek happens on release).</summary>
         private sealed class SeekBar : FrameworkElement
         {
-            private readonly Brush _fill, _track = new SolidColorBrush(Color.FromArgb(70, 255, 255, 255)), _thumb = Brushes.White;
+            private Brush _fill;
+            private readonly Brush _track = new SolidColorBrush(Color.FromArgb(70, 255, 255, 255)), _thumb = Brushes.White;
             private double _fraction;
             public bool Dragging { get; private set; }
             public event Action<double> SeekRequested;
 
             public SeekBar(Color accent)
             {
-                _fill = new SolidColorBrush(accent);
+                SetAccent(accent);
                 Cursor = Cursors.Hand;
+            }
+
+            public void SetAccent(Color accent)
+            {
+                var brush = new SolidColorBrush(accent);
+                brush.Freeze();
+                _fill = brush;
+                InvalidateVisual();
             }
 
             public double Fraction

@@ -19,12 +19,25 @@ namespace MusicBeePlugin
         public string BackgroundTop = "#0A0A18";
         public string BackgroundBottom = "#16102C";
         public string AccentColor = "#8C78FF";
+        /// <summary>A named preset copied into the colour fields; empty or "Custom" means the colours
+        /// below are used as they are (so settings written by an older version keep their custom look).</summary>
+        public string Theme = "";
+        /// <summary>Pick a different preset for every song. Useful at parties and for testing.</summary>
+        public bool RandomTheme;
         public JapaneseMode Japanese = JapaneseMode.RomajiOnly;
         public bool ShowStars = true;
+        /// <summary>A comet crossing the sky every so often.</summary>
+        public bool ShowShootingStars = true;
         /// <summary>0.25 (few) to 2 (many).</summary>
         public double StarDensity = 1.0;
         public bool Glow = true;
         public bool GrowCurrentLine = true;
+        /// <summary>A small burst of stars when a line is finished.</summary>
+        public bool LineBursts = true;
+        /// <summary>Party mode: open in fullscreen on playback, hide the cursor and keep the display awake.</summary>
+        public bool PartyMode;
+        /// <summary>In party mode, show the next track during the last seconds of the song.</summary>
+        public bool ShowNextSong = true;
         /// <summary>0.5 (slow) to 2 (fast): scroll, fades and the line growing.</summary>
         public double TransitionSpeed = 1.0;
         /// <summary>Added to the lyrics' timing: positive shows them later.</summary>

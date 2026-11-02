@@ -65,6 +65,10 @@ namespace MusicBeePlugin
 
         private static RawLine ParseBody(double start, string body)
         {
+            // A trailing closing tag is often followed by a space (LYRICS BOCA and some editors write
+            // "<00:12.34> "). Without trimming, the tag becomes ordinary text and the last word stretches
+            // until the next line instead of ending where the file says it does.
+            body = (body ?? "").TrimEnd();
             var line = new RawLine { StartMs = start };
             var pos = 0;
             var pieceStart = double.NaN;

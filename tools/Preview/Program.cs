@@ -23,7 +23,12 @@ internal static class Program
     {
         var dic = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "MusicBee", "Plugins", "RomajiLyrics", "IpaDic");
         RomajiCore.Romanizer.UseFirstExistingDictionary(dic);
-        var settings = new Settings { Japanese = (JapaneseMode)int.Parse(args[2]) };
+        var settings = new Settings
+        {
+            Japanese = (JapaneseMode)int.Parse(args[2]),
+            Theme = Environment.GetEnvironmentVariable("PREVIEW_THEME") ?? "",
+            RandomTheme = Environment.GetEnvironmentVariable("PREVIEW_RANDOM") == "1"
+        };
         var lines = Timeline.Build(Lrc.Parse(File.ReadAllText(args[0])), 60000, settings.Japanese,
                                    s => RomajiCore.Romanizer.ToRomaji(s) ?? "");
         var scene = new KaraokeScene(settings);
@@ -44,12 +49,13 @@ internal static class Program
             }
             if (Environment.GetEnvironmentVariable("PREVIEW_TRANSPORT") == "1")
             {
-                var bar = new TransportBar(new PlayerControls(), Color.FromRgb(255, 206, 92));
+                var bar = new TransportBar(new PlayerControls(), scene.Accent);
                 bar.Show(true);
                 bar.BeginAnimation(UIElement.OpacityProperty, null);
                 bar.Opacity = 1;
-                bar.Update(t, 60000, true);
+                bar.Update(t, 60000, true, 0.7f, false);
                 grid.Children.Add(bar);
+                scene.HideProgress = true;
             }
             grid.Measure(size);
             grid.Arrange(new Rect(size));

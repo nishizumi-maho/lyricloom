@@ -84,8 +84,14 @@ namespace MusicBeePlugin
         {
             try
             {
-                File.AppendAllText(Path.Combine(StorageFolder, "mb_StarryKaraoke.log"),
-                                   $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
+                var path = Path.Combine(StorageFolder, "mb_StarryKaraoke.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 1_000_000)
+                {
+                    var old = path + ".old";
+                    if (File.Exists(old)) File.Delete(old);
+                    File.Move(path, old);
+                }
+                File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
             }
             catch (Exception) { }
         }
@@ -111,7 +117,27 @@ namespace MusicBeePlugin
                 case NotificationType.NowPlayingLyricsReady:
                     if (_window != null) LoadSong();
                     break;
+                case NotificationType.PlayStateChanged:
+                    if (_settings.PartyMode)
+                        ThreadPool.QueueUserWorkItem(_ =>
+                        {
+                            try
+                            {
+                                if (_mb.Player_GetPlayState() == PlayState.Playing) OnUi(PartyStart);
+                            }
+                            catch (Exception) { }
+                        });
+                    break;
             }
+        }
+
+        /// <summary>Party mode: bring the karaoke forward and fill the screen when playback starts.</summary>
+        private void PartyStart()
+        {
+            if (!_settings.PartyMode) return;
+            if (_window == null) Open();
+            _window?.Activate();
+            _window?.SetFullscreen(true);
         }
 
         // ---------------------------------------------------------------- windows
@@ -130,19 +156,26 @@ namespace MusicBeePlugin
                 PlayPause = () => OnPlayer(() => _mb.Player_PlayPause()),
                 Previous = () => OnPlayer(() => _mb.Player_PlayPreviousTrack()),
                 Next = () => OnPlayer(() => _mb.Player_PlayNextTrack()),
-                Seek = ms => OnPlayer(() => _mb.Player_SetPosition((int)Math.Max(0, ms)))
+                Seek = ms => OnPlayer(() => _mb.Player_SetPosition((int)Math.Max(0, ms))),
+                SetVolume = v => OnPlayer(() => _mb.Player_SetVolume(Math.Max(0, Math.Min(1, v)))),
+                SetMute = m => OnPlayer(() => _mb.Player_SetMute(m))
             };
             StartPolling();
-            var w = new KaraokeWindow(_settings, () => (_polledPosition, _polledPlaying), controls);
+            var w = new KaraokeWindow(_settings,
+                                      () => (BitConverter.Int64BitsToDouble(Interlocked.Read(ref _polledPositionBits)),
+                                             _polledPlaying, _polledVolume, _polledMute),
+                                      controls);
             ElementHost.EnableModelessKeyboardInterop(w);
             w.SettingsRequested += (s, e) => OpenSettings();
             w.RecordRequested += (s, e) => RecordVideo();
             w.SkipIntroRequested += (s, e) => SkipIntro(force: true);
+            w.OffsetChanged += ms => { _settings.LyricsOffsetMs = ms; SaveSettings(); };
             w.JapaneseModeChosen += mode =>
             {
                 _settings.Japanese = mode;
                 SaveSettings();
                 w.ApplySettings(_settings);
+                w.RefreshMenu();
                 LoadSong();
             };
             w.Closing += (s, e) => w.StoreBounds(_settings);
@@ -159,6 +192,7 @@ namespace MusicBeePlugin
             // window open does not make it open again, and crash again, at every start.
             _window = w;
             w.Show();
+            if (_settings.PartyMode && _polledPlaying) w.SetFullscreen(true);
             LoadSong();
         }
 
@@ -169,7 +203,11 @@ namespace MusicBeePlugin
         // going back in a song). A background timer reads it, and commands run on the thread pool.
         private System.Threading.Timer _pollTimer;
         private volatile bool _polledPlaying;
-        private double _polledPosition;   // written by the poll timer only; double reads are atomic on x64 and fine for display on x86
+        // A double is not guaranteed atomic on 32-bit Windows, and MusicBee is a 32-bit process: keep
+        // the bits in a long and read/write them through Interlocked.
+        private long _polledPositionBits;
+        private float _polledVolume = 1f;
+        private bool _polledMute;
 
         private void StartPolling()
         {
@@ -179,8 +217,10 @@ namespace MusicBeePlugin
                 if (_window == null) return;
                 try
                 {
-                    _polledPosition = _mb.Player_GetPosition();
+                    Interlocked.Exchange(ref _polledPositionBits, BitConverter.DoubleToInt64Bits(_mb.Player_GetPosition()));
                     _polledPlaying = _mb.Player_GetPlayState() == PlayState.Playing;
+                    _polledVolume = _mb.Player_GetVolume();
+                    _polledMute = _mb.Player_GetMute();
                 }
                 catch (Exception) { }
             }, null, 0, 100);
@@ -216,7 +256,9 @@ namespace MusicBeePlugin
                 _settings = dlg.Result;
                 SaveSettings();
                 _window?.ApplySettings(_settings);
+                _window?.RefreshMenu();
                 if (_settings.Japanese != before) LoadSong();
+                if (_settings.PartyMode && _polledPlaying) PartyStart();
             };
             _settingsWindow = dlg;
             dlg.Show();
@@ -287,7 +329,15 @@ namespace MusicBeePlugin
             var args = $"--lrc {Q(lrcPath)} --audio {Q(audio)} --out {Q(target)} --settings {Q(Path.Combine(work, settingsName))} " +
                        $"--title {Q(header)} --duration {duration.ToString(System.Globalization.CultureInfo.InvariantCulture)} --dict {Q(dictDir)}";
             Log("record: " + target);
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, args) { UseShellExecute = false, WorkingDirectory = dll });
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, args) { UseShellExecute = false, WorkingDirectory = dll });
+            }
+            catch (Exception e)
+            {
+                Log("could not start the recorder: " + e);
+                Message("Could not start StarryKaraoke.Recorder.exe. See mb_StarryKaraoke.log for details.");
+            }
         }
 
         private static string SafeName(string s)
@@ -319,16 +369,32 @@ namespace MusicBeePlugin
                     var lines = Timeline.Build(raw, duration, mode, Romanize);
                     var header = string.IsNullOrEmpty(artist) ? title : title + "   —   " + artist;
                     if (mode != JapaneseMode.JapaneseOnly && Lrc.IsJapanese(header)) header = Lrc.Tidy(Romanize(header)) is var r && r.Length > 0 ? r : header;
+                    var next = NextSongText();
                     OnUi(() =>
                     {
                         if (gen != _songGeneration) return;
                         _lines = lines;
                         _window?.SetSong(lines, header, duration);
+                        _window?.SetNextSong(next);
                         if (_settings.AutoSkipIntro) SkipIntro(force: false);
                     });
                 }
                 catch (Exception e) { Log("loading lyrics failed: " + e); }
             });
+        }
+
+        private string NextSongText()
+        {
+            try
+            {
+                var index = _mb.NowPlayingList_GetNextIndex(1);
+                if (index < 0) return "";
+                var title = _mb.NowPlayingList_GetFileTag(index, MetaDataType.TrackTitle) ?? "";
+                var artist = _mb.NowPlayingList_GetFileTag(index, MetaDataType.Artist) ?? "";
+                if (string.IsNullOrEmpty(title)) return "";
+                return string.IsNullOrEmpty(artist) ? title : title + "   —   " + artist;
+            }
+            catch (Exception) { return ""; }
         }
 
         private List<KaraokeLine> _lines = new List<KaraokeLine>();

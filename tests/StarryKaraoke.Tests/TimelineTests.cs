@@ -35,6 +35,14 @@ namespace StarryKaraoke.Tests
         }
 
         [Fact]
+        public void Trailing_space_after_the_closing_word_tag_still_closes_the_line()
+        {
+            var l = Lrc.Parse("[00:01.00]hello <00:02.00> \n")[0];
+            Assert.Equal(2000, l.EndTagMs);
+            Assert.Equal("hello ", l.Text);
+        }
+
+        [Fact]
         public void Word_timing_lights_each_word_at_its_tag()
         {
             var line = Timeline.Build(Lrc.Parse(Words), 60000, JapaneseMode.RomajiOnly, null)[0];

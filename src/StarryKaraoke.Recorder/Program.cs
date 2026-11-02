@@ -69,7 +69,7 @@ namespace StarryKaraoke.Recorder
             };
             job.Settings = a.TryGetValue("settings", out var sp) && File.Exists(sp)
                 ? Settings.Load(Path.GetDirectoryName(sp), Path.GetFileName(sp)) : new Settings();
-            var res = (job.Settings.VideoResolution ?? "1920x1080").Split('x');
+            var res = (job.Settings.VideoResolution ?? "1920x1080").Split(new[] { 'x', 'X' });
             if (res.Length == 2 && int.TryParse(res[0], out var w) && int.TryParse(res[1], out var h) && w >= 320 && h >= 240)
             { job.Width = w & ~1; job.Height = h & ~1; }
             job.Fps = Math.Max(10, Math.Min(240, job.Settings.VideoFps));

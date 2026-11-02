@@ -1,11 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
+using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 
 namespace MusicBeePlugin
 {
@@ -31,7 +36,8 @@ namespace MusicBeePlugin
     }
 
     /// <summary>The karaoke window. F11 or a double-click toggles fullscreen, Esc leaves it, right-click
-    /// opens the menu.</summary>
+    /// opens the menu. In fullscreen the cursor hides after a moment, and Party Mode keeps the display
+    /// awake while the song plays.</summary>
     internal sealed class KaraokeWindow : Window
     {
         private sealed class SceneLayer : FrameworkElement
@@ -42,16 +48,26 @@ namespace MusicBeePlugin
             protected override void OnRender(DrawingContext dc) => _owner._scene.Render(_layer, dc, RenderSize, _owner._songTime);
         }
 
+        [DllImport("kernel32.dll")]
+        private static extern uint SetThreadExecutionState(uint esFlags);
+        private const uint ES_CONTINUOUS = 0x80000000, ES_SYSTEM_REQUIRED = 0x1, ES_DISPLAY_REQUIRED = 0x2;
+
         private readonly KaraokeScene _scene;
         private readonly PlaybackClock _clock = new PlaybackClock();
         private readonly SceneLayer _sky, _glow, _text;
         private readonly BlurEffect _blur = new BlurEffect { KernelType = KernelType.Gaussian, RenderingBias = RenderingBias.Performance };
-        private readonly Func<(double PositionMs, bool Playing)> _poll;
+        private readonly Func<(double PositionMs, bool Playing, float Volume, bool Mute)> _poll;
         private readonly Stopwatch _frameWatch = Stopwatch.StartNew();
+        private readonly Grid _root;
+        private readonly Border _toast;
+        private readonly TextBlock _toastText;
+        private readonly DispatcherTimer _cursorTimer;
+        private readonly DispatcherTimer _toastTimer;
         private double _lastFrame, _lastPoll = -1e9;
         private double _songTime;
         private Settings _settings;
         private bool _fullscreen;
+        private bool _awake;
         private Rect _restore;
 
         /// <summary>The commands the window's buttons and keys use (for tests).</summary>
@@ -61,14 +77,23 @@ namespace MusicBeePlugin
         public event EventHandler RecordRequested;
         public event EventHandler SkipIntroRequested;
         public event Action<JapaneseMode> JapaneseModeChosen;
+        /// <summary>The user nudged the lyric delay with [ or ]; the plugin saves it.</summary>
+        public event Action<int> OffsetChanged;
 
         private readonly TransportBar _transport;
         private readonly PlayerControls _controls;
         private double _songMs;
         private bool _playing;
+        private float _volume = 1f;
+        private bool _mute;
         private Point _lastMouse;
+        private bool _clickStarted;
+        private Point _clickStart;
+        private double _suppressDoubleClick;
+        private double _loopStart = double.NaN, _loopEnd = double.NaN;
+        private double _loopHoldUntil;
 
-        public KaraokeWindow(Settings settings, Func<(double, bool)> poll, PlayerControls controls)
+        public KaraokeWindow(Settings settings, Func<(double PositionMs, bool Playing, float Volume, bool Mute)> poll, PlayerControls controls)
         {
             RaiseFrameRate();
             // after any player command, read the position on the next frame instead of up to 200 ms later.
@@ -80,7 +105,9 @@ namespace MusicBeePlugin
                 PlayPause = () => { player.PlayPause?.Invoke(); _lastPoll = -1e9; },
                 Previous = () => { player.Previous?.Invoke(); _lastPoll = -1e9; },
                 Next = () => { player.Next?.Invoke(); _lastPoll = -1e9; },
-                Seek = ms => { player.Seek?.Invoke(ms); _lastPoll = -1e9; }
+                Seek = ms => { player.Seek?.Invoke(ms); _lastPoll = -1e9; },
+                SetVolume = v => { player.SetVolume?.Invoke(v); _lastPoll = -1e9; },
+                SetMute = m => { player.SetMute?.Invoke(m); _lastPoll = -1e9; }
             };
             _settings = settings;
             _poll = poll;
@@ -102,30 +129,71 @@ namespace MusicBeePlugin
             _sky = new SceneLayer(this, KaraokeScene.Layer.Sky);
             _glow = new SceneLayer(this, KaraokeScene.Layer.Glow) { Effect = _blur, Opacity = 0.85 };
             _text = new SceneLayer(this, KaraokeScene.Layer.Text);
-            var grid = new Grid { Background = Brushes.Transparent, ClipToBounds = true };
-            grid.Children.Add(_sky);
-            grid.Children.Add(_glow);
-            grid.Children.Add(_text);
-            _transport = new TransportBar(_controls, Settings.ParseColor(settings.LitColor, Color.FromRgb(255, 206, 92)));
-            grid.Children.Add(_transport);
+            _root = new Grid { Background = Brushes.Transparent, ClipToBounds = true };
+            _root.Children.Add(_sky);
+            _root.Children.Add(_glow);
+            _root.Children.Add(_text);
+            _transport = new TransportBar(_controls, _scene.Accent);
+            _root.Children.Add(_transport);
+
+            _toastText = new TextBlock
+            {
+                Foreground = Brushes.White, FontSize = 14, TextAlignment = TextAlignment.Center,
+                FontFamily = new FontFamily("Segoe UI, Yu Gothic UI")
+            };
+            _toast = new Border
+            {
+                Child = _toastText, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 26, 0, 0), Padding = new Thickness(14, 7, 14, 7),
+                CornerRadius = new CornerRadius(9), BorderThickness = new Thickness(0), Opacity = 0,
+                IsHitTestVisible = false, Background = new SolidColorBrush(Color.FromArgb(205, 8, 8, 20))
+            };
+            _root.Children.Add(_toast);
+
+            _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.7) };
+            _toastTimer.Tick += (s, e) =>
+            {
+                _toastTimer.Stop();
+                _toast.BeginAnimation(OpacityProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(300))
+                { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
+            };
+            _cursorTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.5) };
+            _cursorTimer.Tick += (s, e) =>
+            {
+                _cursorTimer.Stop();
+                if (_transport.IsMouseOver) { _cursorTimer.Start(); return; }
+                if (_fullscreen) Mouse.OverrideCursor = Cursors.None;
+            };
+
             MouseMove += (s, e) =>
             {
                 var p = e.GetPosition(this);
                 if ((p - _lastMouse).Length < 2) return;   // ignore the jitter of a still mouse
                 _lastMouse = p;
                 _transport.OnWindowMouseMove(p, ActualHeight);
+                OnMouseActivity();
             };
             MouseLeave += (s, e) => _transport.Show(false);
-            Content = grid;
+            MouseLeftButtonDown += OnMouseDown;
+            MouseLeftButtonUp += OnMouseUp;
+            MouseDoubleClick += OnDoubleClick;
+            Content = _root;
             TextOptions.SetTextRenderingMode(this, TextRenderingMode.Grayscale);
             RenderOptions.SetEdgeMode(_sky, EdgeMode.Unspecified);
 
             ContextMenu = BuildMenu();
             PreviewKeyDown += OnKey;   // preview: arrows and space reach us before any control can take them
-            MouseDoubleClick += (s, e) => { if (e.ChangedButton == MouseButton.Left && !_transport.IsMouseOver) SetFullscreen(!_fullscreen); };
             Loaded += (s, e) => { if (settings.Fullscreen) SetFullscreen(true); };
             CompositionTarget.Rendering += OnFrame;
-            Closed += (s, e) => CompositionTarget.Rendering -= OnFrame;
+            Closed += (s, e) =>
+            {
+                CompositionTarget.Rendering -= OnFrame;
+                _cursorTimer.Stop();
+                _toastTimer.Stop();
+                Mouse.OverrideCursor = null;
+                KeepAwake(false);
+            };
+            Deactivated += (s, e) => Mouse.OverrideCursor = null;
             ApplyBlur();
         }
 
@@ -142,16 +210,26 @@ namespace MusicBeePlugin
             _scene.SetSong(lines, title, songMs);
             _songMs = songMs;
             _lastPoll = -1e9;
+            _loopStart = _loopEnd = double.NaN;
+            _scene.LoopStart = _scene.LoopEnd = double.NaN;
+            _transport.SetAccent(_scene.Accent);
         }
+
+        public void SetNextSong(string next) => _scene.SetNextSong(next);
 
         public void ApplySettings(Settings s)
         {
             _settings = s;
             _scene.Apply(s);
             _scene.LyricsOnly = _fullscreen && s.FullscreenLyricsOnly;
+            _transport.SetAccent(_scene.Accent);
             ApplyBlur();
-            ContextMenu = BuildMenu();
+            if (!s.PartyMode) KeepAwake(false);
         }
+
+        /// <summary>Rebuilds the right-click menu after a change that affects its check marks (the
+        /// Japanese mode). Colour and slider previews do not need this.</summary>
+        public void RefreshMenu() => ContextMenu = BuildMenu();
 
         private void ApplyBlur() => _glow.Visibility = _settings.Glow ? Visibility.Visible : Visibility.Collapsed;
 
@@ -223,21 +301,47 @@ namespace MusicBeePlugin
                 _lastPoll = now;
                 try
                 {
-                    var (pos, playing) = _poll();
+                    var (pos, playing, volume, mute) = _poll();
                     _clock.Sync(pos, playing);
                     _playing = playing;
+                    _volume = volume;
+                    _mute = mute;
                 }
                 catch (Exception) { }
             }
             _songTime = _clock.NowMs() - _settings.LyricsOffsetMs;
+            KeepAwake(_settings.PartyMode && _playing);
+            CheckLoop(now);
+
             var size = _text.RenderSize;
             _blur.Radius = Math.Max(8, Math.Min(40, size.Height / 26));
             _scene.Update(dt, _songTime, size);
             _sky.InvalidateVisual();
             _glow.InvalidateVisual();
             _text.InvalidateVisual();
-            _transport.Update(_clock.NowMs(), _songMs, _playing);
+            _transport.Update(_clock.NowMs(), _songMs, _playing, _volume, _mute);
             _scene.HideProgress = _transport.IsShown;
+        }
+
+        private void CheckLoop(double now)
+        {
+            if (double.IsNaN(_loopStart) || double.IsNaN(_loopEnd)) return;
+            if (_songTime < _loopEnd + 120 || now < _loopHoldUntil) return;
+            var target = Math.Max(0, _loopStart + _settings.LyricsOffsetMs);
+            if (_songMs > 0) target = Math.Min(target, Math.Max(0, _songMs - 200));
+            _controls.Seek?.Invoke(target);
+            _loopHoldUntil = now + 0.65;
+        }
+
+        private void KeepAwake(bool on)
+        {
+            if (on == _awake) return;
+            _awake = on;
+            try
+            {
+                SetThreadExecutionState(on ? ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED : ES_CONTINUOUS);
+            }
+            catch (Exception) { }
         }
 
         private void OnKey(object sender, KeyEventArgs e)
@@ -248,11 +352,130 @@ namespace MusicBeePlugin
             else if (e.Key == Key.Space) { _controls.PlayPause?.Invoke(); _transport.Show(true); }
             else if (e.Key == Key.Left) { _transport.Jump(-10000); _transport.Show(true); }
             else if (e.Key == Key.Right) { _transport.Jump(10000); _transport.Show(true); }
+            else if (e.Key == Key.L) ToggleLoop(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift));
+            else if (e.Key == Key.OemOpenBrackets) NudgeOffset(-100);
+            else if (e.Key == Key.OemCloseBrackets) NudgeOffset(100);
+            else if ((e.Key == Key.D0 || e.Key == Key.NumPad0) && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) NudgeOffset(-_settings.LyricsOffsetMs);
+            else if (e.Key == Key.M) ToggleMute();
+            else if (e.Key == Key.F12) SaveScreenshot();
             else return;
             e.Handled = true;
         }
 
-        private void SetFullscreen(bool on)
+        private void NudgeOffset(int delta)
+        {
+            var value = Math.Max(-10000, Math.Min(10000, _settings.LyricsOffsetMs + delta));
+            _settings.LyricsOffsetMs = value;
+            OffsetChanged?.Invoke(value);
+            ShowToast(value == 0 ? "Lyrics delay reset" : $"Lyrics delay {value:+0;-0;0} ms");
+        }
+
+        private void ToggleMute()
+        {
+            _mute = !_mute;
+            _controls.SetMute?.Invoke(_mute);
+            ShowToast(_mute ? "Muted" : "Sound on");
+        }
+
+        private void ToggleLoop(bool section)
+        {
+            if (!double.IsNaN(_loopStart))
+            {
+                _loopStart = _loopEnd = double.NaN;
+                _scene.LoopStart = _scene.LoopEnd = double.NaN;
+                ShowToast("Loop off");
+                RefreshMenu();
+                return;
+            }
+            var index = _scene.CurrentLine(_songTime);
+            if (index < 0) index = 0;
+            var (start, end) = _scene.LineRange(index, section ? 4 : 1);
+            if (double.IsNaN(start) || double.IsNaN(end)) { ShowToast("No lyrics to loop"); return; }
+            if (_songMs > 0) end = Math.Min(end, _songMs);
+            _loopStart = start;
+            _loopEnd = end;
+            _scene.LoopStart = start;
+            _scene.LoopEnd = end;
+            ShowToast(section ? "Looping this section" : "Looping this line");
+            _controls.Seek?.Invoke(Math.Max(0, start + _settings.LyricsOffsetMs));
+            _loopHoldUntil = _frameWatch.Elapsed.TotalSeconds + 0.7;
+            RefreshMenu();
+        }
+
+        private void SaveScreenshot()
+        {
+            try
+            {
+                var w = (int)Math.Round(ActualWidth);
+                var h = (int)Math.Round(ActualHeight);
+                if (w < 2 || h < 2) return;
+                _toast.BeginAnimation(OpacityProperty, null);
+                _toast.Opacity = 0;
+                var bmp = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+                bmp.Render(_root);
+                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Starry Karaoke");
+                Directory.CreateDirectory(dir);
+                var path = Path.Combine(dir, $"Starry Karaoke {DateTime.Now:yyyy-MM-dd HH-mm-ss}.png");
+                var enc = new PngBitmapEncoder();
+                enc.Frames.Add(BitmapFrame.Create(bmp));
+                using (var f = File.Create(path)) enc.Save(f);
+                try { Clipboard.SetImage(bmp); } catch (Exception) { }
+                ShowToast("Screenshot saved");
+            }
+            catch (Exception)
+            {
+                ShowToast("Could not save the screenshot");
+            }
+        }
+
+        private void ShowToast(string text)
+        {
+            _toastText.Text = text;
+            _toast.BeginAnimation(OpacityProperty, null);
+            _toast.Opacity = 1;
+            _toastTimer.Stop();
+            _toastTimer.Start();
+        }
+
+        private void OnMouseActivity()
+        {
+            Mouse.OverrideCursor = null;
+            _cursorTimer.Stop();
+            if (_fullscreen) _cursorTimer.Start();
+        }
+
+        private void OnMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton != MouseButton.Left || _transport.IsMouseOver) return;
+            _clickStarted = true;
+            _clickStart = e.GetPosition(this);
+        }
+
+        private void OnMouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (!_clickStarted || e.ChangedButton != MouseButton.Left) { _clickStarted = false; return; }
+            _clickStarted = false;
+            if (_transport.IsMouseOver) return;
+            var p = e.GetPosition(this);
+            if ((p - _clickStart).Length > 5) return;   // a drag, not a click
+            var index = _scene.LineAt(p, _text.RenderSize, _songTime);
+            if (index < 0) return;
+            var start = _scene.LineStart(index);
+            if (double.IsNaN(start)) return;
+            _suppressDoubleClick = _frameWatch.Elapsed.TotalSeconds + 0.45;
+            _controls.Seek?.Invoke(Math.Max(0, start + _settings.LyricsOffsetMs));
+            ShowToast("Jumped to line");
+            e.Handled = true;
+        }
+
+        private void OnDoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (e.ChangedButton != MouseButton.Left || _transport.IsMouseOver) return;
+            if (_frameWatch.Elapsed.TotalSeconds < _suppressDoubleClick) return;
+            SetFullscreen(!_fullscreen);
+        }
+
+        internal void SetFullscreen(bool on)
         {
             if (on == _fullscreen) return;
             if (on)
@@ -262,6 +485,8 @@ namespace MusicBeePlugin
                 WindowStyle = WindowStyle.None;
                 ResizeMode = ResizeMode.NoResize;
                 WindowState = WindowState.Maximized;
+                _cursorTimer.Stop();
+                _cursorTimer.Start();
             }
             else
             {
@@ -269,6 +494,8 @@ namespace MusicBeePlugin
                 WindowStyle = WindowStyle.SingleBorderWindow;
                 ResizeMode = ResizeMode.CanResize;
                 if (_restore.Width > 0) { Left = _restore.Left; Top = _restore.Top; Width = _restore.Width; Height = _restore.Height; }
+                _cursorTimer.Stop();
+                Mouse.OverrideCursor = null;
             }
             _fullscreen = on;
             _scene.LyricsOnly = on && _settings.FullscreenLyricsOnly;
@@ -284,6 +511,16 @@ namespace MusicBeePlugin
             var skip = new MenuItem { Header = "Skip intro (P)" };
             skip.Click += (s, e) => SkipIntroRequested?.Invoke(this, EventArgs.Empty);
             menu.Items.Add(skip);
+
+            var loop = new MenuItem { Header = "Loop current line (L)", IsCheckable = true, IsChecked = !double.IsNaN(_loopStart) };
+            loop.Click += (s, e) => ToggleLoop(false);
+            menu.Items.Add(loop);
+            var section = new MenuItem { Header = "Loop this section (Shift+L)" };
+            section.Click += (s, e) => ToggleLoop(true);
+            menu.Items.Add(section);
+            var shot = new MenuItem { Header = "Save screenshot (F12)" };
+            shot.Click += (s, e) => SaveScreenshot();
+            menu.Items.Add(shot);
 
             var jp = new MenuItem { Header = "Japanese" };
             foreach (var (mode, label) in new[] { (JapaneseMode.RomajiOnly, "Romaji only"),

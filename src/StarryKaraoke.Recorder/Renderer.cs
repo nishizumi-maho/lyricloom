@@ -10,6 +10,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using MusicBeePlugin;
 
+
 namespace StarryKaraoke.Recorder
 {
     /// <summary>
@@ -23,13 +24,14 @@ namespace StarryKaraoke.Recorder
     {
         private readonly Job _job;
         private volatile bool _cancel;
+        private volatile bool _userCancel;
         private int _framesDone;
         public event Action<int, int> Progress;     // frames done, total
         public event Action<string> Status;
         public event Action<Exception> Finished;    // null on success
 
         public Renderer(Job job) { _job = job; }
-        public void Cancel() => _cancel = true;
+        public void Cancel() { _userCancel = true; _cancel = true; }
 
         public void Start() => new Thread(Run) { IsBackground = true, Name = "Starry Karaoke recorder" }.Start();
 
@@ -50,7 +52,9 @@ namespace StarryKaraoke.Recorder
                 var startMs = 0.0;
                 if (s.VideoSkipIntro && Timeline.IntroSkipTarget(lines, s.IntroLeadMs) is double skip)
                     startMs = Math.Max(0, skip + s.LyricsOffsetMs);
+                startMs = Math.Min(startMs, Math.Max(0, _job.DurationMs - 1000));
                 var total = (int)Math.Ceiling((_job.DurationMs - startMs) / 1000.0 * fps);
+                if (total <= 0) throw new ArgumentException("The video would have no frames. Check the intro-skip setting and the song duration.");
 
                 Status?.Invoke("Testing the video encoder...");
                 var encoder = PickEncoder();
@@ -72,6 +76,7 @@ namespace StarryKaraoke.Recorder
                     return th;
                 }).ToList();
                 foreach (var th in threads) th.Join();
+                if (_userCancel) throw new OperationCanceledException();
                 var failed = errors.FirstOrDefault(e => e != null && !(e is OperationCanceledException));
                 if (failed != null) throw failed;
                 if (_cancel) throw new OperationCanceledException();

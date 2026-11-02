@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Windows;
@@ -14,6 +15,10 @@ namespace MusicBeePlugin
         private readonly Settings _edit;
         private readonly Action<Settings> _preview;
         private readonly StackPanel _panel = new StackPanel { Margin = new Thickness(16) };
+        private readonly List<Action> _colorRows = new List<Action>();
+        private ComboBox _themeCombo;
+        private CheckBox _randomThemeCheck;
+        private bool _settingTheme;
         public Settings Result { get; private set; }
 
         public SettingsWindow(Settings current, Action<Settings> preview)
@@ -26,6 +31,26 @@ namespace MusicBeePlugin
             SizeToContent = SizeToContent.Height;
             ResizeMode = ResizeMode.NoResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
+
+            Section("Theme");
+            var currentTheme = Themes.Get(_edit.Theme) != null ? _edit.Theme : Themes.Custom;
+            _themeCombo = new ComboBox { ItemsSource = Themes.Names, SelectedItem = currentTheme };
+            _themeCombo.SelectionChanged += (s, e) =>
+            {
+                if (_settingTheme) return;
+                var name = _themeCombo.SelectedItem as string ?? Themes.Custom;
+                var palette = Themes.Get(name);
+                Set(x =>
+                {
+                    x.Theme = name;
+                    palette?.CopyTo(x);
+                });
+                if (_randomThemeCheck != null && _randomThemeCheck.IsChecked == true)
+                    _randomThemeCheck.IsChecked = false;
+                RefreshColors();
+            };
+            Row("Preset", _themeCombo);
+            _randomThemeCheck = Check("Random theme for each song", _edit.RandomTheme, v => Set(x => x.RandomTheme = v));
 
             Section("Text");
             var fonts = Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(x => x).ToList();
@@ -56,7 +81,9 @@ namespace MusicBeePlugin
 
             Section("Effects");
             Check("Stars", _edit.ShowStars, v => Set(x => x.ShowStars = v));
+            Check("Comet passing by", _edit.ShowShootingStars, v => Set(x => x.ShowShootingStars = v));
             Row("Number of stars", Slider(0.25, 2.0, _edit.StarDensity, v => Set(x => x.StarDensity = v)));
+            Check("Burst of stars at each line end", _edit.LineBursts, v => Set(x => x.LineBursts = v));
             Check("Glow on lit lyrics", _edit.Glow, v => Set(x => x.Glow = v));
             Check("Current line grows", _edit.GrowCurrentLine, v => Set(x => x.GrowCurrentLine = v));
             Row("Transition speed", Slider(0.5, 2.0, _edit.TransitionSpeed, v => Set(x => x.TransitionSpeed = v)));
@@ -73,6 +100,10 @@ namespace MusicBeePlugin
             if (_edit.WindowFps > 0) winFps.SelectedItem = _edit.WindowFps.ToString(CultureInfo.InvariantCulture);
             winFps.SelectionChanged += (s, e) => Set(x => x.WindowFps = winFps.SelectedIndex <= 0 ? 0 : int.Parse((string)winFps.SelectedItem, CultureInfo.InvariantCulture));
             Row("Window FPS", winFps);
+
+            Section("Party mode");
+            Check("Fullscreen on play, hide cursor, keep the display awake", _edit.PartyMode, v => Set(x => x.PartyMode = v));
+            Check("Show the next song near the end", _edit.ShowNextSong, v => Set(x => x.ShowNextSong = v));
 
             Section("Instrumental intro");
             Check("Skip the intro automatically on playback", _edit.AutoSkipIntro, v => Set(x => x.AutoSkipIntro = v));
@@ -121,6 +152,11 @@ namespace MusicBeePlugin
             _preview(_edit.Clone());
         }
 
+        private void RefreshColors()
+        {
+            foreach (var refresh in _colorRows) refresh();
+        }
+
         private void Section(string title) =>
             _panel.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, FontSize = 14, Margin = new Thickness(0, _panel.Children.Count == 0 ? 0 : 14, 0, 6) });
 
@@ -136,12 +172,13 @@ namespace MusicBeePlugin
             _panel.Children.Add(g);
         }
 
-        private void Check(string label, bool value, Action<bool> changed)
+        private CheckBox Check(string label, bool value, Action<bool> changed)
         {
             var c = new CheckBox { Content = label, IsChecked = value, Margin = new Thickness(0, 3, 0, 3) };
             c.Checked += (s, e) => changed(true);
             c.Unchecked += (s, e) => changed(false);
             _panel.Children.Add(c);
+            return c;
         }
 
         private static Slider Slider(double min, double max, double value, Action<double> changed)
@@ -155,7 +192,14 @@ namespace MusicBeePlugin
         {
             var swatch = new Border { Width = 46, Height = 20, BorderBrush = Brushes.Gray, BorderThickness = new Thickness(1), Margin = new Thickness(0, 0, 8, 0) };
             var hex = new TextBox { Text = get(), Width = 90, VerticalContentAlignment = VerticalAlignment.Center };
-            void Show() => swatch.Background = new SolidColorBrush(Settings.ParseColor(get(), Colors.Transparent));
+            var updating = false;
+            void Show()
+            {
+                updating = true;
+                hex.Text = get();
+                updating = false;
+                swatch.Background = new SolidColorBrush(Settings.ParseColor(get(), Colors.Transparent));
+            }
             Show();
             var pick = new Button { Content = "...", Width = 30, Margin = new Thickness(8, 0, 0, 0) };
             pick.Click += (s, e) =>
@@ -167,10 +211,20 @@ namespace MusicBeePlugin
             };
             hex.TextChanged += (s, e) =>
             {
+                if (updating) return;
                 try { ColorConverter.ConvertFromString(hex.Text); } catch (Exception) { return; }
-                Set(x => set(hex.Text));
+                Set(x => { set(hex.Text); x.Theme = Themes.Custom; x.RandomTheme = false; });
+                if (_randomThemeCheck != null && _randomThemeCheck.IsChecked == true)
+                    _randomThemeCheck.IsChecked = false;
+                if (_themeCombo != null && !_settingTheme)
+                {
+                    _settingTheme = true;
+                    _themeCombo.SelectedItem = Themes.Custom;
+                    _settingTheme = false;
+                }
                 Show();
             };
+            _colorRows.Add(Show);
             var row = new StackPanel { Orientation = Orientation.Horizontal };
             row.Children.Add(swatch);
             row.Children.Add(hex);
