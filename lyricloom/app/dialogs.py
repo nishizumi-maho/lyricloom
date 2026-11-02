@@ -102,6 +102,7 @@ class SettingsDialog(QDialog):
     def _save(self):
         library = Path(self.library.text().strip()).expanduser()
         vocals = Path(self.vocals.text().strip()).expanduser()
+        work = Path(self.work.text().strip() or config.WORK_ROOT).expanduser()
         if not library.is_dir():
             QMessageBox.warning(self, "Library", f"The library folder does not exist:\n{library}")
             return
@@ -111,7 +112,7 @@ class SettingsDialog(QDialog):
         config.update_settings({
             "library": str(library),
             "vocals": str(vocals),
-            "work": str(Path(self.work.text().strip()).expanduser()),
+            "work": str(work),
             "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
             "check_updates": self.check_updates.isChecked(),
             "wsl_gpu": self.wsl.isChecked(),

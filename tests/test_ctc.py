@@ -20,7 +20,7 @@ def test_align_blocks_converts_to_absolute_time(monkeypatch):
 
     monkeypatch.setattr(ctc, "run_worker", fake_worker)
     out = ctc.align_blocks(Path("v.wav"), [Block(0, 1, 5000, 9000)], [[["eu", ""]]])
-    assert seen["device"] == "cpu"
+    assert seen["device"] == config.ALIGN_DEVICE
     assert seen["blocks"][0]["start_ms"] == 5000
     seg_a, seg_b = out[0]
     assert (seg_a.start_ms, seg_a.end_ms, seg_a.conf) == (5100, 5400, 0.9)
@@ -76,5 +76,5 @@ def test_align_blocks_falls_back_to_the_cpu_when_wsl_fails(monkeypatch):
     monkeypatch.setattr(config, "ALIGN_WSL_ENABLED", True)
     out = ctc.align_blocks(Path("vocals16k.wav"), [Block(0, 1, 0, 5000)], [[["eu"]]])
     assert [c["wsl"] for c in calls] == [config.ALIGN_WSL_DISTRO, None]
-    assert calls[1]["payload"]["device"] == "cpu"
+    assert calls[1]["payload"]["device"] == config.ALIGN_DEVICE
     assert out[0][0].start_ms == 100

@@ -63,7 +63,7 @@ def _wav(path: Path, subtype: str = "PCM_16", seconds: float = 1.0, sr: int = 44
 def test_wsl_path_maps_drive_letters_both_ways():
     win = r"F:\X\Library\テスト歌手\01 - Synthetic Song.flac"
     assert wsl_path(win) == "/mnt/f/X/Library/テスト歌手/01 - Synthetic Song.flac"
-    assert windows_path(wsl_path(win)) == Path(win)
+    assert str(windows_path(wsl_path(win))).replace("\\", "/") == win.replace("\\", "/")
     assert windows_path("/tmp/sep/vocals.wav") == Path("/tmp/sep/vocals.wav")
 
 
@@ -104,6 +104,7 @@ def library(tmp_path, monkeypatch):
     return root
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the WSL path bridge is Windows-only")
 def test_separate_runs_in_wsl_with_translated_paths(tmp_path, library, monkeypatch):
     calls = []
     monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
@@ -118,6 +119,7 @@ def test_separate_runs_in_wsl_with_translated_paths(tmp_path, library, monkeypat
     assert Path(out["vocals"]).exists() and sf.info(out["vocals16k"]).samplerate == 16000
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the WSL path bridge is Windows-only")
 def test_separate_falls_back_to_cpu_when_wsl_fails(tmp_path, library, monkeypatch):
     calls = []
     monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
