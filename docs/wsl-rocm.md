@@ -195,19 +195,21 @@ The WSL worker needs the `lyricloom` Python package so it can run `python -m lyr
 
 ```bash
 git clone --depth 1 https://github.com/nishizumi-maho/lyricloom.git /opt/lyricloom/src
-/opt/lyricloom/venv/bin/pip install --no-deps /opt/lyricloom/src
+/opt/lyricloom/venv/bin/pip install --no-deps --ignore-requires-python /opt/lyricloom/src
 ```
 
-If you already have a source checkout, install that path instead:
+`--ignore-requires-python` is needed when the venv uses a Python other than 3.11, for example Ubuntu 24.04's Python 3.12. The project's `>=3.11,<3.12` pin is for the Windows app and its pinned dependencies. The worker uses only the venv's own torch, torchaudio and audio-separator, and it runs on Python 3.12.
+
+If you already have a source checkout, install that path instead. `-e` keeps the worker in step with the checkout, so you do not reinstall after every change:
 
 ```bash
-/opt/lyricloom/venv/bin/pip install --no-deps /mnt/c/path/to/lyricloom
+/opt/lyricloom/venv/bin/pip install --no-deps --ignore-requires-python -e /mnt/c/path/to/lyricloom
 ```
 
-Verify the worker imports:
+Verify the worker imports **from outside the source tree**. The installed app starts workers in its data folder, not in a checkout. A check run inside the checkout passes even when the package is not installed, because Python finds `lyricloom` in the current directory:
 
 ```bash
-/opt/lyricloom/venv/bin/python -c "import lyricloom, torch, torchaudio, audio_separator; print('worker imports ok')"
+cd /tmp && /opt/lyricloom/venv/bin/python -c "import lyricloom, torch, torchaudio, audio_separator; print('worker imports ok')"
 ```
 
 ## 6. Models: copy or point
@@ -387,6 +389,8 @@ If it shows `Device: CPU (fallback)` in orange, hover the label for the reason a
 ```
 
 Common causes are a wrong `wsl_distro`, a missing interpreter, a missing `lyricloom` package in the venv, a missing separator checkpoint, or `torch.cuda.is_available()` being false inside WSL.
+
+`No module named 'lyricloom'` in the reason means the package is not installed in the venv (step 5). It can appear only in the installed app and not in a source run: a source run starts workers in the checkout, where Python finds the package without it being installed.
 
 Note that `lyricloom doctor` checks the **Windows** model cache for MMS_FA. A checkpoint that exists only in `wsl_torch_home` will not make the Windows check turn green, but the WSL alignment can still work. The direct WSL import test above is the authoritative check for the Linux side.
 
