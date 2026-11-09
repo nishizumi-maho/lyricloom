@@ -113,9 +113,10 @@ class QueueWorker(QObject):
     queue_error = Signal(str)
     finished = Signal()
 
-    def __init__(self, paths: list[Path], force: bool, redo: bool = False):
+    def __init__(self, paths: list[Path], force: bool, redo: bool = False, research: bool = False):
         super().__init__()
         self._paths, self._force, self._redo = paths, force, redo
+        self._research = research
         self._stop_after = False
         self._cancel = threading.Event()
         self._pause = threading.Event()
@@ -159,10 +160,13 @@ class QueueWorker(QObject):
                     moved = runner.forget_sync(p)
                     res = runner.process(p, force=True, only_stage="align",
                                          on_stage=self.stage.emit, cancel=self._cancel)
-                    if res.status in ("failed", "cancelled"):
-                        runner.restore_sync(moved)
-                    else:
+                    if res.status in ("done", "review"):
                         runner.drop_sync_backup(moved)
+                    else:
+                        # failed/cancelled/skipped: nothing new was written, keep the old timing
+                        runner.restore_sync(moved)
+                elif self._research:
+                    res = runner.research_lyrics(p, cancel=self._cancel)
                 else:
                     res = runner.process(p, force=self._force, on_stage=self.stage.emit,
                                          cancel=self._cancel)
@@ -172,6 +176,7 @@ class QueueWorker(QObject):
                 elif res.status == "cancelled":
                     row.status, row.error = "cancelled", res.error or "Stopped by the user"
                 row.device, row.fallback = res.device, res.fallback
+                row.notes = list(res.notes)
                 try:
                     row.log_path = str(cache.work_dir(p) / "log.txt")
                 except OSError:
@@ -602,6 +607,8 @@ class MainWindow(QMainWindow):
                 row.fallback = old.fallback
             if not row.device:
                 row.device = old.device
+            if not row.notes:
+                row.notes = old.notes
             if not row.log_path:
                 row.log_path = old.log_path
             if row.status == "pending" and old.status in ("failed", "cancelled"):
@@ -697,13 +704,16 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             status = STATUS_LABELS.get(r.status, r.status)
-            notes = "⚠ fallback" if r.fallback else ("⚠ error" if r.error else "")
+            notes = ("⚠ warning" if r.notes else
+                     "⚠ fallback" if r.fallback else ("⚠ error" if r.error else ""))
             values = [r.artist, r.title, status, r.source, f"{r.conf:.2f}" if r.source else "", notes]
             keys = [r.artist.lower(), r.title.lower(), status.lower(), r.source.lower(),
                     r.conf if r.source else -1.0, notes]
             tips = []
             if r.error:
                 tips.append("Error:\n" + r.error)
+            if r.notes:
+                tips.append("Warnings:\n" + "\n".join(r.notes))
             if r.fallback:
                 tips.append("Fallback:\n" + r.fallback)
             if r.device:
@@ -951,6 +961,7 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         act_process = menu.addAction("Process")
         act_redo = menu.addAction("Redo word timing")
+        act_search = menu.addAction("Search lyrics again")
         act_details = menu.addAction("Details…")
         menu.addSeparator()
         act_folder = menu.addAction("Open folder")
@@ -961,6 +972,8 @@ class MainWindow(QMainWindow):
             self.process([path])
         elif chosen is act_redo:
             self._redo_paths([path])
+        elif chosen is act_search:
+            self.process([path], research=True)
         elif chosen is act_details:
             self.table.selectRow(row_index)
             self.show_details()
@@ -1127,7 +1140,7 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
-    def process(self, paths: list[Path], redo: bool = False) -> bool:
+    def process(self, paths: list[Path], redo: bool = False, research: bool = False) -> bool:
         if not paths or self._queue is not None:
             return False
         paths = self._confirm_open_track(paths, redo)
@@ -1138,7 +1151,7 @@ class MainWindow(QMainWindow):
         self._queue_error = ""
         self._queue_results = []
         self._queue_started = time.monotonic()
-        self._queue = QueueWorker(paths, self.force.isChecked(), redo)
+        self._queue = QueueWorker(paths, self.force.isChecked(), redo, research)
         self._prog = {"done": 0, "total": len(paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
         q = self._queue

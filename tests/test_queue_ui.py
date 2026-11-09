@@ -55,6 +55,20 @@ def test_a_raising_track_does_not_wedge_the_queue(app, tmp_path, monkeypatch):
         w.close()
 
 
+def test_research_mode_calls_research_lyrics(tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+
+    def fake(path, cancel=None):
+        seen.append(path)
+        return runner.TrackResult(path, "done")
+
+    monkeypatch.setattr(runner, "research_lyrics", fake)
+    q = QueueWorker([audio], force=True, research=True)
+    q.run()
+    assert seen == [audio]
+
+
 def test_redo_restores_the_original_lrc_when_align_fails(tmp_path, monkeypatch):
     audio = _audio(tmp_path)
     lrc = audio.with_suffix(".lrc")
