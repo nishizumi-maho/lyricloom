@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from lyricloom.lyrics.sources import genius, netease, qq, utaten
+from lyricloom.lyrics.sources import genius, lrclib, netease, qq, utaten
 from lyricloom.lyrics.sources.base import lrc_to_text_and_lines
 
 FX = Path(__file__).resolve().parent.parent / "fixtures" / "sources"
@@ -19,6 +19,14 @@ def test_lrc_to_text_and_lines_drops_tags_and_sorts():
     text, lines = lrc_to_text_and_lines("[ti:x]\n[00:05.00]b\n[00:01.50]a\n[00:09.00]\n")
     assert text == "a\nb"
     assert [l.start_ms for l in lines] == [1500, 5000]
+
+
+def test_lrclib_keeps_its_synced_line_timing():
+    out = lrclib.parse([{"id": 1, "trackName": "Synthetic Song", "artistName": "Test Artist",
+                         "duration": 200, "plainLyrics": "line a\nline b",
+                         "syncedLyrics": "[00:01.00]line a\n[00:05.00]line b\n"}])
+    assert out[0].synced is not None
+    assert [l.start_ms for l in out[0].synced] == [1000, 5000]
 
 
 def test_netease_lyric_is_synthetic_and_skips_translation():

@@ -76,7 +76,7 @@ def test_last_selected_track_is_restored_after_the_first_scan(app, tmp_path):
     audio = _audio(tmp_path)
     w = MainWindow(tmp_path)
     try:
-        _wait(app, lambda: w.table.rowCount() == 1)
+        _wait(app, lambda: w.proxy.rowCount() == 1)
         w.load(audio)
         assert w.audio == audio
         w.dirty = False

@@ -32,6 +32,16 @@ def test_transcription_is_always_review(tmp_path):
     assert read_status(a).status == "review"
 
 
+def test_warning_tag_is_shown_as_a_note_and_review_status(tmp_path):
+    a = _audio(tmp_path)
+    a.with_suffix(".lrc").write_text(
+        "[re:LyricLoom 1.0.0]\n[#source:netease conf:0.80]\n[#warning:no usable transcript; "
+        "word timing unconfirmed]\n[00:01.00]x\n", encoding="utf-8")
+    row = read_status(a)
+    assert row.status == "review"
+    assert row.notes == ["no usable transcript", "word timing unconfirmed"]
+
+
 def test_hand_made_lrc_is_other(tmp_path):
     a = _audio(tmp_path)
     a.with_suffix(".lrc").write_text("[00:22.98]試験用の歌詞が流れる\n", encoding="utf-8")
@@ -146,3 +156,22 @@ def test_apply_edits_keeps_times_ordered():
     starts = [s.start_ms for l in edited.lines for s in l.segments]
     assert starts == sorted(starts) and len(set(starts)) == len(starts)
     assert edited.lines[1].segments[0].start_ms == 3000   # other lines untouched
+
+
+def test_mark_line_reviewed_removes_one_flag_and_records_acceptance():
+    from lyricloom.app.model import clear_review_flags, mark_line_reviewed
+    doc = parse_lrc("[#review:0,2]\n[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n")
+    out = mark_line_reviewed(mark_line_reviewed(doc, 0), 2)
+    assert out.meta["#review"] == ""
+    assert mark_line_reviewed(out, 0) is out          # nothing left to accept
+    assert clear_review_flags(parse_lrc("[#review:0]\n[00:01.00]a\n")).meta["#review"] == ""
+    done = parse_lrc("[00:01.00]a\n")
+    assert clear_review_flags(done) is done          # do not add a pointless tag
+
+
+def test_accepted_transcription_lyric_is_done(tmp_path):
+    a = _audio(tmp_path)
+    a.with_suffix(".lrc").write_text(
+        "[re:LyricLoom 2.1.0]\n[#source:transcription conf:0.80]\n[#review:]\n[00:01.00]x\n",
+        encoding="utf-8")
+    assert read_status(a).status == "done"

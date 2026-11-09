@@ -352,6 +352,7 @@ class ModelsWindow(QDialog):
     """The model manager.  Non-modal; one window per MainWindow."""
 
     downloads_finished = Signal(bool)
+    choices_changed = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -735,6 +736,7 @@ class ModelsWindow(QDialog):
         self.refresh()
         self.status_label.setText(f"{spec.label} is now the default for "
                                   f"{STAGE_TITLES.get(spec.stage, spec.stage)}.")
+        self.choices_changed.emit()
         return True
 
     def use_for_language(self) -> bool:
@@ -760,6 +762,7 @@ class ModelsWindow(QDialog):
         self.refresh()
         self.status_label.setText(f"{spec.label} is now used for {lang} "
                                   f"({STAGE_TITLES.get(spec.stage, spec.stage)}).")
+        self.choices_changed.emit()
         return True
 
     def add_custom_model(self) -> bool:
@@ -914,6 +917,7 @@ class ModelsWindow(QDialog):
             self._load_language_choices()
             return
         self._reload_used_for()
+        self.choices_changed.emit()
 
     def _reload_used_for(self) -> None:
         for model_id, item in self._items.items():

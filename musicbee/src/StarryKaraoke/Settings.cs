@@ -68,9 +68,12 @@ namespace MusicBeePlugin
         public bool VideoSkipIntro;
         /// <summary>How long before the first sung line a skipped intro resumes.</summary>
         public int IntroLeadMs = 3000;
-        /// <summary>Frame rate of the karaoke window; 0 follows the window monitor's refresh rate.
-        /// Defaults to 60 instead of the old "maximum refresh rate".</summary>
-        public int WindowFps = FrameRatePolicy.DefaultFps;
+        /// <summary>Legacy frame-rate cap, kept only to migrate settings files written before the
+        /// divisor setting existed. New saves write 0; read <see cref="WindowFpsDivisor"/>.</summary>
+        public int WindowFps;
+        /// <summary>Window refresh divisor: 1 = match the display, 2 = half refresh, 3 = third
+        /// refresh. A rate is always an integer divisor to keep the display's vsync in step.</summary>
+        public int WindowFpsDivisor = 1;
         public string VideoResolution = "1920x1080";
         public int VideoFps = 30;
 
@@ -246,6 +249,7 @@ namespace MusicBeePlugin
             LyricsOffsetMs = Math.Max(-10000, Math.Min(10000, LyricsOffsetMs));
             IntroLeadMs = Math.Max(0, Math.Min(10000, IntroLeadMs));
             WindowFps = Math.Max(0, Math.Min(240, WindowFps));
+            WindowFpsDivisor = FrameRatePolicy.NormalizeDivisor(WindowFpsDivisor);
             VideoFps = Math.Max(10, Math.Min(240, VideoFps));
 
             if (double.IsInfinity(WindowLeft)) WindowLeft = double.NaN;
@@ -274,6 +278,18 @@ namespace MusicBeePlugin
             BackgroundTop = ValidColor(BackgroundTop, "#0A0A18");
             BackgroundBottom = ValidColor(BackgroundBottom, "#16102C");
             AccentColor = ValidColor(AccentColor, "#8C78FF");
+        }
+
+        /// <summary>Maps a pre-divisor WindowFps value to the nearest supported divisor of the
+        /// monitor the window is on, then forgets the legacy value. Safe to call repeatedly.</summary>
+        public void MigrateFrameRate(int monitorHz)
+        {
+            if (WindowFps > 0)
+            {
+                WindowFpsDivisor = FrameRatePolicy.NearestDivisor(WindowFps, monitorHz);
+                WindowFps = 0;
+            }
+            WindowFpsDivisor = FrameRatePolicy.NormalizeDivisor(WindowFpsDivisor);
         }
 
         private static double Clamp(double value, double min, double max, double fallback)
@@ -333,6 +349,7 @@ namespace MusicBeePlugin
                     case "LyricsOffsetMs":
                     case "IntroLeadMs":
                     case "WindowFps":
+                    case "WindowFpsDivisor":
                     case "VideoFps":
                     case "SettingsVersion":
                         int n;

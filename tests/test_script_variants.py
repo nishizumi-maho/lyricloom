@@ -31,14 +31,27 @@ def test_romaji_preference_puts_romaji_in_the_lrc(tmp_path):
     assert _read(audio.with_suffix(".lrc")).lines[0].text.startswith("shikenga")
 
 
-def test_changing_the_preference_rewrites_processed_songs_without_backups(tmp_path):
+def test_changing_the_preference_rewrites_processed_songs_with_a_backup(tmp_path):
     audio = tmp_path / "a.flac"
     audio.write_bytes(b"")
     write_lyrics(audio, _ja_doc())
+    before = audio.with_suffix(".lrc").read_bytes()
     config.set_japanese_script("romaji")
     assert apply_script_preference(tmp_path) == 1
     assert _read(audio.with_suffix(".lrc")).lines[0].text.startswith("shikenga")
-    assert not list(tmp_path.glob("*.bak*"))
+    bak = audio.with_name("a.lrc.bak")
+    assert bak.exists() and bak.read_bytes() == before
+
+
+def test_script_preference_dry_run_counts_without_writing(tmp_path):
+    audio = tmp_path / "a.flac"
+    audio.write_bytes(b"")
+    write_lyrics(audio, _ja_doc())
+    before = audio.with_suffix(".lrc").read_bytes()
+    config.set_japanese_script("romaji")
+    assert apply_script_preference(tmp_path, script="romaji", dry_run=True) == 1
+    assert audio.with_suffix(".lrc").read_bytes() == before
+    assert not (audio.with_name("a.lrc.bak")).exists()
 
 
 def test_songs_processed_before_get_both_scripts_when_the_preference_is_applied(tmp_path):
@@ -57,3 +70,11 @@ def test_latin_lyrics_get_only_the_lrc(tmp_path):
     audio = tmp_path / "a.flac"
     write_lyrics(audio, LrcDoc({}, [Line(0, [Segment("eu ", 0, 300), Segment("vou", 300, 600)])]))
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.lrc"]
+
+
+def test_chinese_lyrics_get_no_japanese_variants(tmp_path):
+    audio = tmp_path / "a.flac"
+    doc = LrcDoc({}, [Line(0, [Segment("孤勇者", 0, 600)])])
+    write_lyrics(audio, doc)                 # no explicit language: Han alone is not Japanese
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.lrc"]
+    assert not japanese_path(audio).exists() and not romaji_path(audio).exists()

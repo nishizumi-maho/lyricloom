@@ -4,7 +4,7 @@ import time
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from lyricloom.app.main import MainWindow, parse_ts  # noqa: E402
 from lyricloom.lrc import parse_lrc  # noqa: E402
@@ -30,15 +30,17 @@ def test_parse_ts():
     assert parse_ts("01:23.45") == 83450 and parse_ts("1:02") == 62000 and parse_ts("x") is None
 
 
-def test_window_lists_loads_nudges_and_saves(app, tmp_path):
+def test_window_lists_loads_nudges_and_saves(app, tmp_path, monkeypatch):
+    monkeypatch.setattr("lyricloom.app.main.QMessageBox.question",
+                        lambda *args, **kwargs: QMessageBox.Yes)
     audio = tmp_path / "Artist" / "Album" / "01 - Song.flac"
     audio.parent.mkdir(parents=True)
     audio.write_bytes(b"x")
     audio.with_suffix(".lrc").write_text(LRC, encoding="utf-8")
     w = MainWindow(tmp_path)
     try:
-        _wait(app, lambda: w.table.rowCount() == 1)
-        assert w.table.item(0, 2).text() == "review"
+        _wait(app, lambda: w.proxy.rowCount() == 1)
+        assert w.proxy.index(0, 2).data() == "review"
         w.table.selectRow(0)
         _wait(app, lambda: w.doc is not None)
         assert w.lines.count() == 2
@@ -79,7 +81,7 @@ def test_window_lists_loads_nudges_and_saves(app, tmp_path):
         # progress bar: a track in the separation stage shows a moving, labelled bar
         w._prog = {"done": 0, "total": 2, "name": "x", "stage": "lyrics", "since": time.time(), "dur": 240.0}
         w._track_started(str(audio))
-        assert w.table.item(0, 2).text() == "processing"
+        assert w.proxy.index(0, 2).data() == "processing"
         w._stage_changed("separate")
         w._prog["since"] -= 120
         w._update_progress()
