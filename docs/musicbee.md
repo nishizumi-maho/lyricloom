@@ -89,6 +89,8 @@ D:\Music\Artist\Album\01 - Song.lrc
 
 LyricLoom writes exactly that layout. The `.original.lrc`, `.japanese.lrc` and `.romaji.lrc` files are extra copies for reference or for a different script; the plugin reads the main `.lrc`.
 
+If another program should send the song to LyricLoom for processing, run `LyricLoom.exe --process "<file>"`. This queues the file in the running LyricLoom window without taking focus. See [docs/command-line.md](command-line.md).
+
 ## How the plugin finds the .lrc
 
 The plugin's priority is:
