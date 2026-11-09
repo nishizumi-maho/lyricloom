@@ -50,19 +50,19 @@ namespace MusicBeePlugin
             _volume = new Slider
             {
                 Minimum = 0, Maximum = 1, Value = 1, Width = 72, Height = 22, Focusable = false,
-                IsMoveToPointEnabled = true, ToolTip = "Volume", VerticalAlignment = VerticalAlignment.Center,
+                IsMoveToPointEnabled = true, ToolTip = Strings.VolumeTip, VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(2, 0, 2, 0)
             };
             _volume.ValueChanged += (s, e) => Safe.Run(() =>
             {
                 if (!_updatingVolume) _controls.SetVolume?.Invoke((float)e.NewValue);
             }, _log);
-            _mute = IconButton("\uE767", "Mute (M)", 13, () => _controls.SetMute?.Invoke(!_muteState), _log);
+            _mute = IconButton("\uE767", Strings.MuteTip, 13, () => _controls.SetMute?.Invoke(!_muteState), _log);
             _offsetText = new TextBlock
             {
                 Text = "", Foreground = new SolidColorBrush(Color.FromRgb(255, 206, 92)), FontSize = 12,
                 VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 8, 0),
-                ToolTip = "This song's lyric delay; [ and ] adjust it, Ctrl+0 resets it"
+                ToolTip = Strings.SongDelayTip
             };
             var volumeRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             volumeRow.Children.Add(_offsetText);
@@ -78,13 +78,13 @@ namespace MusicBeePlugin
             seekRow.Children.Add(volumeRow);
             seekRow.Children.Add(_seek);
 
-            _playPause = IconButton("", "Play / pause (space)", 30, () => _controls.PlayPause?.Invoke(), _log);
+            _playPause = IconButton("", Strings.PlayPauseTip, 30, () => _controls.PlayPause?.Invoke(), _log);
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 0) };
-            buttons.Children.Add(IconButton("", "Previous track", 20, () => _controls.Previous?.Invoke(), _log));
-            buttons.Children.Add(IconButton("", "Back 10 s (←)", 20, () => Jump(-10000), _log));
+            buttons.Children.Add(IconButton("", Strings.PreviousTrackTip, 20, () => _controls.Previous?.Invoke(), _log));
+            buttons.Children.Add(IconButton("", Strings.BackTenSecondsTip, 20, () => Jump(-10000), _log));
             buttons.Children.Add(_playPause);
-            buttons.Children.Add(IconButton("", "Forward 10 s (→)", 20, () => Jump(10000), _log));
-            buttons.Children.Add(IconButton("", "Next track", 20, () => _controls.Next?.Invoke(), _log));
+            buttons.Children.Add(IconButton("", Strings.ForwardTenSecondsTip, 20, () => Jump(10000), _log));
+            buttons.Children.Add(IconButton("", Strings.NextTrackTip, 20, () => _controls.Next?.Invoke(), _log));
 
             var stack = new StackPanel();
             stack.Children.Add(seekRow);
@@ -109,7 +109,7 @@ namespace MusicBeePlugin
         /// <summary>The per-song delay is shown next to the volume controls whenever it is not zero.</summary>
         public void SetSongOffset(int offsetMs)
         {
-            var text = offsetMs == 0 ? "" : "delay " + offsetMs.ToString("+0;-0;0") + " ms";
+            var text = offsetMs == 0 ? "" : Strings.TransportDelayLabel(offsetMs);
             if (text == _offsetShown) return;
             _offsetShown = text;
             _offsetText.Text = text;
