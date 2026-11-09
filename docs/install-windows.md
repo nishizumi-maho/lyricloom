@@ -186,7 +186,30 @@ The environment variable must be set in the environment that starts LyricLoom. S
 
 ## Update LyricLoom
 
-Automatic update checks are off until you turn them on in **Settings**. **Help > Check for updates** always works as a one-off check. When an update is available, the app shows the release notes and can download the installer from this project's GitHub release, verify its published SHA-256 checksum, and start it. The updater refuses to run an installer when the release has no checksum, when the checksum does not match, or when the download URL is not this project's release. The installer is interactive; nothing is installed silently.
+Automatic update checks are on by default. LyricLoom asks GitHub for the latest public release
+shortly after start-up and then every 24 hours, sending only its version in the User-Agent; nothing
+about you or your library is sent. The check can be turned off in **Settings**, and **Help > Check
+for updates** always works as a one-off check.
+
+**Settings > When an update is found** chooses what happens:
+
+- **Install automatically when LyricLoom closes** (default): the verified installer is downloaded
+  in the background; a notice offers **Restart now**, and closing LyricLoom normally installs it
+  silently. **Later** keeps the download and installs it on exit.
+- **Ask before installing**: the notice appears first. **Install now** downloads with progress and
+  starts the interactive installer.
+- **Only notify me**: the notice links to the release page; nothing is downloaded.
+
+**Skip this version** stops that release being offered again; a newer release is offered normally.
+A downloaded update is only run after the updater verifies its published SHA-256. The updater refuses
+an installer with no checksum, with a wrong checksum, or from anywhere outside this project's GitHub
+release. If a queue is running when you choose **Restart now** or **Install now**, LyricLoom asks
+whether to stop it first; a normal exit installs a pending automatic update only after the queue has
+stopped.
+
+The automatic (silent) update never closes MusicBee. If MusicBee is open, the optional Starry
+Karaoke plugin is skipped for that run; the next start tells you and asks you to close MusicBee and
+run the installer again.
 
 You can also update manually:
 
