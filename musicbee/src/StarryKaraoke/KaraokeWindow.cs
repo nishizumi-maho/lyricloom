@@ -45,6 +45,11 @@ namespace MusicBeePlugin
         private readonly TextBlock _toastText;
         private readonly DispatcherTimer _cursorTimer;
         private readonly DispatcherTimer _toastTimer;
+        /// <summary>FR-C-01: re-checks coverage while rendering is suspended. It must not rely on the
+        /// render callback, because a fully covered window has no dirty visuals and WPF stops
+        /// calling it.</summary>
+        private readonly DispatcherTimer _occlusionTimer;
+        private readonly RenderSuspension _suspension = new RenderSuspension();
         private double _lastPoll = -1e9, _lastOcclusionCheck = -1e9;
         private TimeSpan _lastFrameTime;
         private TimeSpan _lastRenderingTime;
@@ -56,7 +61,6 @@ namespace MusicBeePlugin
         private bool _fullscreen;
         private bool _awake;
         private bool _framesSubscribed;
-        private bool _renderSuspended;
         private bool? _pollingNotified;
         private int _monitorHz;
         private Rect _restore;
@@ -265,6 +269,8 @@ namespace MusicBeePlugin
                 if (_transport.IsMouseOver) { _cursorTimer.Start(); return; }
                 if (_fullscreen) Mouse.OverrideCursor = Cursors.None;
             }, _log);
+            _occlusionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _occlusionTimer.Tick += (s, e) => Safe.Run(CheckOcclusion, _log);
 
             MouseMove += (s, e) => Safe.Run(() =>
             {
@@ -293,6 +299,8 @@ namespace MusicBeePlugin
             Closed += (s, e) => Safe.Run(() =>
             {
                 StopFrames();
+                StopOcclusionTimer();
+                _suspension.Reset();
                 NotifyPolling(false);
                 _cursorTimer.Stop();
                 _toastTimer.Stop();
@@ -592,23 +600,92 @@ namespace MusicBeePlugin
         }
 
         /// <summary>Starts or stops repainting and tells the plugin whether polling is worth doing.
-        /// Minimised/hidden unsubscribes; a fully covered window keeps the cheap rendering callback
-        /// (so it notices when the other window moves) but does no scene work and stops polling.</summary>
+        /// Minimised/hidden unsubscribes; a fully covered window stops frames and polling and starts
+        /// the 0.5 s occlusion timer, so it notices when the covering window moves or closes even
+        /// though no render callback runs.</summary>
         private void UpdateRenderState()
         {
             if (!IsVisible || WindowState == WindowState.Minimized)
             {
                 StopFrames();
+                StopOcclusionTimer();
                 NotifyPolling(false);
                 KeepAwake(false);
                 return;
             }
             _monitorHz = MonitorRefreshRate(CurrentScreen());
             _settings.MigrateFrameRate(_monitorHz);
-            _renderSuspended = IsFullyCovered();
-            if (_renderSuspended) KeepAwake(false);
-            StartFrames();
-            NotifyPolling(!_renderSuspended);
+            ApplyCoverage(IsFullyCovered());
+        }
+
+        /// <summary>Applies a coverage reading and starts/stops the frame subscription, the recovery
+        /// timer and polling exactly once per state change.</summary>
+        private void ApplyCoverage(bool covered)
+        {
+            var transition = _suspension.Update(covered);
+            if (transition == RenderTransition.Suspended)
+            {
+                KeepAwake(false);
+                StopFrames();
+                StartOcclusionTimer();
+            }
+            else if (transition == RenderTransition.Resumed)
+            {
+                ResumeAfterSuspension();
+                StopOcclusionTimer();
+                StartFrames();
+            }
+            else if (_suspension.Suspended)
+            {
+                StartOcclusionTimer();
+            }
+            else
+            {
+                StopOcclusionTimer();
+                StartFrames();
+            }
+            NotifyPolling(_suspension.PollingAllowed);
+        }
+
+        /// <summary>The window may have been covered for minutes. Force an immediate player sample
+        /// and let the first frame draw with dt = 0 instead of advancing the whole gap at once.</summary>
+        private void ResumeAfterSuspension()
+        {
+            _lastPoll = -1e9;
+            _lastOcclusionCheck = -1e9;
+            _hasFrameTime = false;
+        }
+
+        /// <summary>FR-C-01: the only periodic work while covered. It re-checks the same Win32
+        /// coverage test twice a second and resumes frames, polling and the clock as soon as any part
+        /// of the window is visible again.</summary>
+        private void CheckOcclusion()
+        {
+            if (!_suspension.Suspended)
+            {
+                StopOcclusionTimer();
+                return;
+            }
+            if (!IsVisible || WindowState == WindowState.Minimized)
+            {
+                StopOcclusionTimer();
+                NotifyPolling(false);
+                KeepAwake(false);
+                return;
+            }
+            ApplyCoverage(IsFullyCovered());
+        }
+
+        private void StartOcclusionTimer()
+        {
+            if (_occlusionTimer.IsEnabled) return;
+            _lastOcclusionCheck = _frameWatch.Elapsed.TotalSeconds;
+            _occlusionTimer.Start();
+        }
+
+        private void StopOcclusionTimer()
+        {
+            if (_occlusionTimer.IsEnabled) _occlusionTimer.Stop();
         }
 
         private void StartFrames()
@@ -682,15 +759,9 @@ namespace MusicBeePlugin
                 if (now - _lastOcclusionCheck > 0.5)
                 {
                     _lastOcclusionCheck = now;
-                    var covered = IsFullyCovered();
-                    if (covered != _renderSuspended)
-                    {
-                        _renderSuspended = covered;
-                        if (covered) KeepAwake(false);
-                        NotifyPolling(!covered);
-                    }
+                    ApplyCoverage(IsFullyCovered());
                 }
-                if (_renderSuspended) return;
+                if (_suspension.Suspended) return;
                 var fps = FrameRatePolicy.EffectiveFps(_settings.WindowFpsDivisor, _monitorHz, _playing,
                                                         false, false, false);
                 if (fps <= 0) return;

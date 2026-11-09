@@ -5,6 +5,17 @@ using System.Text;
 
 namespace StarryKaraoke.Recorder
 {
+    /// <summary>File operations used by <see cref="OutputSafety.Commit"/>. The default is the real
+    /// file system; tests override <see cref="Replace"/> to simulate a FAT32/exFAT volume.</summary>
+    internal class FileOperations
+    {
+        public virtual bool Exists(string path) => File.Exists(path);
+        public virtual void Move(string source, string destination) => File.Move(source, destination);
+        public virtual void Delete(string path) => File.Delete(path);
+        public virtual void Replace(string source, string destination, string backup) =>
+            File.Replace(source, destination, backup, true);
+    }
+
     /// <summary>Output-path safety for the recorder (R4-01).
     ///
     /// The recorder must never treat one of its own inputs as the video target, and it must never
@@ -41,10 +52,15 @@ namespace StarryKaraoke.Recorder
         }
 
         /// <summary>Moves a finished partial file over the target. The previous target is kept as a
-        /// backup until the atomic replace has returned; only then is the backup removed. If anything
+        /// backup until the replacement is complete; only then is the backup removed. If anything
         /// fails, the old target is still there (or is restored from the backup).</summary>
-        public static void Commit(string partial, string target)
+        public static void Commit(string partial, string target) => Commit(partial, target, new FileOperations());
+
+        /// <summary>FR-C-03: the same commit over an injectable file system, so the FAT32/exFAT
+        /// fallback can be tested with a fake that refuses File.Replace.</summary>
+        internal static void Commit(string partial, string target, FileOperations operations)
         {
+            if (operations == null) throw new ArgumentNullException(nameof(operations));
             if (string.IsNullOrWhiteSpace(partial) || !File.Exists(partial))
                 throw new IOException("The video encoder did not produce a complete file; the existing video was left unchanged.");
             if (new FileInfo(partial).Length == 0)
@@ -56,9 +72,9 @@ namespace StarryKaraoke.Recorder
             if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder))
                 throw new IOException("The output folder does not exist: " + (folder ?? target));
 
-            if (!File.Exists(targetFull))
+            if (!operations.Exists(targetFull))
             {
-                File.Move(partialFull, targetFull);
+                operations.Move(partialFull, targetFull);
                 return;
             }
 
@@ -66,7 +82,18 @@ namespace StarryKaraoke.Recorder
             try
             {
                 // File.Replace is the atomic swap; the old target is moved to backup, not deleted.
-                File.Replace(partialFull, targetFull, backup, true);
+                operations.Replace(partialFull, targetFull, backup);
+            }
+            catch (PlatformNotSupportedException)
+            {
+                MoveIntoPlace(operations, partialFull, targetFull, backup);
+            }
+            catch (IOException)
+            {
+                // FAT32/exFAT and some network shares report an I/O error instead of "not
+                // supported". The old file must never be deleted before the new one is in place,
+                // so fall back to moving it to the backup name first.
+                MoveIntoPlace(operations, partialFull, targetFull, backup);
             }
             catch
             {
@@ -74,13 +101,37 @@ namespace StarryKaraoke.Recorder
                 // defensive: if the target vanished and the backup exists, put the old file back.
                 try
                 {
-                    if (!File.Exists(targetFull) && File.Exists(backup)) File.Move(backup, targetFull);
+                    if (!operations.Exists(targetFull) && operations.Exists(backup))
+                        operations.Move(backup, targetFull);
                 }
                 catch (Exception) { }
                 throw;
             }
 
-            try { File.Delete(backup); } catch (Exception) { }
+            try { operations.Delete(backup); } catch (Exception) { }
+        }
+
+        /// <summary>Fallback for volumes without ReplaceFile: move the old target to the backup,
+        /// move the partial into place, delete the backup. Restores the old target if the second
+        /// move fails.</summary>
+        private static void MoveIntoPlace(FileOperations operations, string partialFull, string targetFull, string backup)
+        {
+            operations.Move(targetFull, backup);
+            try
+            {
+                operations.Move(partialFull, targetFull);
+            }
+            catch
+            {
+                try
+                {
+                    if (!operations.Exists(targetFull) && operations.Exists(backup))
+                        operations.Move(backup, targetFull);
+                }
+                catch (Exception) { }
+                throw;
+            }
+            try { operations.Delete(backup); } catch (Exception) { }
         }
 
         public static bool SamePath(string a, string b) =>

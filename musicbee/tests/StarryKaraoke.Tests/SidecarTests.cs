@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Threading.Tasks;
 using MusicBeePlugin;
 using Xunit;
 
@@ -80,6 +81,32 @@ namespace StarryKaraoke.Tests
             Assert.Equal(Stem + ".lrc", SidecarFiles.Generic(Audio));
             Assert.Equal(Stem + ".japanese.lrc", SidecarFiles.Japanese(Audio));
             Assert.Equal(Stem + ".romaji.lrc", SidecarFiles.Romaji(Audio));
+        }
+
+        /// <summary>FR-C-06: reading the candidates is pure file-system work and is done on the
+        /// pool, so the plugin never touches a network share from MusicBee's UI thread.</summary>
+        [Fact]
+        public async Task FR_C_06_sidecar_lyrics_are_read_on_the_thread_pool()
+        {
+            using (var folder = new TempFolder())
+            {
+                var audio = folder.File("song.mp3");
+                File.WriteAllText(audio, "audio");
+                File.WriteAllText(folder.File("song.japanese.lrc"), "[00:01.00]ほし\n");
+                File.WriteAllText(folder.File("song.lrc"), "[00:02.00]star\n");
+
+                string warning = null;
+                var text = await Task.Run(() =>
+                {
+                    string w;
+                    var value = SidecarFiles.ReadLyrics(audio, JapaneseMode.JapaneseOnly, out w);
+                    warning = w;
+                    return value;
+                });
+
+                Assert.Equal("[00:01.00]ほし\n", text);
+                Assert.Null(warning);
+            }
         }
     }
 }

@@ -292,5 +292,22 @@ namespace StarryKaraoke.Tests
                 Assert.Equal(0, Settings.DeleteFiles(Path.Combine(temp.Path, "missing")));
             }
         }
+
+        [Fact]
+        public void FR_C_07_uninstall_deletes_the_12_plain_tmp_copies()
+        {
+            using (var temp = new TempFolder())
+            {
+                // Starry Karaoke 1.2 saved mb_StarryKaraoke.xml.tmp; the offset store uses the same
+                // suffix when an older version wrote it.
+                var settingsTmp = temp.Write(Settings.FileName + ".tmp", "[00:01.00]x");
+                var offsetsTmp = temp.Write(SongOffsetStore.FileName + ".tmp", "[]");
+
+                Assert.Equal(2, Settings.DeleteFiles(temp.Path));
+
+                Assert.False(File.Exists(settingsTmp));
+                Assert.False(File.Exists(offsetsTmp));
+            }
+        }
     }
 }

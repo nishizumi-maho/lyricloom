@@ -87,6 +87,32 @@ namespace StarryKaraoke.Tests
         }
 
         [Fact]
+        public void FR_C_07_uninstall_sweep_has_no_age_limit()
+        {
+            using (var root = new TempFolder())
+            {
+                // All of these are fresh: uninstall must remove them anyway, because no startup
+                // sweep runs after the plugin is gone.
+                var rec = Directory.CreateDirectory(Path.Combine(root.Path, RecordingTemp.RunPrefix + "fresh"));
+                File.WriteAllText(Path.Combine(rec.FullName, RecordingTemp.LyricsFileName), "[00:01.00]one");
+                var legacyLyrics = Path.Combine(root.Path, "20260101-120000.lrc");
+                var legacySettings = Path.Combine(root.Path, "20260101-120000.xml");
+                var other = Path.Combine(root.Path, "notes.txt");
+                File.WriteAllText(legacyLyrics, "x");
+                File.WriteAllText(legacySettings, "x");
+                File.WriteAllText(other, "x");
+
+                var removed = RecordingTemp.SweepAll(root.Path);
+
+                Assert.Equal(3, removed);
+                Assert.False(Directory.Exists(rec.FullName));
+                Assert.False(File.Exists(legacyLyrics));
+                Assert.False(File.Exists(legacySettings));
+                Assert.True(File.Exists(other));
+            }
+        }
+
+        [Fact]
         public void Output_must_not_be_the_playing_audio_file()
         {
             Assert.True(RecordingPaths.SamePath(@"C:\Music\song.mp4", @"c:\music\SONG.MP4"));
