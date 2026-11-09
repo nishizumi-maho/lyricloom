@@ -48,12 +48,14 @@ def align_lines_mtl(vocals: Path, seg_texts: list[list[str]],
     payload = {"wav": str(vocals), "lines": lines, "repo": str(config.MTL_REPO),
                "checkpoint_dir": str(config.MTL_CHECKPOINT.parent.parent)}
     if config.MTL_WSL_ENABLED:
-        on_wsl = {**payload, "cuda": True, "wav": wsl_path(payload["wav"]),
-                  "repo": config.MTL_WSL_REPO, "checkpoint_dir": config.MTL_WSL_CHECKPOINT}
         try:
+            on_wsl = {**payload, "cuda": True, "wav": wsl_path(payload["wav"]),
+                      "repo": config.MTL_WSL_REPO, "checkpoint_dir": config.MTL_WSL_CHECKPOINT}
             res = run_worker("lyricloom.workers.align_mtl", on_wsl, python=config.ALIGN_WSL_PYTHON,
                              wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.MTL_WSL_ENV, cancel=cancel)
             return map_words(seg_texts, res["words"])
+        except ValueError as e:
+            log.warning("UNC path cannot be bridged to WSL (%s); aligning on the CPU instead", e)
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             log.warning("singing model in WSL failed, using .venv-mtl on the CPU: %s", str(e)[-300:])
     res = run_worker("lyricloom.workers.align_mtl", payload, python=str(config.MTL_PYTHON), cancel=cancel)

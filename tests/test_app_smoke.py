@@ -89,7 +89,7 @@ def test_window_lists_loads_nudges_and_saves(app, tmp_path):
         from lyricloom import config
         with mock.patch("lyricloom.app.main.QInputDialog.getText", return_value=("newkey", True)):
             w.btn_key.click()
-        assert config.ASSEMBLYAI_KEY_FILE.read_text(encoding="utf-8") == "newkey"
+        assert config.read_assemblyai_key() == "newkey"
     finally:
         w.dirty = False
         w.close()

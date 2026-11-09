@@ -38,7 +38,7 @@ Examples of in-scope issues:
 - Command injection in the WSL/worker command construction.
 - A way for a malicious audio file, `.lrc` file or lyric page to escape the expected parser behavior and harm the user.
 - Model download integrity problems (for example, accepting a file without the intended checksum).
-- Exposure of the AssemblyAI API key beyond its documented plain-text storage.
+- Exposure of the AssemblyAI API key beyond its documented DPAPI-encrypted (Windows) or mode-0600 (Linux/macOS) storage.
 - A dependency vulnerability that is reachable through LyricLoom's normal use.
 - A privacy issue where audio or personal data is sent somewhere not described in [docs/privacy.md](docs/privacy.md).
 
@@ -73,13 +73,13 @@ Please give us a reasonable chance to fix the issue before publishing details. W
 
 ## API keys and local data
 
-The optional AssemblyAI key is stored in plain text at:
+The optional AssemblyAI key is stored at:
 
 ```text
 %LOCALAPPDATA%\LyricLoom\assemblyai.key
 ```
 
-or in `ASSEMBLYAI_API_KEY`. It is not encrypted. Protect the file with normal Windows/Linux account permissions. If you believe it was exposed, revoke it in the AssemblyAI dashboard and add a new one. Do not commit it to git; the repository's `.gitignore` excludes `assemblyai.key`, but ignored files can still be copied into archives.
+or supplied through `ASSEMBLYAI_API_KEY`. On Windows the file is encrypted with DPAPI for the current user; on Linux/macOS it is created with mode `0600`. A plain-text key file from an older version is migrated automatically on first read. If you believe the key was exposed, revoke it in the AssemblyAI dashboard and add a new one. Do not commit it to git; the repository's `.gitignore` excludes `assemblyai.key`, but ignored files can still be copied into archives.
 
 Lyrics, transcripts, logs and vocal stems are stored locally as described in [docs/privacy.md](docs/privacy.md). Treat a bug report as potentially public: redact paths, user names and lyrics before posting.
 

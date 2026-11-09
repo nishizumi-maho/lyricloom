@@ -29,6 +29,12 @@ def _worker_argv(module: str) -> list[str]:
         worker = Path(sys.executable).with_name(f"LyricLoomWorker{suffix}")
         if worker.is_file():
             return [str(worker), module.rsplit(".", 1)[-1]]
+        if config.IS_WINDOWS:
+            raise WorkerError(
+                module,
+                "LyricLoomWorker.exe is missing from this installation. The installation is damaged; "
+                "reinstall LyricLoom from the official installer, or restore LyricLoomWorker.exe from "
+                "antivirus quarantine.")
         return [sys.executable, "--worker", module.rsplit(".", 1)[-1]]
     return [sys.executable, "-m", module]
 
