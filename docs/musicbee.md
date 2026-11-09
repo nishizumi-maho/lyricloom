@@ -19,15 +19,17 @@ Use this if you do not use MusicBee. LyricLoom has two built-in views:
 
 1. Process a song in LyricLoom.
 2. Select the track in the library table.
-3. Press **Play** for the compact player, or click **Karaoke** for the full-screen view.
+3. Press **Play** (or **Space**) for the compact player, or click **Karaoke** (**Ctrl+K**) for the full-screen view.
 4. In the Karaoke window:
    - **Space** plays or pauses.
    - **←/→** seek 5 seconds.
    - **↑/↓** change volume.
+   - **N/P** move to the next or previous track.
    - **F11** toggles fullscreen; **Esc** leaves fullscreen or closes the window.
    - The current line is lit word by word, with the next line dimmed below it.
-5. **Vocals only** switches playback to the cached isolated vocal stem when it exists. If the work cache was deleted, the switch is disabled or falls back to the full mix.
-6. In the main window, double-click a line to jump to it, or press **Play line** to hear one line and stop at its end. Low-confidence lines are tinted orange; select a word, use the nudge buttons, then **Save**.
+   - The **Script** list chooses the main `.lrc`, Japanese text or romaji. The main `.lrc` follows the script chosen in Settings.
+5. The karaoke window starts at the main player's position. **Vocals only** switches playback to the cached isolated vocal stem, or to the kept `*.vocals.flac` when the work cache was cleared. If neither exists, the switch is disabled.
+6. In the main window, double-click a line to jump to it, or press **Play line** to hear one line and stop at its end. Low-confidence lines are tinted orange; select a word, use the nudge buttons, then **Save**. **Accept line** / **Accept all** clear review flags; **Ctrl+Z** and **Ctrl+Y** undo and redo edits.
 
 The Karaoke window uses the normal Qt media backend, so it depends on the codecs available on your system. On Linux, that means GStreamer plugins; see [docs/install-linux.md](install-linux.md#the-app-opens-but-there-is-no-sound). It does not need MusicBee, a browser, or an account.
 

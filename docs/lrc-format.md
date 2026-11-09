@@ -54,12 +54,12 @@ Tags are written at the top, in this order when present:
 | `[ar:...]` | `[ar:鈴木このみ]` | Artist from the audio tags. May be empty if the file has no artist tag. |
 | `[re:...]` | `[re:LyricLoom 2.0.0]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
 | `[#source:...]` | `[#source:uta-net conf:0.94]` | Where the lyric came from, followed by the track confidence. Sources include `lrclib`, `netease`, `qq`, `utaten`, `genius`, `websearch`, `transcription` and `manual`. |
-| `[#engine:...]` | `[#engine:7]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
+| `[#engine:...]` | `[#engine:8]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
 | `[#models:...]` | `[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]` | The model each stage used for this song, as `stage=model-id` pairs separated by `;`. Written on every successful run. |
 | `[#language:...]` | `[#language:ja]` | The resolved lyric language when it is known. It controls script variants and language-specific models. |
 | `[#warning:...]` | `[#warning:no usable transcript; word timing unconfirmed]` | Warnings the app shows in the row tooltip. A track with a warning is marked review. |
 | `[#lyrics:search-empty]` | `[#lyrics:search-empty]` | The lyric search returned no candidates. The next normal run retries it; it is never treated as a finished lyric search. |
-| `[#review:...]` | `[#review:3,7,12]` | Zero-based line numbers whose confidence is below the review threshold or whose anchor was unusable. The app tints these rows orange. |
+| `[#review:...]` | `[#review:3,7,12]` | Zero-based line numbers whose confidence is below the review threshold or whose anchor was unusable. The app tints these rows orange. An empty `[#review:]` means every flag was accepted in the editor. |
 
 ### About `[#models:...]`
 
@@ -101,7 +101,7 @@ The source names map to the lyric providers:
 
 A track can have the `review` status without a `#review` tag when the chosen source is `transcription`. In that case the whole lyric is a fallback, even if every line happened to score above the threshold. The runner also writes `#warning:...` and marks every line when the anchor transcript was hallucinated or empty.
 
-Editing a word does not automatically remove its line from `#review`. The tag describes what the engine was unsure about; a human edit is not a new confidence score. Reprocess the song, or remove the tag deliberately, if you want the track to leave the Review filter.
+Editing a word does not automatically remove its line from `#review`. The tag describes what the engine was unsure about; a human edit is not a new confidence score. Use **Accept line** or **Accept all** in the editor to remove flags deliberately. Accepting every flag writes an explicitly empty `[#review:]` tag (and saves the file), which lets the track leave the Review filter without pretending the engine was confident.
 
 ## Line timing without word timing
 

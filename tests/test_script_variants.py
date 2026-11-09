@@ -35,11 +35,23 @@ def test_changing_the_preference_rewrites_processed_songs_with_a_backup(tmp_path
     audio = tmp_path / "a.flac"
     audio.write_bytes(b"")
     write_lyrics(audio, _ja_doc())
-    old = (audio.with_suffix(".lrc")).read_bytes()
+    before = audio.with_suffix(".lrc").read_bytes()
     config.set_japanese_script("romaji")
     assert apply_script_preference(tmp_path) == 1
     assert _read(audio.with_suffix(".lrc")).lines[0].text.startswith("shikenga")
-    assert (tmp_path / "a.lrc.bak").read_bytes() == old
+    bak = audio.with_name("a.lrc.bak")
+    assert bak.exists() and bak.read_bytes() == before
+
+
+def test_script_preference_dry_run_counts_without_writing(tmp_path):
+    audio = tmp_path / "a.flac"
+    audio.write_bytes(b"")
+    write_lyrics(audio, _ja_doc())
+    before = audio.with_suffix(".lrc").read_bytes()
+    config.set_japanese_script("romaji")
+    assert apply_script_preference(tmp_path, script="romaji", dry_run=True) == 1
+    assert audio.with_suffix(".lrc").read_bytes() == before
+    assert not (audio.with_name("a.lrc.bak")).exists()
 
 
 def test_songs_processed_before_get_both_scripts_when_the_preference_is_applied(tmp_path):
