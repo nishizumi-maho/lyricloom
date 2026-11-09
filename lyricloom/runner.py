@@ -40,6 +40,7 @@ class TrackResult:
     error: str = ""
     device: str = ""   # where the vocals were separated: rocm (WSL), dml, cpu or kept
     fallback: str = ""  # why the WSL/ROCm separation failed, when it ran on the CPU instead
+    cloud: bool = False  # the isolated vocal was uploaded to AssemblyAI for this track
 
 
 def _lines_from_json(data) -> list[Line] | None:
@@ -170,7 +171,7 @@ def _cached(audio: Path, stage: str, fresh: set[str], compute: Callable[[], dict
     return data
 
 
-def _write(audio: Path, meta, chosen: Candidate, result) -> str:
+def _write(audio: Path, meta, chosen: Candidate, result, cloud: bool = False) -> str:
     """Writes the .lrc; returns the status. Low-confidence lines are listed in [#review:...]."""
     tags = {"ti": meta.title, "ar": meta.artist, "re": tag(VERSION),
             "#source": f"{chosen.source} conf:{result.track_conf:.2f}", "#engine": ENGINE_VERSION}
@@ -181,7 +182,8 @@ def _write(audio: Path, meta, chosen: Candidate, result) -> str:
     if chosen.source not in ("transcription", "manual"):   # only a lyric found online is "official"
         write_original(audio, {"ti": meta.title, "ar": meta.artist, "#source": chosen.source}, chosen)
     status = "review" if chosen.source == "transcription" or result.review else "done"
-    _log(audio, f"{status} source={chosen.source} conf={result.track_conf:.2f} url={chosen.url}")
+    _log(audio, f"{status} source={chosen.source} conf={result.track_conf:.2f} "
+                f"cloud={'yes' if cloud else 'no'} url={chosen.url}")
     return status
 
 
@@ -203,17 +205,25 @@ def realign(audio: Path, text: str, source: str = "manual") -> TrackResult:
                            device=sep.get("device", ""), fallback=sep.get("fallback", ""))
     except Exception as e:  # noqa: BLE001 - reported to the app, never raised into the UI
         _log(audio, "realign failed\n" + traceback.format_exc())
-        return TrackResult(audio, "failed", error=f"{type(e).__name__}: {e}")
+        return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"))
 
 
 def process(audio: Path, force: bool = False, only_stage: str | None = None,
-            on_stage: Callable[[str], None] | None = None) -> TrackResult:
+            on_stage: Callable[[str], None] | None = None,
+            allow_cloud: bool | None = None) -> TrackResult:
+    """Processes one track.
+
+    ``allow_cloud`` is the per-run consent for the optional AssemblyAI upload. ``None`` uses the
+    saved ``assemblyai_enabled`` setting; ``False`` never uploads, even when the setting is on.
+    A track result records whether audio actually left the machine (`TrackResult.cloud`)."""
     stage = on_stage or (lambda name: None)
     if only_stage is not None and only_stage not in STAGES:
         raise ValueError(f"unknown stage {only_stage}")
     fresh = set(STAGES[STAGES.index(only_stage):]) if only_stage else set()
     if "transcribe" in fresh:
         fresh.add("transcribe_extra")
+    cloud_allowed = config.assemblyai_enabled() and (allow_cloud is not False)
+    uploaded = False
     try:
         if not (force or only_stage) and _already_done(audio):
             return TrackResult(audio, "skipped")
@@ -239,8 +249,20 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         aai: list[Transcript | None] = []   # computed at most once, only when needed
 
         def assemblyai() -> Transcript | None:
+            nonlocal uploaded
             if not aai:
-                aai.append(_assemblyai(audio, work, sep, lang, whisper, prompt) if config.ASSEMBLYAI_ENABLED else None)
+                if not cloud_allowed:
+                    aai.append(None)
+                    return None
+                cached = (work / "assemblyai_vocals.json").is_file()
+                transcript = _assemblyai(audio, work, sep, lang, whisper, prompt)
+                if transcript is not None:
+                    if cached:
+                        _log(audio, "cloud transcription reused from the cache (no upload)")
+                    else:
+                        uploaded = True
+                        _log(audio, "cloud transcription used: AssemblyAI (isolated vocal uploaded)")
+                aai.append(transcript)
             return aai[0]
 
         # Transcript that drives the anchors and the choice of lyrics: Whisper, unless it is unusable
@@ -264,18 +286,19 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         stage("align")
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]))
         stage("write")
-        status = _write(audio, meta, chosen, result)
+        status = _write(audio, meta, chosen, result, cloud=uploaded)
         return TrackResult(audio, status, chosen.source, result.track_conf, device=device,
-                           fallback=sep.get("fallback", ""))
+                           fallback=sep.get("fallback", ""), cloud=uploaded)
     except Exception as e:  # noqa: BLE001 - one broken track must not stop a folder run
         _log(audio, "failed\n" + traceback.format_exc())
-        return TrackResult(audio, "failed", error=f"{type(e).__name__}: {e}")
+        return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"),
+                           cloud=uploaded)
 
 
 def _log(audio: Path, msg: str) -> None:
     try:
         with (cache.work_dir(audio) / "log.txt").open("a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {config.redact_assemblyai_key(msg)}\n")
     except OSError:
         pass
 
@@ -294,10 +317,11 @@ def find_audio(root: Path) -> list[Path]:
 
 
 def process_all(paths: Iterable[Path], force: bool = False, only_stage: str | None = None,
-                on_result: Callable[[TrackResult], None] | None = None) -> list[TrackResult]:
+                on_result: Callable[[TrackResult], None] | None = None,
+                allow_cloud: bool | None = None) -> list[TrackResult]:
     results = []
     for p in paths:
-        r = process(p, force=force, only_stage=only_stage)
+        r = process(p, force=force, only_stage=only_stage, allow_cloud=allow_cloud)
         if on_result:
             on_result(r)
         results.append(r)

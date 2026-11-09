@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from .. import cache, config, runner, runtime
-from .. import VERSION
+from .. import VERSION, updater
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
@@ -119,7 +119,7 @@ class MainWindow(QMainWindow):
         self.timer.start()
         self.refresh()
         QTimer.singleShot(0, self._first_run)
-        if config.setting("check_updates", True) and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+        if updater.should_check_on_startup():
             QTimer.singleShot(4000, lambda: check_for_updates(self, silent=True))
 
     def _build_menu(self):
@@ -378,14 +378,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{len(rows)} track" + ("" if len(rows) == 1 else "s"), 5000)
 
     def set_api_key(self):
-        state = "a key is set" if config.ASSEMBLYAI_ENABLED else "no key set: AssemblyAI is off"
+        state = "a key is set" if config.has_assemblyai_key() else "no key set"
         key, ok = QInputDialog.getText(
             self, "AssemblyAI key", f"Currently {state}.\nPaste a new key (leave empty to remove it):",
             QLineEdit.Password)
         if not ok:
             return
         config.set_assemblyai_key(key)
-        self.statusBar().showMessage("AssemblyAI key saved" if key.strip() else "AssemblyAI key removed: off", 5000)
+        self.statusBar().showMessage("AssemblyAI key saved" if key.strip() else "AssemblyAI key removed", 5000)
 
     def set_script(self, script: str):
         config.set_japanese_script(script)
@@ -822,8 +822,12 @@ def run():
 
         run_worker(sys.argv[2])
         return
-    config.migrate_legacy_settings()
     app = QApplication(sys.argv)
+    if config.migrate_legacy_settings():
+        QMessageBox.information(
+            None, config.APP_NAME,
+            f"Lyrics Boca settings and data were moved to:\n{config.APP_DATA}\n\n"
+            "Your old folders were left in place only when the new location already had a copy.")
     app.setApplicationName(config.APP_NAME)
     app.setApplicationDisplayName(config.APP_NAME)
     app.setOrganizationName(config.APP_NAME)

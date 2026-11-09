@@ -119,3 +119,17 @@ def test_singing_model_falls_back_to_its_own_venv(monkeypatch):
     assert calls[1]["python"] == str(config.MTL_PYTHON)
     assert calls[1]["payload"].get("cuda") is None    # the Windows venv stays on its CPU
 
+
+def test_singing_model_unc_path_uses_the_local_fallback(monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"words": [["texto", 1000, 1400]]}
+
+    monkeypatch.setattr(mtl, "run_worker", fake)
+    monkeypatch.setattr(config, "MTL_WSL_ENABLED", True)
+    out = mtl.align_lines_mtl(Path(r"\\server\share\vocals.wav"), [["Texto, "]])
+    assert [c["wsl"] for c in calls] == [None]
+    assert (out[0][0].start_ms, out[0][0].end_ms) == (1000, 1400)
+
