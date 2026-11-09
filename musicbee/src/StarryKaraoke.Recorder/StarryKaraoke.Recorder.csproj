@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Records a song's karaoke video outside MusicBee (a 32-bit process with little memory to spare):
+       renders every frame with the plugin's scene and pipes them, with the song's audio, to ffmpeg. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>StarryKaraoke.Recorder</AssemblyName>
+    <RootNamespace>StarryKaraoke.Recorder</RootNamespace>
+    <Prefer32Bit>false</Prefer32Bit>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\StarryKaraoke\StarryKaraoke.csproj" />
+  </ItemGroup>
+</Project>
