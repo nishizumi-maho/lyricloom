@@ -96,6 +96,9 @@ class SettingsDialog(QDialog):
         self.check_updates = QCheckBox("Check GitHub Releases for updates on startup")
         self.check_updates.setChecked(data.get("check_updates") is True)
         bform.addRow(self.check_updates)
+        self.notify_finished = QCheckBox("Notify when a long queue finishes in the background")
+        self.notify_finished.setChecked(bool(data.get("notify_queue_finished", True)))
+        bform.addRow(self.notify_finished)
         layout.addWidget(behaviour)
 
         gpu = QGroupBox("GPU through WSL (Windows + AMD ROCm)")
@@ -157,6 +160,7 @@ class SettingsDialog(QDialog):
                 "work": str(values["Work cache"]),
                 "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
                 "check_updates": self.check_updates.isChecked(),
+                "notify_queue_finished": self.notify_finished.isChecked(),
                 "wsl_gpu": self.wsl.isChecked(),
                 "wsl_distro": self.distro.text().strip(),
                 "wsl_python": self.wsl_python.text().strip() or "python3",

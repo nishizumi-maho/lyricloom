@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import struct
 from dataclasses import asdict, dataclass, field, replace
@@ -30,6 +31,9 @@ class TrackRow:
     conf: float = 0.0
     review_lines: list[int] = field(default_factory=list)
     error: str = ""
+    device: str = ""       # where the vocals were separated: rocm, cuda, dml, cpu or kept
+    fallback: str = ""     # why the WSL/ROCm separation ran on the CPU instead
+    log_path: str = ""     # this track's log.txt, kept so Refresh and Details can find it
 
 
 def _flac_tags(audio: Path) -> tuple[str, str] | None:
@@ -132,7 +136,7 @@ def scan(root: Path) -> list[TrackRow]:
 # ---- scan cache: one JSON per library; a track is re-read only when its audio or .lrc changed ----
 # The schema version lets an old or hand-edited cache be discarded instead of crashing every scan.
 
-SCAN_SCHEMA = 2
+SCAN_SCHEMA = 3
 
 
 def _cache_file(root: Path) -> Path:
@@ -199,8 +203,12 @@ def _row_from_json(d: dict) -> TrackRow:
         raise ValueError("cached row has invalid review lines")
     d["review_lines"] = review
     d["error"] = d.get("error") if isinstance(d.get("error"), str) else ""
+    d["device"] = d.get("device") if isinstance(d.get("device"), str) else ""
+    d["fallback"] = d.get("fallback") if isinstance(d.get("fallback"), str) else ""
+    d["log_path"] = d.get("log_path") if isinstance(d.get("log_path"), str) else ""
     return TrackRow(path=d["path"], artist=d["artist"], title=d["title"], status=d["status"],
-                    source=d["source"], conf=d["conf"], review_lines=d["review_lines"], error=d["error"])
+                    source=d["source"], conf=d["conf"], review_lines=d["review_lines"], error=d["error"],
+                    device=d["device"], fallback=d["fallback"], log_path=d["log_path"])
 
 
 def _unreadable_row(audio: Path, exc: Exception) -> TrackRow:
@@ -258,6 +266,28 @@ def scan_cached(root: Path, stats: dict | None = None) -> list[TrackRow]:
     except OSError:
         pass   # the next scan rebuilds it; the listing itself is still valid
     return rows
+
+
+def store_result(root: Path, row: TrackRow) -> None:
+    """Records a finished queue result in this library's scan cache.
+
+    Refresh re-reads a cached row only while its audio and .lrc stamps are unchanged, so the last
+    error, device and fallback reason survive a Refresh instead of turning a failed row into
+    "pending" again. A track outside the library is stored too; the next scan drops it.
+    """
+    path = _cache_file(root)
+    rows = _read_cache(root)
+    try:
+        rows[str(row.path)] = _row_to_json(row, _stamp(row.path))
+    except OSError:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"schema": SCAN_SCHEMA, "rows": rows}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass   # a cache write failure must never break the queue
 
 
 def delete_line(doc: LrcDoc, index: int) -> LrcDoc:

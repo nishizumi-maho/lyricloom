@@ -24,6 +24,7 @@ LyricLoom 2.0.0 is free software under the **GNU GPL v3 or later**. The interfac
 - [Features](#features)
 - [Quick start on Windows](#quick-start-on-windows)
 - [Quick start on Linux](#quick-start-on-linux)
+- [Command line](#command-line)
 - [GPU options](#gpu-options)
 - [Models and download sizes](#models-and-download-sizes)
 - [Output format](#output-format)
@@ -188,6 +189,21 @@ lyricloom-app
 ```
 
 A source or pipx install also provides `lyricloom process <file-or-folder>`, which runs the same pipeline without the GUI. The path must be inside the library selected in the app (or the default `~/Music`). The packaged tarball's `lyricloom` launcher is the windowed app, not the full CLI.
+
+## Command line
+
+The GUI can also be started by another program:
+
+```text
+LyricLoom.exe --process "<file>" [<file> ...] [--redo]
+LyricLoom.exe --open "<file>"
+```
+
+`--process` queues files (or folders) in the running window without taking focus, `--redo` redoes
+their word timing, and `--open` selects a file in the library and brings the window forward. Paths
+that do not exist or are not supported audio are ignored and reported. See
+**[docs/command-line.md](docs/command-line.md)** for the single-instance behaviour, MusicBee
+registry values and examples.
 
 ## GPU options
 
