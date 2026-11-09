@@ -84,6 +84,31 @@ def test_run_worker_in_wsl_builds_the_command(monkeypatch):
     assert argv[-3:] == ["/opt/lyricloom/venv/bin/python", "-m", "some.module"]
 
 
+def test_run_worker_frozen_never_relaunches_the_gui(monkeypatch, tmp_path):
+    """A packaged build's sys.executable is the GUI: asking for "this interpreter" must start
+    LyricLoomWorker.exe, or the CPU separation and the MTL fallback open a second window."""
+    suffix = ".exe" if config.IS_WINDOWS else ""
+    gui = tmp_path / f"LyricLoom{suffix}"
+    worker = tmp_path / f"LyricLoomWorker{suffix}"
+    gui.write_bytes(b"")
+    worker.write_bytes(b"")
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, (RESULT_MARK + '{"ok": 1}\n').encode(), b"")
+
+    monkeypatch.setattr(config, "IS_FROZEN", True)
+    monkeypatch.setattr(sys, "executable", str(gui))
+    monkeypatch.setattr("lyricloom.workers.subprocess.run", fake_run)
+    for python in (str(gui), None):
+        assert run_worker("lyricloom.workers.separate", {}, python=python, cwd=tmp_path) == {"ok": 1}
+        assert seen["argv"] == [str(worker), "separate"]
+    # another interpreter (a dev venv) is still used as given
+    run_worker("lyricloom.workers.separate", {}, python=str(tmp_path / "other-python"), cwd=tmp_path)
+    assert seen["argv"] == [str(tmp_path / "other-python"), "-m", "lyricloom.workers.separate"]
+
+
 def _fake_worker(calls: list, fail_wsl: bool = False):
     """Stands in for run_worker: 'separates' by copying the input, like the real worker's output."""
     def run(module, payload, python=None, wsl=None, wsl_env=None, **kw):
