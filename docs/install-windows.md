@@ -143,7 +143,7 @@ Main window:
 - The current line is highlighted word by word; the next line is dimmed.
 - **Vocals only** is enabled only when the cached or kept vocal stem exists.
 
-For a MusicBee-based karaoke setup, install the separate Starry Karaoke plugin. See [docs/musicbee.md](musicbee.md).
+For a MusicBee-based karaoke setup, the setup assistant (**Help > Setup assistant… > MusicBee**) can install the Starry Karaoke plugin from the copy bundled with LyricLoom. See [docs/musicbee.md](musicbee.md).
 
 ## Where settings and caches live
 

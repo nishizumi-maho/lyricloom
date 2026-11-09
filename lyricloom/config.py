@@ -454,6 +454,15 @@ def set_assemblyai_enabled(value: bool) -> None:
     _save_setting("assemblyai_enabled", bool(value))
 
 
+def ask_before_upload() -> bool:
+    """Whether a queue asks for cloud-upload consent first (default: yes)."""
+    return _flag(_settings().get("assemblyai_ask_before_upload", True))
+
+
+def set_ask_before_upload(value: bool) -> None:
+    _save_setting("assemblyai_ask_before_upload", bool(value))
+
+
 def _dpapi(data: bytes, protect: bool) -> bytes:
     """CryptProtectData/CryptUnprotectData for the current Windows user, through ctypes."""
     if not IS_WINDOWS:

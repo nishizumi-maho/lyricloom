@@ -39,7 +39,7 @@ The Karaoke window uses the normal Qt media backend, so it depends on the codecs
 
 <https://github.com/nishizumi-maho/MusicBee-StarryKaraoke>
 
-It is not bundled with LyricLoom and is not covered by LyricLoom's GPL license. LyricLoom's job is to write the enhanced `.lrc`; the plugin's job is to display it.
+It is bundled with LyricLoom's Windows build so the setup assistant (and the installer's optional MusicBee task) can put it in place for you. The plugin is still a separate MIT-licensed program, not part of LyricLoom's GPL code. LyricLoom's job is to write the enhanced `.lrc`; the plugin's job is to display it.
 
 ### 1. Install MusicBee
 
@@ -48,6 +48,13 @@ Install MusicBee from its official website, or use the portable version if you p
 MusicBee is a 32-bit Windows application. The plugin targets .NET Framework 4.8, which is included in Windows 10 and Windows 11. If your Windows installation is missing it, install .NET Framework 4.8 from Microsoft before using the plugin.
 
 ### 2. Install the Starry Karaoke plugin
+
+The setup assistant (**Help > Setup assistant… > MusicBee**) can install or update the plugin from
+the copy bundled with LyricLoom. It refuses while MusicBee is running, replaces the plugin's own
+files, replaces the shared `RomajiCore.dll`/`LibNMeCab.dll` only when the bundled version is newer,
+and copies the `RomajiLyrics\IpaDic` dictionary only when it is missing.
+
+To install it by hand:
 
 1. Close MusicBee.
 2. Open the plugin's [Releases page](https://github.com/nishizumi-maho/MusicBee-StarryKaraoke/releases).
