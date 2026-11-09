@@ -3,11 +3,12 @@ using System.IO;
 
 namespace StarryKaraoke.Recorder
 {
-    /// <summary>Per-run temporary storage and its cleanup (R4-13).
+    /// <summary>Per-run temporary storage and its cleanup (R4-13, RV1-05).
     ///
-    /// Every run gets its own <c>%TEMP%\StarryKaraoke\rec-&lt;guid&gt;</c> folder. The Renderer deletes it
-    /// on every exit path; a crash is covered by the startup sweep, which matches only this recorder's
-    /// own <c>rec-</c> prefix and never touches anything else in the temp folder.</summary>
+    /// Every run gets its own <c>%TEMP%\StarryKaraoke\rec-&lt;guid&gt;</c> folder. The Renderer deletes
+    /// its own folder on every exit path; the plugin writes its lyrics and settings copies into a
+    /// folder with the same prefix, so the startup sweep also covers a killed or crashed recorder.
+    /// The sweep matches only this prefix and never touches anything else in the temp folder.</summary>
     internal static class RecorderTemp
     {
         public const string RootFolderName = "StarryKaraoke";
@@ -46,8 +47,8 @@ namespace StarryKaraoke.Recorder
         }
 
         /// <summary>Deletes stale run folders older than the given age. Only directories whose name
-        /// starts with <see cref="RunPrefix"/> are considered, so the plugin's own input copies (and
-        /// any other program's files) are never swept.</summary>
+        /// starts with <see cref="RunPrefix"/> are considered, so unrelated files in the temp folder
+        /// are never swept. The plugin's per-recording input copies share the prefix.</summary>
         public static int SweepStale(TimeSpan olderThan, string root = null)
         {
             var baseDir = root ?? Root;

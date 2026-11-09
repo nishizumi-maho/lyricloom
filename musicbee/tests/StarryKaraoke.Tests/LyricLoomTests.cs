@@ -73,5 +73,40 @@ namespace StarryKaraoke.Tests
         {
             Assert.Equal("https://github.com/nishizumi-maho/lyricloom/releases/latest", LyricLoomLauncher.DownloadUrl);
         }
+
+        [Fact]
+        public void A_second_request_for_the_same_song_is_ignored_for_ten_seconds()
+        {
+            var guard = new LyricLoomRequestGuard();
+            var start = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+            const string song = @"C:\Music\one.mp3";
+
+            Assert.True(guard.TryBegin(song, start));
+            Assert.False(guard.TryBegin(song, start));
+            Assert.False(guard.TryBegin(song, start.AddSeconds(9.999)));
+            Assert.True(guard.TryBegin(song, start.AddSeconds(10)));
+        }
+
+        [Fact]
+        public void The_relaunch_guard_is_per_song()
+        {
+            var guard = new LyricLoomRequestGuard();
+            var start = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+
+            Assert.True(guard.TryBegin(@"C:\Music\one.mp3", start));
+            Assert.True(guard.TryBegin(@"C:\Music\two.mp3", start.AddSeconds(1)));
+        }
+
+        [Fact]
+        public void A_failed_launch_may_be_retried_immediately()
+        {
+            var guard = new LyricLoomRequestGuard();
+            var start = new DateTime(2026, 1, 1, 10, 0, 0, DateTimeKind.Utc);
+            const string song = @"C:\Music\one.mp3";
+
+            Assert.True(guard.TryBegin(song, start));
+            guard.Forget(song);
+            Assert.True(guard.TryBegin(song, start.AddSeconds(1)));
+        }
     }
 }

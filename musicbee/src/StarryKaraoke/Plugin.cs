@@ -30,7 +30,9 @@ namespace MusicBeePlugin
         private double _lastDuration;
         private SongOffsetStore _songOffsets;
         private SidecarWatcher _sidecarWatcher;
+        private readonly object _sidecarWatcherLock = new object();
         private bool _lyricLoomStarting;
+        private readonly LyricLoomRequestGuard _lyricLoomRequests = new LyricLoomRequestGuard();
         private System.Windows.Threading.Dispatcher _safetyDispatcher;
         private bool _dispatcherMessageShown;
 
@@ -81,6 +83,8 @@ namespace MusicBeePlugin
                 InstallDispatcherSafetyNet();
 
             Log($"initialise {v} (MusicBee API {_mb.ApiRevision})");
+            var swept = RecordingTemp.SweepStale(RecordingTemp.StaleAfter);
+            if (swept > 0) Log("removed " + swept + " stale recording temp folder(s)");
             Log("romaji dictionary: " + RomajiCore.Romanizer.DictionaryDirectory +
                 (File.Exists(Path.Combine(RomajiCore.Romanizer.DictionaryDirectory, "sys.dic")) ? "" : " (missing sys.dic)"));
             if (_songOffsets != null && !string.IsNullOrEmpty(_songOffsets.LastError))
@@ -109,6 +113,7 @@ namespace MusicBeePlugin
         {
             _shuttingDown = true;
             DisposeAutoOpenTimers();
+            DisposeSidecarWatcher();
             var reopen = _window != null;
             OnUi(() =>
             {
@@ -211,6 +216,7 @@ namespace MusicBeePlugin
                     AddCommand("Starry Karaoke: loop current line", "Loop the line that is playing",
                                LoopCurrentLine);
                     if (_settings.WindowOpen) OnUi(Open);
+                    else OnUi(() => UpdateSidecarWatcher(CurrentSongUrl()));
                     break;
                 case NotificationType.TrackChanged:
                     HandleTrackChanged(sourceFileUrl);
@@ -228,16 +234,23 @@ namespace MusicBeePlugin
         {
             var url = sourceFileUrl ?? "";
             var changed = !string.Equals(url, _currentSongUrl, StringComparison.OrdinalIgnoreCase);
+            var previous = _currentSongUrl;
             _currentSongUrl = url;
             if (changed)
             {
                 _dismissedSongUrl = null;
                 _autoAttemptedForSong = false;
+                if (!string.IsNullOrEmpty(previous)) _lyricLoomRequests.Forget(previous);
                 DisposeSidecarWatcher();
             }
             Interlocked.Increment(ref _autoOpenGeneration);
             if (_window != null) LoadSong();
-            OnUi(() => _window?.SetLyricLoomEnabled(!string.IsNullOrEmpty(url) && File.Exists(url)));
+            else UpdateSidecarWatcher(url);
+            OnUi(() =>
+            {
+                if (changed) _window?.ClearLyricLoomPending();
+                _window?.SetLyricLoomEnabled(!string.IsNullOrEmpty(url) && File.Exists(url));
+            });
             QueueAutoOpenAttempt();
         }
 
@@ -472,7 +485,7 @@ namespace MusicBeePlugin
             if (_settings.AutoOpenFocus) w.Activate();
         }
 
-        private void OpenWindow(bool autoOpen)
+        private void OpenWindow(bool autoOpen, bool preferSidecar = false)
         {
             InstallDispatcherSafetyNet();
             var activate = !autoOpen || _settings.AutoOpenFocus;
@@ -547,7 +560,7 @@ namespace MusicBeePlugin
                 _window = null;
                 Interlocked.Increment(ref _songGeneration);
                 StopPolling();
-                DisposeSidecarWatcher();
+                UpdateSidecarWatcher(_currentSongUrl);
                 _settings.WindowOpen = false;
                 SaveSettings();
             };
@@ -558,7 +571,7 @@ namespace MusicBeePlugin
             w.SetLyricLoomEnabled(!string.IsNullOrEmpty(_currentSongUrl) && File.Exists(_currentSongUrl));
             w.Show();
             if (activate) w.Activate();
-            LoadSong();
+            LoadSong(preferSidecar);
         }
 
         // ---------------------------------------------------------------- player, off the UI thread
@@ -644,6 +657,7 @@ namespace MusicBeePlugin
                 SaveSettings();
                 _window?.ApplySettings(_settings);
                 _window?.RefreshMenu();
+                UpdateSidecarWatcher(_currentSongUrl);
                 if (_settings.Japanese != before) LoadSong();
                 // Editing colours or turning party mode on must not bring the karaoke window in
                 // front of whatever the user is doing. Party mode starts on the next genuine
@@ -662,17 +676,26 @@ namespace MusicBeePlugin
         {
             if (_lyricLoomStarting) return;
             _lyricLoomStarting = true;
+            var audio = "";
             try
             {
-                var audio = _mb.NowPlaying_GetFileUrl();
+                audio = _mb.NowPlaying_GetFileUrl();
                 if (string.IsNullOrEmpty(audio) || !File.Exists(audio))
                 {
                     Message("No local song is playing.");
                     return;
                 }
+                if (!_lyricLoomRequests.TryBegin(audio, DateTime.UtcNow))
+                {
+                    // The song is already with LyricLoom: keep the waiting status, do not queue it twice.
+                    _window?.ShowLyricLoomPending();
+                    Log("LyricLoom: already asked for " + Path.GetFileName(audio));
+                    return;
+                }
                 var exe = LyricLoomLocator.Default.Find(_settings.LyricLoomPath);
                 if (string.IsNullOrEmpty(exe))
                 {
+                    _lyricLoomRequests.Forget(audio);
                     var answer = System.Windows.MessageBox.Show(
                         "LyricLoom was not found.\n\nDownload LyricLoom from the release page?\n" + LyricLoomLauncher.DownloadUrl,
                         "Starry Karaoke", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Information);
@@ -683,9 +706,11 @@ namespace MusicBeePlugin
                 }
                 LyricLoomLauncher.Start(exe, audio);
                 Log("LyricLoom: launched for " + Path.GetFileName(audio));
+                _window?.ShowLyricLoomPending();
             }
             catch (Exception e)
             {
+                _lyricLoomRequests.Forget(audio);
                 Log("could not start LyricLoom: " + e);
                 Message("Could not start LyricLoom. See mb_StarryKaraoke.log for details.");
             }
@@ -770,30 +795,54 @@ namespace MusicBeePlugin
                 target = dlg.FileName;
             }
 
-            // the recorder gets its own copies: the lyrics and settings as they are now
-            var work = Path.Combine(Path.GetTempPath(), "StarryKaraoke");
-            Directory.CreateDirectory(work);
-            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-            var lrcPath = Path.Combine(work, stamp + ".lrc");
-            File.WriteAllText(lrcPath, lrc);
-            var settingsName = stamp + ".xml";
-            _settings.Save(work, settingsName);
-            var dict = new[] { Path.Combine(dll, "RomajiLyrics", "IpaDic"), Path.Combine(StorageFolder, "Plugins", "RomajiLyrics", "IpaDic"), Path.Combine(dll, "IpaDic") };
-            var dictDir = Array.Find(dict, d => File.Exists(Path.Combine(d, "sys.dic"))) ?? "";
+            // Never let the recorder start only to be told (or worse, to overwrite) that its target is
+            // the song it reads. The recorder checks this again with symlinks resolved.
+            if (RecordingPaths.SamePath(target, audio))
+            {
+                Log("record refused: the output is the song's own audio file");
+                Message("The video cannot be saved over the song's audio file. Choose another file name.");
+                return;
+            }
 
-            string Q(string s) => "\"" + s.Replace("\"", "'") + "\"";
-            var args = $"--lrc {Q(lrcPath)} --audio {Q(audio)} --out {Q(target)} --settings {Q(Path.Combine(work, settingsName))} " +
-                       $"--title {Q(header)} --duration {duration.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
-                       $"--dict {Q(dictDir)} --ffmpeg {Q(ffmpeg)}";
-            Log("record: " + target);
+            // The recorder gets its own copies: the lyrics and settings as they are now. They live in
+            // a per-run rec-* folder, so a killed recorder leaves them where the startup sweep finds
+            // them (RV1-05).
+            string work;
+            try { work = RecordingTemp.CreateRunFolder(); }
+            catch (Exception e)
+            {
+                Log("could not create the recorder's temp folder: " + e);
+                Message("Could not prepare the temporary files for the recorder. See mb_StarryKaraoke.log for details.");
+                return;
+            }
+
+            var started = false;
             try
             {
+                var lrcPath = Path.Combine(work, RecordingTemp.LyricsFileName);
+                File.WriteAllText(lrcPath, lrc);
+                var settingsPath = Path.Combine(work, RecordingTemp.SettingsFileName);
+                _settings.Save(work, RecordingTemp.SettingsFileName);
+                var dict = new[] { Path.Combine(dll, "RomajiLyrics", "IpaDic"), Path.Combine(StorageFolder, "Plugins", "RomajiLyrics", "IpaDic"), Path.Combine(dll, "IpaDic") };
+                var dictDir = Array.Find(dict, d => File.Exists(Path.Combine(d, "sys.dic"))) ?? "";
+
+                string Q(string s) => "\"" + s.Replace("\"", "'") + "\"";
+                var args = $"--lrc {Q(lrcPath)} --audio {Q(audio)} --out {Q(target)} --settings {Q(settingsPath)} " +
+                           $"--title {Q(header)} --duration {duration.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+                           $"--dict {Q(dictDir)} --ffmpeg {Q(ffmpeg)}";
+                Log("record: " + target);
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(exe, args) { UseShellExecute = false, WorkingDirectory = dll });
+                started = true;
             }
             catch (Exception e)
             {
                 Log("could not start the recorder: " + e);
                 Message("Could not start StarryKaraoke.Recorder.exe. See mb_StarryKaraoke.log for details.");
+            }
+            finally
+            {
+                // On every path where the recorder did not start, its private copies must not stay.
+                if (!started) RecordingTemp.DeleteRunFolder(work);
             }
         }
 
@@ -974,8 +1023,7 @@ namespace MusicBeePlugin
                         _window?.SetNextSong(song.Next);
                         _window?.SetWordTimingAvailable(hasWordTiming, canCreateLyrics);
                         _window?.SetLyricLoomEnabled(canCreateLyrics);
-                        if (_window != null) EnsureSidecarWatcher(song.Url);
-                        else DisposeSidecarWatcher();
+                        UpdateSidecarWatcher(song.Url);
                         if (_settings.AutoSkipIntro) SkipIntro(force: false);
                     });
                 }
@@ -994,8 +1042,7 @@ namespace MusicBeePlugin
                         _window?.SetWordTimingAvailable(false,
                             !string.IsNullOrEmpty(_currentSongUrl) && File.Exists(_currentSongUrl));
                         _window?.ShowMessage("Could not read the lyrics for this song");
-                        if (_window != null) EnsureSidecarWatcher(_currentSongUrl);
-                        else DisposeSidecarWatcher();
+                        UpdateSidecarWatcher(_currentSongUrl);
                     });
                 }
             });
@@ -1081,28 +1128,70 @@ namespace MusicBeePlugin
 
         // ---------------------------------------------------------------- sidecar watcher
 
-        private void EnsureSidecarWatcher(string audioUrl)
+        /// <summary>Keeps one watcher for the playing song while the window is open, and also while it
+        /// is closed when auto-open is on, so a sidecar written by LyricLoom can open it.</summary>
+        private void UpdateSidecarWatcher(string audioUrl)
         {
-            if (string.IsNullOrEmpty(audioUrl) || !File.Exists(audioUrl)) { DisposeSidecarWatcher(); return; }
-            if (_sidecarWatcher != null &&
-                string.Equals(_sidecarWatcher.AudioPath, audioUrl, StringComparison.OrdinalIgnoreCase)) return;
-            DisposeSidecarWatcher();
-            try
+            lock (_sidecarWatcherLock)
             {
-                _sidecarWatcher = new SidecarWatcher(audioUrl, path => OnUi(() =>
+                if (!ShouldWatchSidecar(audioUrl)) { DisposeSidecarWatcherLocked(); return; }
+                if (_sidecarWatcher != null &&
+                    string.Equals(_sidecarWatcher.AudioPath, audioUrl, StringComparison.OrdinalIgnoreCase)) return;
+                DisposeSidecarWatcherLocked();
+                try
                 {
-                    if (!string.Equals(audioUrl, _currentSongUrl, StringComparison.OrdinalIgnoreCase)) return;
-                    Log("sidecar changed: " + Path.GetFileName(path));
-                    LoadSong(preferSidecar: true);
-                }), LogException);
-            }
-            catch (Exception e)
-            {
-                Log("could not watch the lyrics folder: " + e.Message);
+                    _sidecarWatcher = new SidecarWatcher(audioUrl, path => OnSidecarChanged(audioUrl, path), LogException);
+                }
+                catch (Exception e)
+                {
+                    Log("could not watch the lyrics folder: " + e.Message);
+                }
             }
         }
 
+        private bool ShouldWatchSidecar(string audioUrl)
+        {
+            if (_shuttingDown || string.IsNullOrEmpty(audioUrl) || !File.Exists(audioUrl)) return false;
+            return _window != null || (_settings != null && _settings.AutoOpenLyrics != AutoOpenLyrics.Off);
+        }
+
+        /// <summary>Runs on the watcher's timer thread, then applies the result on MusicBee's UI thread.
+        /// The lyrics kind is read from the sidecar that appeared, not from MusicBee's possibly stale
+        /// cached copy.</summary>
+        private void OnSidecarChanged(string audioUrl, string path)
+        {
+            var kind = LyricsKind.None;
+            try { kind = AutoOpenRule.Classify(LyricsFile.Read(path).Text); }
+            catch (Exception e) { Log("reading the sidecar failed: " + e.Message); }
+            var playing = IsPlaying();
+            OnUi(() => Safe.Run(() =>
+            {
+                if (_shuttingDown) return;
+                if (!string.Equals(audioUrl, _currentSongUrl, StringComparison.OrdinalIgnoreCase)) return;
+                Log("sidecar changed: " + Path.GetFileName(path));
+                _lyricLoomRequests.Forget(audioUrl);
+                _window?.ClearLyricLoomPending();
+                var dismissed = string.Equals(audioUrl, _dismissedSongUrl, StringComparison.OrdinalIgnoreCase);
+                var action = AutoOpenRule.DecideForSidecar(_settings.AutoOpenLyrics, kind, playing,
+                    _window != null, _window != null && _window.IsVisible, dismissed);
+                if (action == AutoOpenAction.Open && _window == null)
+                {
+                    OpenWindow(autoOpen: true, preferSidecar: true);
+                    return;
+                }
+                if (_window == null) return;
+                if (action == AutoOpenAction.Show && !_window.IsVisible)
+                    ShowAuto();
+                LoadSong(preferSidecar: true);
+            }, LogException));
+        }
+
         private void DisposeSidecarWatcher()
+        {
+            lock (_sidecarWatcherLock) DisposeSidecarWatcherLocked();
+        }
+
+        private void DisposeSidecarWatcherLocked()
         {
             var watcher = Interlocked.Exchange(ref _sidecarWatcher, null);
             try { watcher?.Dispose(); } catch (Exception) { }

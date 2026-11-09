@@ -81,8 +81,12 @@ namespace MusicBeePlugin
         private readonly Action<Exception> _log;
         private readonly Border _hint;
         private readonly TextBlock _hintText;
+        private readonly Border _lyricLoomStatus;
+        private readonly TextBlock _lyricLoomStatusText;
         private MenuItem _lyricLoomItem;
         private bool _hintDismissed;
+        private bool _lyricLoomPending;
+        private bool _hasWordTiming;
         private bool _lyricLoomEnabled;
         private string _songKey;
         private bool _closeForShutdown;
@@ -90,6 +94,15 @@ namespace MusicBeePlugin
 
         /// <summary>The commands the window's buttons and keys use (for tests).</summary>
         internal PlayerControls Controls => _controls;
+
+        /// <summary>The DPI the scene uses for text layout (for tests).</summary>
+        internal double ScenePixelsPerDip => _scene.PixelsPerDip;
+
+        /// <summary>Whether the LyricLoom waiting status is showing (for tests).</summary>
+        internal bool IsLyricLoomStatusVisible => _lyricLoomStatus.Visibility == Visibility.Visible;
+
+        /// <summary>Whether the word-timing hint is showing (for tests).</summary>
+        internal bool IsHintVisible => _hint.Visibility == Visibility.Visible;
 
         public event EventHandler SettingsRequested;
         public event EventHandler RecordRequested;
@@ -143,7 +156,8 @@ namespace MusicBeePlugin
             _poll = poll;
             _monitorHz = FrameRatePolicy.DefaultFps;
             _scene = new KaraokeScene(settings);
-            Title = "Starry Karaoke";
+            UpdateTextDpi();
+            Title = Strings.WindowTitle;
             Background = Brushes.Black;
             MinWidth = 360;
             MinHeight = 240;
@@ -184,13 +198,13 @@ namespace MusicBeePlugin
 
             _hintText = new TextBlock
             {
-                Text = "No word timing for this song. Make word-timed lyrics with LyricLoom.",
+                Text = Strings.NoWordTimingHint,
                 Foreground = Brushes.White, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
                 FontFamily = new FontFamily("Segoe UI, Yu Gothic UI")
             };
             var makeLyrics = new Button
             {
-                Content = "Make with LyricLoom...", Margin = new Thickness(10, 0, 4, 0),
+                Content = Strings.MakeWithLyricLoom, Margin = new Thickness(10, 0, 4, 0),
                 Padding = new Thickness(8, 3, 8, 3), FontSize = 12,
                 Background = new SolidColorBrush(Color.FromArgb(35, 255, 255, 255)),
                 Foreground = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255))
@@ -200,7 +214,7 @@ namespace MusicBeePlugin
             {
                 Content = "\u00D7", Width = 24, Height = 22, Padding = new Thickness(0), FontSize = 13,
                 Background = Brushes.Transparent, Foreground = Brushes.White, BorderThickness = new Thickness(0),
-                ToolTip = "Dismiss"
+                ToolTip = Strings.Dismiss
             };
             dismissHint.Click += (s, e) => Safe.Run(() =>
             {
@@ -219,6 +233,22 @@ namespace MusicBeePlugin
                 Visibility = Visibility.Collapsed
             };
             _root.Children.Add(_hint);
+
+            _lyricLoomStatusText = new TextBlock
+            {
+                Text = Strings.LyricLoomPending, Foreground = Brushes.White, FontSize = 13,
+                TextAlignment = TextAlignment.Center,
+                FontFamily = new FontFamily("Segoe UI, Yu Gothic UI")
+            };
+            _lyricLoomStatus = new Border
+            {
+                Child = _lyricLoomStatusText, HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 0, 86),
+                Padding = new Thickness(14, 6, 14, 6), CornerRadius = new CornerRadius(8),
+                Background = new SolidColorBrush(Color.FromArgb(220, 12, 12, 30)),
+                Visibility = Visibility.Collapsed
+            };
+            _root.Children.Add(_lyricLoomStatus);
 
             _toastTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1.7) };
             _toastTimer.Tick += (s, e) => Safe.Run(() =>
@@ -255,6 +285,7 @@ namespace MusicBeePlugin
             PreviewKeyDown += OnKey;   // preview: arrows and space reach us before any control can take them
             Loaded += (s, e) => Safe.Run(() =>
             {
+                UpdateTextDpi();
                 if (settings.Fullscreen) SetFullscreen(true);
                 UpdateRenderState();
             }, _log);
@@ -271,10 +302,12 @@ namespace MusicBeePlugin
             StateChanged += (s, e) => Safe.Run(UpdateRenderState, _log);
             LocationChanged += (s, e) => Safe.Run(() =>
             {
+                UpdateTextDpi();
                 if (_settings.WindowFps == 0) _monitorHz = MonitorRefreshRate(CurrentScreen());
             }, _log);
             DpiChanged += (s, e) => Safe.Run(() =>
             {
+                UpdateTextDpi();
                 if (_fullscreen) ApplyFullscreenBounds();
             }, _log);
             Activated += (s, e) => Safe.Run(UpdateRenderState, _log);
@@ -292,6 +325,14 @@ namespace MusicBeePlugin
             var v = new Rect(SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
                              SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
             return r.IntersectsWith(v) && r.Left < v.Right - 60 && r.Top < v.Bottom - 60;
+        }
+
+        /// <summary>FormattedText measured at 96 DPI is blurry on a scaled display. The window follows
+        /// its current monitor's DPI; the offscreen recorder and the Preview tool keep 1.0.</summary>
+        private void UpdateTextDpi()
+        {
+            try { _scene.PixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip; }
+            catch (Exception e) { _log?.Invoke(e); }
         }
 
         /// <summary>When the saved position is no longer on any screen, open on the monitor the window
@@ -360,6 +401,7 @@ namespace MusicBeePlugin
             {
                 _songKey = songKey;
                 _hintDismissed = false;
+                ClearLyricLoomPending();
             }
             _scene.SetSong(lines, title, songMs);
             _songMs = songMs;
@@ -385,8 +427,31 @@ namespace MusicBeePlugin
         public void SetWordTimingAvailable(bool hasWordTiming, bool canCreateLyrics)
         {
             _lyricLoomEnabled = canCreateLyrics;
+            _hasWordTiming = hasWordTiming;
             UpdateLyricLoomMenu();
-            _hint.Visibility = canCreateLyrics && !hasWordTiming && !_hintDismissed
+            UpdateHintVisibility();
+        }
+
+        /// <summary>After the song was sent to LyricLoom: a small status stays up until the sidecar
+        /// arrives (the plugin clears it) or the song changes.</summary>
+        internal void ShowLyricLoomPending()
+        {
+            _lyricLoomPending = true;
+            _lyricLoomStatusText.Text = Strings.LyricLoomPending;
+            _lyricLoomStatus.Visibility = Visibility.Visible;
+            UpdateHintVisibility();
+        }
+
+        internal void ClearLyricLoomPending()
+        {
+            _lyricLoomPending = false;
+            _lyricLoomStatus.Visibility = Visibility.Collapsed;
+            UpdateHintVisibility();
+        }
+
+        private void UpdateHintVisibility()
+        {
+            _hint.Visibility = _lyricLoomEnabled && !_hasWordTiming && !_hintDismissed && !_lyricLoomPending
                 ? Visibility.Visible : Visibility.Collapsed;
         }
 
@@ -698,13 +763,13 @@ namespace MusicBeePlugin
             var value = Math.Max(-10000, Math.Min(10000, _songOffsetMs + delta));
             if (value == _songOffsetMs)
             {
-                ShowToast(_songOffsetMs == 0 ? "Song delay reset" : $"Song delay {_songOffsetMs:+0;-0;0} ms");
+                ShowToast(_songOffsetMs == 0 ? Strings.SongDelayReset : Strings.SongDelayLabel(_songOffsetMs));
                 return;
             }
             _songOffsetMs = value;
             _transport.SetSongOffset(value);
             SongOffsetChanged?.Invoke(value);
-            ShowToast(value == 0 ? "Song delay reset" : $"Song delay {value:+0;-0;0} ms");
+            ShowToast(value == 0 ? Strings.SongDelayReset : Strings.SongDelayLabel(value));
         }
 
         internal void ResetOffset() => NudgeOffset(-_songOffsetMs);
@@ -713,7 +778,7 @@ namespace MusicBeePlugin
         {
             _mute = !_mute;
             _controls.SetMute?.Invoke(_mute);
-            ShowToast(_mute ? "Muted" : "Sound on");
+            ShowToast(_mute ? Strings.Muted : Strings.SoundOn);
         }
 
         /// <summary>`L` and Shift+L toggle; pressing the same range again turns the loop off, a
@@ -733,21 +798,21 @@ namespace MusicBeePlugin
             if (requested == LoopMode.Off)
             {
                 ClearLoop();
-                ShowToast("Loop off");
+                ShowToast(Strings.LoopOff);
                 RefreshMenu();
                 return;
             }
             var index = _scene.CurrentLine(_songTime);
             if (index < 0) index = 0;
             var (start, end) = _scene.LineRange(index, requested == LoopMode.Section ? 4 : 1);
-            if (double.IsNaN(start) || double.IsNaN(end)) { ShowToast("No lyrics to loop"); return; }
+            if (double.IsNaN(start) || double.IsNaN(end)) { ShowToast(Strings.NoLyricsToLoop); return; }
             if (_songMs > 0) end = Math.Min(end, _songMs);
             _loopMode = requested;
             _loopStart = start;
             _loopEnd = end;
             _scene.LoopStart = start;
             _scene.LoopEnd = end;
-            ShowToast(requested == LoopMode.Section ? "Looping this section" : "Looping this line");
+            ShowToast(requested == LoopMode.Section ? Strings.LoopingSection : Strings.LoopingLine);
             _controls.Seek?.Invoke(Math.Max(0, start + EffectiveOffsetMs));
             _loopHoldUntil = _frameWatch.Elapsed.TotalSeconds + 0.7;
             RefreshMenu();
@@ -772,18 +837,18 @@ namespace MusicBeePlugin
                 _toast.Opacity = 0;
                 var bmp = new RenderTargetBitmap(w, h, 96 * dpi.DpiScaleX, 96 * dpi.DpiScaleY, PixelFormats.Pbgra32);
                 bmp.Render(_root);
-                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Starry Karaoke");
+                var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), Strings.ScreenshotFolder);
                 Directory.CreateDirectory(dir);
-                var path = Path.Combine(dir, $"Starry Karaoke {DateTime.Now:yyyy-MM-dd HH-mm-ss}.png");
+                var path = Path.Combine(dir, Strings.ScreenshotFilePrefix + $"{DateTime.Now:yyyy-MM-dd HH-mm-ss}.png");
                 var enc = new PngBitmapEncoder();
                 enc.Frames.Add(BitmapFrame.Create(bmp));
                 using (var f = File.Create(path)) enc.Save(f);
                 try { Clipboard.SetImage(bmp); } catch (Exception) { }
-                ShowToast("Screenshot saved");
+                ShowToast(Strings.ScreenshotSaved);
             }
             catch (Exception)
             {
-                ShowToast("Could not save the screenshot");
+                ShowToast(Strings.ScreenshotFailed);
             }
         }
 
@@ -828,7 +893,7 @@ namespace MusicBeePlugin
                 if (double.IsNaN(start)) return;
                 _suppressDoubleClick = _frameWatch.Elapsed.TotalSeconds + 0.45;
                 _controls.Seek?.Invoke(Math.Max(0, start + EffectiveOffsetMs));
-                ShowToast("Jumped to line");
+                ShowToast(Strings.JumpedToLine);
                 e.Handled = true;
             }, _log);
         }
@@ -953,24 +1018,24 @@ namespace MusicBeePlugin
         private ContextMenu BuildMenu()
         {
             var menu = new ContextMenu();
-            var full = new MenuItem { Header = _fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen (F11)" };
+            var full = new MenuItem { Header = _fullscreen ? Strings.ExitFullscreen : Strings.EnterFullscreen };
             full.Click += (s, e) => Safe.Run(() => SetFullscreen(!_fullscreen), _log);
             menu.Items.Add(full);
             var topmost = new MenuItem
             {
-                Header = "Keep on top in fullscreen",
+                Header = Strings.KeepOnTop,
                 IsCheckable = true,
                 IsChecked = _settings.FullscreenTopmost
             };
             topmost.Click += (s, e) => Safe.Run(() => SetFullscreenTopmost(!_settings.FullscreenTopmost), _log);
             menu.Items.Add(topmost);
-            var display = new MenuItem { Header = "Fullscreen monitor" };
+            var display = new MenuItem { Header = Strings.FullscreenMonitor };
             var current = CurrentMonitor();
             foreach (var screen in System.Windows.Forms.Screen.AllScreens)
             {
                 var item = new MenuItem
                 {
-                    Header = screen.DeviceName + (screen.Primary ? " (primary)" : ""),
+                    Header = screen.DeviceName + (screen.Primary ? Strings.PrimaryMonitorSuffix : ""),
                     IsCheckable = true,
                     IsChecked = string.Equals(screen.DeviceName, _settings.FullscreenMonitor,
                                              StringComparison.OrdinalIgnoreCase) ||
@@ -982,19 +1047,19 @@ namespace MusicBeePlugin
                 display.Items.Add(item);
             }
             display.Items.Add(new Separator());
-            var currentItem = new MenuItem { Header = "Current monitor", IsCheckable = true };
+            var currentItem = new MenuItem { Header = Strings.CurrentMonitor, IsCheckable = true };
             currentItem.IsChecked = string.IsNullOrEmpty(_settings.FullscreenMonitor);
             currentItem.Click += (s, e) => Safe.Run(() => ChooseFullscreenMonitor(""), _log);
             display.Items.Add(currentItem);
             menu.Items.Add(display);
 
-            var skip = new MenuItem { Header = "Skip intro (P)" };
+            var skip = new MenuItem { Header = Strings.SkipIntro };
             skip.Click += (s, e) => Safe.Run(() => SkipIntroRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(skip);
 
             var loop = new MenuItem
             {
-                Header = "Loop current line (L)",
+                Header = Strings.LoopCurrentLine,
                 IsCheckable = true,
                 IsChecked = _loopMode == LoopMode.Line
             };
@@ -1002,23 +1067,23 @@ namespace MusicBeePlugin
             menu.Items.Add(loop);
             var section = new MenuItem
             {
-                Header = "Loop this section (Shift+L)",
+                Header = Strings.LoopThisSection,
                 IsCheckable = true,
                 IsChecked = _loopMode == LoopMode.Section
             };
             section.Click += (s, e) => Safe.Run(() => SetLoop(true), _log);
             menu.Items.Add(section);
-            var loopOff = new MenuItem { Header = "Loop off", IsEnabled = _loopMode != LoopMode.Off };
+            var loopOff = new MenuItem { Header = Strings.LoopOffItem, IsEnabled = _loopMode != LoopMode.Off };
             loopOff.Click += (s, e) => Safe.Run(LoopOff, _log);
             menu.Items.Add(loopOff);
-            var shot = new MenuItem { Header = "Save screenshot (F12)" };
+            var shot = new MenuItem { Header = Strings.SaveScreenshot };
             shot.Click += (s, e) => Safe.Run(SaveScreenshot, _log);
             menu.Items.Add(shot);
 
-            var jp = new MenuItem { Header = "Japanese" };
-            foreach (var (mode, label) in new[] { (JapaneseMode.RomajiOnly, "Romaji only"),
-                                                  (JapaneseMode.JapaneseAndRomaji, "Japanese + romaji"),
-                                                  (JapaneseMode.JapaneseOnly, "Japanese only") })
+            var jp = new MenuItem { Header = Strings.Japanese };
+            foreach (var (mode, label) in new[] { (JapaneseMode.RomajiOnly, Strings.RomajiOnly),
+                                                  (JapaneseMode.JapaneseAndRomaji, Strings.JapaneseAndRomaji),
+                                                  (JapaneseMode.JapaneseOnly, Strings.JapaneseOnly) })
             {
                 var item = new MenuItem { Header = label, IsCheckable = true, IsChecked = _settings.Japanese == mode };
                 item.Click += (s, e) => Safe.Run(() => JapaneseModeChosen?.Invoke(mode), _log);
@@ -1028,24 +1093,24 @@ namespace MusicBeePlugin
 
             _lyricLoomItem = new MenuItem
             {
-                Header = "Make word-timed lyrics with LyricLoom...",
+                Header = Strings.MakeLyricsWithLyricLoom,
                 IsEnabled = _lyricLoomEnabled
             };
             _lyricLoomItem.Click += (s, e) => Safe.Run(() => LyricLoomRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(_lyricLoomItem);
 
-            var record = new MenuItem { Header = "Record song video..." };
+            var record = new MenuItem { Header = Strings.RecordSongVideo };
             record.Click += (s, e) => Safe.Run(() => RecordRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(record);
 
-            var settings = new MenuItem { Header = "Settings..." };
+            var settings = new MenuItem { Header = Strings.Settings };
             settings.Click += (s, e) => Safe.Run(() => SettingsRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(settings);
-            var diagnostics = new MenuItem { Header = "Diagnostics..." };
+            var diagnostics = new MenuItem { Header = Strings.Diagnostics };
             diagnostics.Click += (s, e) => Safe.Run(() => DiagnosticsRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(diagnostics);
             menu.Items.Add(new Separator());
-            var close = new MenuItem { Header = "Close" };
+            var close = new MenuItem { Header = Strings.Close };
             close.Click += (s, e) => Safe.Run(Close, _log);
             menu.Items.Add(close);
             return menu;
