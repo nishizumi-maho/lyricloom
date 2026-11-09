@@ -3,6 +3,7 @@ cache per stage, and a folder of tracks without letting one failure stop the res
 from __future__ import annotations
 
 import os
+import threading
 import time
 import traceback
 from collections.abc import Callable, Iterable
@@ -24,6 +25,7 @@ from .stages.separate import keep_vocals, separate, to_mono16k
 from .stages.assemblyai import transcribe_assemblyai
 from .stages.transcribe import looks_hallucinated, transcribe
 from .stages.write import write_lyrics, write_original
+from .workers import WorkerCancelled, check_cancelled
 
 STAGES = ["probe", "lyrics", "separate", "transcribe", "align", "write"]
 AUDIO_EXT = {".flac", ".mp3", ".m4a", ".ogg", ".opus", ".wav"}
@@ -34,7 +36,7 @@ SENTENCE_END = set(".!?。！？")
 @dataclass
 class TrackResult:
     path: Path
-    status: Literal["done", "review", "skipped", "failed"]
+    status: Literal["done", "review", "skipped", "failed", "cancelled"]
     source: str = ""
     conf: float = 0.0
     error: str = ""
@@ -107,19 +109,21 @@ def _assemblyai(audio: Path, work: Path, sep: dict, lang: str, whisper: Transcri
 
 
 def _extra_passes(audio: Path, work: Path, sep: dict, first: Transcript, lang: str, prompt: str,
-                  extra_voters: list[Transcript] | None = None) -> Transcript:
+                  extra_voters: list[Transcript] | None = None,
+                  cancel: threading.Event | None = None) -> Transcript:
     """Transcription-only songs: two more Whisper passes (original mix, and the vocals decoded at
     another temperature), fused word by word with the first."""
     mix16k = work / "mix16k.wav"
     to_mono16k(audio, mix16k)
     whisper_lang = lang if lang == "ja" else None
-    mix = transcribe(mix16k, work, whisper_lang, prompt, name="whisper_mix")
-    warm = transcribe(Path(sep["vocals16k"]), work, whisper_lang, prompt, name="whisper_t02", extra=["-tp", "0.2"])
+    mix = transcribe(mix16k, work, whisper_lang, prompt, name="whisper_mix", cancel=cancel)
+    warm = transcribe(Path(sep["vocals16k"]), work, whisper_lang, prompt, name="whisper_t02",
+                      extra=["-tp", "0.2"], cancel=cancel)
     return rover([first, mix, warm, *(extra_voters or [])], lang)
 
 
-def _separate(audio: Path, work: Path) -> dict:
-    sep = separate(audio, work)
+def _separate(audio: Path, work: Path, cancel: threading.Event | None = None) -> dict:
+    sep = separate(audio, work, cancel=cancel)
     if sep.get("fallback"):
         _log(audio, f"separation in WSL failed, ran on {sep['device']} instead: {sep['fallback']}")
     else:
@@ -127,23 +131,45 @@ def _separate(audio: Path, work: Path) -> dict:
     return sep
 
 
-def forget_sync(audio: Path) -> list[Path]:
-    """Deletes the word timing LyricLoom wrote for a song, so it can be done again: the .lrc (only
-    when LyricLoom wrote it) and the .japanese.lrc / .romaji.lrc copies. The official lyric
-    (.original.lrc) and .lrc files from anywhere else are kept. Returns the files deleted."""
+REDO_SUFFIX = ".redo-backup"
+
+
+def forget_sync(audio: Path) -> dict[Path, Path]:
+    """Moves the word timing LyricLoom wrote for a song out of the way so it can be done again: the
+    .lrc (only when LyricLoom wrote it) and the .japanese.lrc / .romaji.lrc copies. The official
+    lyric (.original.lrc) and .lrc files from anywhere else are kept. Returns original -> backup so
+    the caller can restore them when the new run fails or is cancelled."""
     from .stages.write import japanese_path, romaji_path
-    removed = []
+    moved: dict[Path, Path] = {}
     lrc = audio.with_suffix(".lrc")
+    originals = []
     if lrc.exists():
         meta = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace")).meta
         if is_ours(meta.get("re")):
-            lrc.unlink()
-            removed.append(lrc)
-    for p in (japanese_path(audio), romaji_path(audio)):
-        if p.exists():
-            p.unlink()
-            removed.append(p)
-    return removed
+            originals.append(lrc)
+    originals += [p for p in (japanese_path(audio), romaji_path(audio)) if p.exists()]
+    try:
+        for original in originals:
+            backup = original.with_name(original.name + REDO_SUFFIX)
+            os.replace(original, backup)
+            moved[original] = backup
+    except OSError:
+        restore_sync(moved)
+        raise
+    return moved
+
+
+def restore_sync(moved: dict[Path, Path]) -> None:
+    """Puts the files moved by forget_sync back exactly as they were."""
+    for original, backup in moved.items():
+        if backup.exists():
+            os.replace(backup, original)
+
+
+def drop_sync_backup(moved: dict[Path, Path]) -> None:
+    """Deletes the backups after a successful Redo."""
+    for backup in moved.values():
+        backup.unlink(missing_ok=True)
 
 
 def _already_done(audio: Path) -> bool:
@@ -185,10 +211,12 @@ def _write(audio: Path, meta, chosen: Candidate, result) -> str:
     return status
 
 
-def realign(audio: Path, text: str, source: str = "manual") -> TrackResult:
+def realign(audio: Path, text: str, source: str = "manual",
+            cancel: threading.Event | None = None) -> TrackResult:
     """Aligns lyrics given by hand (e.g. pasted in the app) and writes the .lrc. Reuses the cached
     separation and transcription; the track must have been processed once."""
     try:
+        check_cancelled(cancel)
         meta = probe(audio)
         work = cache.work_dir(audio)
         sep = cache.load(audio, "separate", STAGE_VERSIONS["separate"])
@@ -198,23 +226,32 @@ def realign(audio: Path, text: str, source: str = "manual") -> TrackResult:
         whisper = _transcript_from_json(tr)
         anchor = Transcript(whisper.lang, []) if looks_hallucinated(whisper, meta.duration_s) else whisper
         chosen = Candidate(source, text.strip())
-        result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]))
+        result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
         return TrackResult(audio, _write(audio, meta, chosen, result), source, result.track_conf,
                            device=sep.get("device", ""), fallback=sep.get("fallback", ""))
+    except WorkerCancelled:
+        _log(audio, "cancelled by the user")
+        return TrackResult(audio, "cancelled", error="Stopped by the user")
     except Exception as e:  # noqa: BLE001 - reported to the app, never raised into the UI
         _log(audio, "realign failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=f"{type(e).__name__}: {e}")
 
 
 def process(audio: Path, force: bool = False, only_stage: str | None = None,
-            on_stage: Callable[[str], None] | None = None) -> TrackResult:
+            on_stage: Callable[[str], None] | None = None,
+            cancel: threading.Event | None = None) -> TrackResult:
     stage = on_stage or (lambda name: None)
     if only_stage is not None and only_stage not in STAGES:
         raise ValueError(f"unknown stage {only_stage}")
     fresh = set(STAGES[STAGES.index(only_stage):]) if only_stage else set()
     if "transcribe" in fresh:
         fresh.add("transcribe_extra")
+
+    def checkpoint() -> None:
+        check_cancelled(cancel)
+
     try:
+        checkpoint()
         if not (force or only_stage) and _already_done(audio):
             return TrackResult(audio, "skipped")
         meta = probe(audio)
@@ -222,14 +259,16 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         stage("lyrics")
         cands = _cands_from_json(_cached(audio, "lyrics", fresh, lambda: {
             "candidates": [asdict(c) for c in search_all(meta)]}))
+        checkpoint()
         stage("separate")
-        sep = _cached(audio, "separate", fresh, lambda: _separate(audio, work))
+        sep = _cached(audio, "separate", fresh, lambda: _separate(audio, work, cancel))
         device = sep.get("device", "")
+        checkpoint()
         keep_vocals(audio, Path(sep["vocals"]))   # also for tracks separated before vocals were kept
         stage("transcribe")
         prompt = f"{meta.artist} - {meta.title}"
         tr_data = _cached(audio, "transcribe", fresh, lambda: asdict(
-            transcribe(Path(sep["vocals16k"]), work, meta.lang if meta.lang == "ja" else None, prompt)))
+            transcribe(Path(sep["vocals16k"]), work, meta.lang if meta.lang == "ja" else None, prompt, cancel=cancel)))
         whisper = _transcript_from_json(tr_data)
         lang = lyric_lang(meta, whisper)
         hallucinated = looks_hallucinated(whisper, meta.duration_s)
@@ -250,6 +289,7 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
             anchor = assemblyai() or (Transcript(whisper.lang, []) if hallucinated else whisper)
 
         chosen = choose(cands, anchor.text, lang)
+        checkpoint()
         if chosen is None:
             if hallucinated and assemblyai() is None:
                 raise RuntimeError("no lyrics found anywhere and the transcription is unusable (Whisper hallucinated)")
@@ -259,14 +299,18 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
             else:
                 vote_stage = "transcribe_extra_aai" if voter else "transcribe_extra"
                 fused = _transcript_from_json(_cached(audio, vote_stage, fresh, lambda: asdict(
-                    _extra_passes(audio, work, sep, whisper, lang, prompt, [voter] if voter else []))))
+                    _extra_passes(audio, work, sep, whisper, lang, prompt, [voter] if voter else [], cancel))))
             chosen = _transcript_candidate(fused, lang)
         stage("align")
-        result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]))
+        result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
+        checkpoint()
         stage("write")
         status = _write(audio, meta, chosen, result)
         return TrackResult(audio, status, chosen.source, result.track_conf, device=device,
                            fallback=sep.get("fallback", ""))
+    except WorkerCancelled:
+        _log(audio, "cancelled by the user")
+        return TrackResult(audio, "cancelled", error="Stopped by the user")
     except Exception as e:  # noqa: BLE001 - one broken track must not stop a folder run
         _log(audio, "failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=f"{type(e).__name__}: {e}")
@@ -294,10 +338,11 @@ def find_audio(root: Path) -> list[Path]:
 
 
 def process_all(paths: Iterable[Path], force: bool = False, only_stage: str | None = None,
-                on_result: Callable[[TrackResult], None] | None = None) -> list[TrackResult]:
+                on_result: Callable[[TrackResult], None] | None = None,
+                cancel: threading.Event | None = None) -> list[TrackResult]:
     results = []
     for p in paths:
-        r = process(p, force=force, only_stage=only_stage)
+        r = process(p, force=force, only_stage=only_stage, cancel=cancel)
         if on_result:
             on_result(r)
         results.append(r)

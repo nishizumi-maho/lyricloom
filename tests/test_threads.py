@@ -10,12 +10,12 @@ from lyricloom.stages import transcribe as tr
 def test_whisper_uses_thread_limit(monkeypatch, tmp_path):
     seen = {}
 
-    def fake_run(cmd, capture_output, **kwargs):
+    def fake_run(cmd, cancel=None, **kwargs):
         seen["cmd"] = cmd
         (tmp_path / "whisper.json").write_text('{"result": {"language": "pt"}, "transcription": []}', encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-    monkeypatch.setattr(tr.subprocess, "run", fake_run)
+    monkeypatch.setattr(tr, "run_process", fake_run)
     cli = tmp_path / "whisper-cli"
     cli.write_text("", encoding="utf-8")
     model = tmp_path / "ggml.bin"

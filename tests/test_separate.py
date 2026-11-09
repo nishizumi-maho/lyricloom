@@ -71,10 +71,10 @@ def test_run_worker_in_wsl_builds_the_command(monkeypatch):
     seen = {}
 
     def fake_run(argv, **kw):
-        seen["argv"], seen["input"] = argv, kw["input"]
+        seen["argv"], seen["input"] = argv, kw["input_bytes"]
         return subprocess.CompletedProcess(argv, 0, (RESULT_MARK + '{"ok": 1}\n').encode(), b"")
 
-    monkeypatch.setattr("lyricloom.workers.subprocess.run", fake_run)
+    monkeypatch.setattr("lyricloom.workers.run_process", fake_run)
     res = run_worker("some.module", {"a": 1}, python="/opt/lyricloom/venv/bin/python", cwd=Path(r"C:\Music\LyricLoom"),
                      wsl="Ubuntu", wsl_env={"HSA_ENABLE_DXG_DETECTION": "1"})
     argv = seen["argv"]
@@ -100,7 +100,8 @@ def test_run_worker_frozen_never_relaunches_the_gui(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "IS_FROZEN", True)
     monkeypatch.setattr(sys, "executable", str(gui))
-    monkeypatch.setattr("lyricloom.workers.subprocess.run", fake_run)
+    monkeypatch.setattr("lyricloom.workers.run_process",
+                        lambda argv, **kw: fake_run(argv, **kw))
     for python in (str(gui), None):
         assert run_worker("lyricloom.workers.separate", {}, python=python, cwd=tmp_path) == {"ok": 1}
         assert seen["argv"] == [str(worker), "separate"]
