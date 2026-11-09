@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using Microsoft.Win32;
@@ -96,6 +97,50 @@ namespace MusicBeePlugin
                 WorkingDirectory = Path.GetDirectoryName(executable) ?? ""
             };
             return Process.Start(info);
+        }
+    }
+
+    /// <summary>Suppresses a second LyricLoom launch for the same song within ten seconds. Kept free
+    /// of WPF and MusicBee so the rule can be tested with a controlled clock.</summary>
+    internal sealed class LyricLoomRequestGuard
+    {
+        public static readonly TimeSpan RelaunchDelay = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan ForgetAfter = TimeSpan.FromMinutes(10);
+
+        private readonly Dictionary<string, DateTime> _lastLaunchUtc =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>True when a launch for this song is allowed; marks it as begun. False while the
+        /// previous attempt for the same song is less than ten seconds old.</summary>
+        public bool TryBegin(string audioPath, DateTime nowUtc)
+        {
+            if (string.IsNullOrEmpty(audioPath)) return false;
+            lock (_lastLaunchUtc)
+            {
+                Prune(nowUtc);
+                if (_lastLaunchUtc.TryGetValue(audioPath, out var last) &&
+                    nowUtc - last < RelaunchDelay)
+                    return false;
+                _lastLaunchUtc[audioPath] = nowUtc;
+                return true;
+            }
+        }
+
+        /// <summary>Allows an immediate retry after a launch failed.</summary>
+        public void Forget(string audioPath)
+        {
+            if (string.IsNullOrEmpty(audioPath)) return;
+            lock (_lastLaunchUtc) _lastLaunchUtc.Remove(audioPath);
+        }
+
+        private void Prune(DateTime nowUtc)
+        {
+            if (_lastLaunchUtc.Count < 32) return;
+            var cutoff = nowUtc - ForgetAfter;
+            var old = new List<string>();
+            foreach (var pair in _lastLaunchUtc)
+                if (pair.Value < cutoff) old.Add(pair.Key);
+            foreach (var key in old) _lastLaunchUtc.Remove(key);
         }
     }
 }

@@ -97,5 +97,56 @@ namespace StarryKaraoke.Tests
             t.Join();
             Assert.Null(failure);
         }
+
+        [Fact]
+        public void The_scene_uses_the_windows_dpi_for_text_layout()
+        {
+            Exception failure = null;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false), new PlayerControls());
+                    var expected = System.Windows.Media.VisualTreeHelper.GetDpi(w).PixelsPerDip;
+                    Assert.Equal(expected, w.ScenePixelsPerDip);
+                    w.Close();
+                }
+                catch (Exception e) { failure = e; }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+            Assert.Null(failure);
+        }
+
+        [Fact]
+        public void The_LyricLoom_waiting_status_replaces_the_hint_until_it_is_cleared()
+        {
+            Exception failure = null;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false), new PlayerControls());
+                    w.SetWordTimingAvailable(hasWordTiming: false, canCreateLyrics: true);
+                    Assert.True(w.IsHintVisible);
+                    Assert.False(w.IsLyricLoomStatusVisible);
+
+                    w.ShowLyricLoomPending();
+                    Assert.True(w.IsLyricLoomStatusVisible);
+                    Assert.False(w.IsHintVisible);
+
+                    w.ClearLyricLoomPending();
+                    Assert.False(w.IsLyricLoomStatusVisible);
+                    Assert.True(w.IsHintVisible);
+                    w.Close();
+                }
+                catch (Exception e) { failure = e; }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+            Assert.Null(failure);
+        }
     }
 }

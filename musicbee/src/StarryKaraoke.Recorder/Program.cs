@@ -90,8 +90,9 @@ namespace StarryKaraoke.Recorder
             OutputSafety.ValidateOutput(job.Out, job.Audio, job.Lrc, job.SettingsPath, job.Ffmpeg);
 
             job.Lyrics = File.ReadAllText(job.Lrc);
-            // The plugin writes copies of the lyrics and settings under our own temp root. They have
-            // been read into memory now; do not leave personal data behind (R4-13).
+            // The plugin writes copies of the lyrics and settings under our own temp root (in a
+            // rec-* folder). They have been read into memory now; do not leave personal data behind
+            // (R4-13). If this process dies first, the startup sweep removes the folder after 24 h.
             RecorderTemp.DeleteOwnedInputCopy(job.Lrc);
             RecorderTemp.DeleteOwnedInputCopy(job.SettingsPath);
             return job;

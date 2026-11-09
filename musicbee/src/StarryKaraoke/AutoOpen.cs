@@ -105,5 +105,19 @@ namespace MusicBeePlugin
             if (!playing) return AutoOpenAction.None;
             return windowVisible ? AutoOpenAction.None : AutoOpenAction.Show;
         }
+
+        /// <summary>When a sidecar for the playing song has just appeared: open or show the window if
+        /// the new lyrics are supported and playback is running, unless the user closed the window by
+        /// hand for this song or it is already visible. Unsupported songs never change the window
+        /// here (an existing window still reloads its lyrics separately).</summary>
+        public static AutoOpenAction DecideForSidecar(AutoOpenLyrics setting, LyricsKind sidecarKind,
+                                                      bool playing, bool windowExists, bool windowVisible,
+                                                      bool dismissedByUser)
+        {
+            var action = Decide(setting, sidecarKind, playing, windowExists, windowVisible,
+                                dismissedByUser, UnsupportedSongAction.Keep);
+            return action == AutoOpenAction.Open || action == AutoOpenAction.Show
+                ? action : AutoOpenAction.None;
+        }
     }
 }
