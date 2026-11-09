@@ -5,7 +5,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from . import VERSION, config, models, runner, runtime
+from . import VERSION, cache, config, models, runner, runtime
 
 LEGACY_DOWNLOADS = ("all", "whisper", "separator", "mms", "mtl", "nltk")
 
@@ -162,6 +162,22 @@ def _models(args) -> int:
     return 2
 
 
+def _cache(args) -> int:
+    action = args.action
+    if action == "status":
+        report = cache.size_report()
+        print(f"work cache: {report['files']} track folder(s), "
+              f"{runtime.human_size(report['bytes'])} in {report['root']}")
+        return 0
+    max_bytes = int(args.max_gb * 1024 ** 3) if args.max_gb is not None else 0
+    before = cache.size_report()
+    result = cache.prune(max_bytes)
+    print(f"work cache: removed {result['removed']} folder(s), freed "
+          f"{runtime.human_size(result['freed'])}; {runtime.human_size(result['remaining'])} left "
+          f"(was {runtime.human_size(before['bytes'])})")
+    return 0
+
+
 def _doctor() -> int:
     print(f"LyricLoom {VERSION}")
     print(f"python         {sys.version.split()[0]} ({sys.executable})")
@@ -209,6 +225,12 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("doctor", help="print paths and check the installation")
 
+    c = sub.add_parser("cache", help="report or clean the work cache")
+    c.add_argument("action", nargs="?", choices=["status", "clean"], default="status",
+                   help="status (default) or clean")
+    c.add_argument("--max-gb", type=float,
+                   help="with clean: keep at most this many gigabytes (default: remove all)")
+
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -216,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"migrated LyricsBoca settings and data to {config.APP_DATA}", file=sys.stderr)
     if args.cmd == "models":
         return _models(args)
+    if args.cmd == "cache":
+        return _cache(args)
     if args.cmd == "doctor":
         return _doctor()
 
@@ -229,6 +253,11 @@ def main(argv: list[str] | None = None) -> int:
                                  allow_cloud=False if args.no_cloud else None)
     counts = Counter(r.status for r in results)
     print("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if counts.get("failed"):
+        for r in results:
+            if r.status == "failed":
+                print(f"failed: {r.path}: {r.error}", file=sys.stderr)
+        return 1
     return 0
 
 

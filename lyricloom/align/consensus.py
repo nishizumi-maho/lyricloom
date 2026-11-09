@@ -32,6 +32,11 @@ def _phon(text: str, lang: str) -> str:
     return to_mms_tokens(reading(text, lang))
 
 
+def _similar(a: str, b: str, threshold: float) -> bool:
+    """Two empty romanizations are not similar; rapidfuzz scores "" == "" as a perfect match."""
+    return bool(a) and bool(b) and fuzz.ratio(a, b) / 100 >= threshold
+
+
 def _align_words(a: list[Word], b: list[Word], lang: str) -> list[int | None]:
     """For each word of `a`, the index of the aligned word of `b` (None for a gap)."""
     pa, pb = [_phon(w.text, lang) for w in a], [_phon(w.text, lang) for w in b]
@@ -43,12 +48,12 @@ def _align_words(a: list[Word], b: list[Word], lang: str) -> list[int | None]:
         H[0][j] = -j
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            s = 2 if fuzz.ratio(pa[i - 1], pb[j - 1]) / 100 >= WORD_MATCH else -1
+            s = 2 if _similar(pa[i - 1], pb[j - 1], WORD_MATCH) else -1
             H[i][j] = max(H[i - 1][j - 1] + s, H[i - 1][j] - 1, H[i][j - 1] - 1)
     out: list[int | None] = [None] * n
     i, j = n, m
     while i > 0 and j > 0:
-        s = 2 if fuzz.ratio(pa[i - 1], pb[j - 1]) / 100 >= WORD_MATCH else -1
+        s = 2 if _similar(pa[i - 1], pb[j - 1], WORD_MATCH) else -1
         if H[i][j] == H[i - 1][j - 1] + s:
             out[i - 1] = j - 1
             i, j = i - 1, j - 1
@@ -62,7 +67,7 @@ def _align_words(a: list[Word], b: list[Word], lang: str) -> list[int | None]:
 def _vote(options: list[Word]) -> Word:
     groups: dict[str, list[Word]] = defaultdict(list)
     for w in options:
-        groups[_key(w.text)].append(w)
+        groups[_key(w.text) or w.text].append(w)
     best = max(groups.values(), key=lambda g: (len(g), max(w.prob for w in g)))
     return max(best, key=lambda w: w.prob)
 
@@ -84,7 +89,8 @@ def refrain_consensus(lines: list[list[Word]], lang: str) -> list[list[Word]]:
     for i, line in enumerate(lines):
         for g in groups:
             head = g[0]
-            if len(lines[head]) == len(line) and fuzz.ratio(phon[head], phon[i]) / 100 >= REFRAIN_SIMILARITY:
+            if (len(lines[head]) == len(line) and phon[head] and phon[i]
+                    and fuzz.ratio(phon[head], phon[i]) / 100 >= REFRAIN_SIMILARITY):
                 g.append(i)
                 break
         else:
@@ -96,7 +102,7 @@ def refrain_consensus(lines: list[list[Word]], lang: str) -> list[list[Word]]:
         for k in range(len(lines[g[0]])):
             counts: dict[str, list[Word]] = defaultdict(list)
             for i in g:
-                counts[_key(lines[i][k].text)].append(lines[i][k])
+                counts[_key(lines[i][k].text) or lines[i][k].text].append(lines[i][k])
             top = max(counts.values(), key=len)
             if len(top) * 2 <= len(g):
                 continue  # no strict majority: leave the repetitions as Whisper heard them

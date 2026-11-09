@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -14,16 +15,47 @@ from .. import config, models
 from ..workers import WorkerError, run_worker, windows_path, wsl_path
 from .instrumental import find_instrumental, subtract
 
+log = logging.getLogger(__name__)
+
 # FLAC holds integer samples only: 16-bit stems stay 16-bit, anything else is kept as 24-bit.
 _INT_DTYPE = {"PCM_16": "int16", "PCM_24": "int32"}
 # Bumped when the kept-stem manifest changes meaning; stale stems are separated again.
 KEPT_MANIFEST_VERSION = 1
+_READ_BLOCK = 1 << 18
+
+
+def _ffmpeg_to_mono16k(src: Path, dst: Path) -> None:
+    """Decodes a container libsndfile cannot read (M4A/AAC, some Opus) through imageio-ffmpeg."""
+    import imageio_ffmpeg
+
+    tmp = dst.with_name(dst.name + ".part")
+    cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-y", "-i", str(src),
+           "-vn", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", "-f", "wav", str(tmp)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=1800,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except FileNotFoundError as e:
+        raise RuntimeError("ffmpeg is required to read this audio container; install imageio-ffmpeg") from e
+    if proc.returncode != 0:
+        raise RuntimeError("ffmpeg could not decode " + src.name + ": "
+                           + proc.stderr.decode("utf-8", "replace")[-800:])
+    tmp.replace(dst)
 
 
 def to_mono16k(src: Path, dst: Path) -> None:
-    data, sr = sf.read(str(src), dtype="float32", always_2d=True)
-    mono = data.mean(axis=1)
-    sf.write(str(dst), soxr.resample(mono, sr, 16000).astype(np.float32), 16000, subtype="PCM_16")
+    """Writes a 16 kHz mono WAV, streaming both the read and the resample (R1-27).
+
+    libsndfile handles FLAC/MP3/OGG/WAV but not MP4/AAC; those are decoded by ffmpeg (R1-23)."""
+    try:
+        with sf.SoundFile(str(src)) as f:
+            resampler = soxr.ResampleStream(f.samplerate, 16000, 1, dtype="float32")
+            with sf.SoundFile(str(dst), "w", samplerate=16000, channels=1,
+                              subtype="PCM_16", format="WAV") as out:
+                for block in f.blocks(blocksize=_READ_BLOCK, dtype="float32", always_2d=True):
+                    out.write(resampler.resample_chunk(block.mean(axis=1)))
+                out.write(resampler.resample_chunk(np.empty(0, dtype="float32"), last=True))
+    except (sf.LibsndfileError, RuntimeError, OSError, ValueError):
+        _ffmpeg_to_mono16k(src, dst)
 
 
 def kept_vocals_path(audio: Path) -> Path:
@@ -120,10 +152,15 @@ def _archive_stale(path: Path) -> Path | None:
 
 
 def _copy_bit_exact(src: Path, dst: Path, fmt: str, **kw) -> None:
+    """Copies a stem in its own integer depth, one block at a time, so a long song is not read at
+    once (R1-27)."""
     subtype = sf.info(str(src)).subtype
     subtype = subtype if subtype in _INT_DTYPE else "PCM_24"
-    data, sr = sf.read(str(src), dtype=_INT_DTYPE[subtype], always_2d=True)
-    sf.write(str(dst), data, sr, format=fmt, subtype=subtype, **kw)
+    with sf.SoundFile(str(src)) as inp:
+        with sf.SoundFile(str(dst), "w", samplerate=inp.samplerate, channels=inp.channels,
+                          format=fmt, subtype=subtype, **kw) as out:
+            for block in inp.blocks(blocksize=_READ_BLOCK, dtype=_INT_DTYPE[subtype], always_2d=True):
+                out.write(block)
 
 
 def keep_vocals(audio: Path, vocals: Path, model: models.ModelSpec | None = None,
@@ -171,7 +208,12 @@ def _run_separator(audio: Path, work: Path, spec: models.ModelSpec | None = None
             res = run_worker("lyricloom.workers.separate", on_wsl, python=config.SEPARATOR_WSL_PYTHON,
                              wsl=config.SEPARATOR_WSL_DISTRO, wsl_env=config.SEPARATOR_WSL_ENV,
                              cancel=cancel)
-            return windows_path(res["vocals"]), "rocm", None
+            device = res.get("device") or "rocm"
+            fallback = None
+            if device == "cpu":
+                fallback = ("WSL had no usable GPU (the worker reported CPU); separation ran on the "
+                            "CPU inside WSL")
+            return windows_path(res["vocals"]), device, fallback
         except ValueError as e:
             # UNC paths (\\server\share) cannot be bridged to /mnt; use the local CPU path.
             fallback = f"{e}; separating on the CPU instead"
@@ -197,20 +239,32 @@ def separate(audio: Path, work: Path, model: models.ModelSpec | None = None,
     else:
         # With the song's instrumental at hand, the separator gets mix - instrumental: it then only
         # has to clean what the subtraction left, and keeps more of the backing vocals and reverb.
+        # This is optional work: an unreadable instrumental or a failed subtraction must never lose
+        # the track (R1-24).
         source = audio
-        inst = find_instrumental(audio)
-        if inst is not None:
-            minus = work / "minus_instrumental.wav"
-            stats = subtract(audio, inst, minus)
-            out["instrumental"] = {"path": str(inst), "used": stats["ok"], "lag": stats["lag"],
-                                   "clean_s": stats["clean_s"]}
-            if stats["ok"]:
-                source = minus
+        inst = None
+        try:
+            inst = find_instrumental(audio)
+            if inst is not None:
+                minus = work / "minus_instrumental.wav"
+                stats = subtract(audio, inst, minus)
+                out["instrumental"] = {"path": str(inst), "used": stats["ok"], "lag": stats["lag"],
+                                       "clean_s": stats["clean_s"]}
+                if stats["ok"]:
+                    source = minus
+        except Exception as e:  # noqa: BLE001 - optional: separate the full mix instead
+            log.exception("instrumental subtraction failed for %s; separating the full mix", audio)
+            out["instrumental"] = {"path": str(inst) if inst else "", "used": False,
+                                   "error": f"{type(e).__name__}: {e}"}
         produced, out["device"], fallback = _run_separator(source, work, spec, cancel)
         if fallback:
             out["fallback"] = fallback
         produced.replace(vocals)
-        keep_vocals(audio, vocals, model=spec)
+        try:
+            keep_vocals(audio, vocals, model=spec)
+        except Exception as e:  # noqa: BLE001 - keeping a copy is optional, separation is not
+            log.exception("could not keep the vocals for %s", audio)
+            out["kept_error"] = f"{type(e).__name__}: {e}"
     vocals16k = work / "vocals16k.wav"
     to_mono16k(vocals, vocals16k)
     return {**out, "vocals": str(vocals), "vocals16k": str(vocals16k), "kept": str(kept)}

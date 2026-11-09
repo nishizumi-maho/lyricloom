@@ -190,6 +190,8 @@ lyricloom-app
 
 A source or pipx install also provides `lyricloom process <file-or-folder>`, which runs the same pipeline without the GUI. The path must be inside the library selected in the app (or the default `~/Music`). The packaged tarball's `lyricloom` launcher is the windowed app, not the full CLI.
 
+`lyricloom cache status` reports the work-cache size and `lyricloom cache clean [--max-gb N]` deletes the oldest track caches first (never a track that is running). `lyricloom process` exits 0 when every track is done, review or skipped, 1 when any track failed, and 2 on a usage error.
+
 ## Command line
 
 The GUI can also be started by another program:

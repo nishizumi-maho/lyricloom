@@ -34,6 +34,7 @@ class TrackRow:
     device: str = ""       # where the vocals were separated: rocm, cuda, dml, cpu or kept
     fallback: str = ""     # why the WSL/ROCm separation ran on the CPU instead
     log_path: str = ""     # this track's log.txt, kept so Refresh and Details can find it
+    notes: list[str] = field(default_factory=list)  # warnings written in [#warning:...] (R1-09)
 
 
 def _flac_tags(audio: Path) -> tuple[str, str] | None:
@@ -125,7 +126,8 @@ def read_status(audio: Path) -> TrackRow:
         row.conf = 0.0
         row.error = f"invalid confidence in {lrc.name}: {conf!r}"
     row.review_lines = [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
-    row.status = "review" if row.review_lines or source == "transcription" else "done"
+    row.notes = [part.strip() for part in meta.get("#warning", "").split(";") if part.strip()]
+    row.status = "review" if row.review_lines or source == "transcription" or row.notes else "done"
     return row
 
 
@@ -206,9 +208,12 @@ def _row_from_json(d: dict) -> TrackRow:
     d["device"] = d.get("device") if isinstance(d.get("device"), str) else ""
     d["fallback"] = d.get("fallback") if isinstance(d.get("fallback"), str) else ""
     d["log_path"] = d.get("log_path") if isinstance(d.get("log_path"), str) else ""
+    notes = d.get("notes", [])
+    if not isinstance(notes, list) or not all(isinstance(n, str) for n in notes):
+        notes = []
     return TrackRow(path=d["path"], artist=d["artist"], title=d["title"], status=d["status"],
                     source=d["source"], conf=d["conf"], review_lines=d["review_lines"], error=d["error"],
-                    device=d["device"], fallback=d["fallback"], log_path=d["log_path"])
+                    device=d["device"], fallback=d["fallback"], log_path=d["log_path"], notes=notes)
 
 
 def _unreadable_row(audio: Path, exc: Exception) -> TrackRow:

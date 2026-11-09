@@ -32,6 +32,16 @@ def test_transcription_is_always_review(tmp_path):
     assert read_status(a).status == "review"
 
 
+def test_warning_tag_is_shown_as_a_note_and_review_status(tmp_path):
+    a = _audio(tmp_path)
+    a.with_suffix(".lrc").write_text(
+        "[re:LyricLoom 1.0.0]\n[#source:netease conf:0.80]\n[#warning:no usable transcript; "
+        "word timing unconfirmed]\n[00:01.00]x\n", encoding="utf-8")
+    row = read_status(a)
+    assert row.status == "review"
+    assert row.notes == ["no usable transcript", "word timing unconfirmed"]
+
+
 def test_hand_made_lrc_is_other(tmp_path):
     a = _audio(tmp_path)
     a.with_suffix(".lrc").write_text("[00:22.98]試験用の歌詞が流れる\n", encoding="utf-8")

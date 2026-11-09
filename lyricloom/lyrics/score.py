@@ -36,10 +36,25 @@ def duration_score(track_s: float, cand_s: float | None) -> float:
 
 def score_meta(c: Candidate, meta: TrackMeta, cand_title: str, cand_artist: str,
                cand_duration_s: float | None) -> float:
+    # A missing artist tag (singles and compilations often have one) must not make a perfect
+    # title/duration match unreachable: score only the metadata that is actually present (R1-30).
     title = fuzz.token_set_ratio(_norm_title(meta.title), _norm_title(cand_title)) / 100
-    artist = fuzz.token_set_ratio(meta.artist.lower(), cand_artist.lower()) / 100
-    return (0.4 * title + 0.3 * artist + 0.2 * duration_score(meta.duration_s, cand_duration_s)
-            + 0.1 * SOURCE_WEIGHT.get(c.source, 0.5))
+    weights = {"title": 0.4, "duration": 0.2, "source": 0.1}
+    if meta.artist.strip():
+        weights["artist"] = 0.3
+        artist = fuzz.token_set_ratio(meta.artist.lower(), cand_artist.lower()) / 100
+    else:
+        artist = 0.0
+    total = sum(weights.values())
+    return (weights["title"] * title + weights.get("artist", 0.0) * artist
+            + weights["duration"] * duration_score(meta.duration_s, cand_duration_s)
+            + weights["source"] * SOURCE_WEIGHT.get(c.source, 0.5)) / total
+
+
+# The romanized form is what the fuzzy compare sees.  When a script has no romanization (Korean,
+# Chinese, Cyrillic, ...), both sides used to become "" and rapidfuzz scored that as a perfect
+# match.  A side shorter than this cannot identify a song either (R1-02).
+MIN_PHONETIC_CHARS = 4
 
 
 def _phonetic(text: str, lang: str) -> str:
@@ -47,7 +62,10 @@ def _phonetic(text: str, lang: str) -> str:
 
 
 def score_transcript(c: Candidate, transcript: str, lang: str) -> float:
-    return fuzz.ratio(_phonetic(c.text, lang), _phonetic(transcript, lang)) / 100
+    heard, sung = _phonetic(c.text, lang), _phonetic(transcript, lang)
+    if len(heard) < MIN_PHONETIC_CHARS or len(sung) < MIN_PHONETIC_CHARS:
+        return 0.0
+    return fuzz.ratio(heard, sung) / 100
 
 
 # Lyrics must resemble what was heard on their own: the right lyrics scored 0.77 against the
@@ -60,7 +78,9 @@ MIN_META_WITHOUT_TRANSCRIPT = 0.85
 
 
 def choose(cands: list[Candidate], transcript: str, lang: str) -> Candidate | None:
-    has_transcript = bool(re.sub(r"\W", "", transcript or ""))
+    # An "other"/non-Latin transcript may romanize to nothing.  That is not a perfect match; it is
+    # no usable transcript at all, so only a very strong metadata match can select a candidate.
+    has_transcript = len(_phonetic(transcript or "", lang)) >= MIN_PHONETIC_CHARS
     best, best_final = None, -1.0
     for c in cands:
         if has_transcript:

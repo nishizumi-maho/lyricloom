@@ -337,7 +337,11 @@ SEPARATOR_MODEL_DIR = MODELS / "separator"
 # the CPU. The WSL/ROCm path below is independent of this.
 SEPARATOR_DEVICE = os.environ.get("LYRICLOOM_SEPARATOR_DEVICE", "auto")
 SEPARATOR_OVERLAP = int(os.environ.get("LYRICLOOM_SEPARATOR_OVERLAP", "2"))
-CPU_THREADS = max(1, int(os.environ.get("LYRICLOOM_CPU_THREADS", (os.cpu_count() or 4) // 4)))
+# Worker thread pools: all logical CPUs but two (the GUI and the rest of the machine need some),
+# capped at 16 so a huge server does not oversubscribe memory bandwidth.  LYRICLOOM_CPU_THREADS
+# overrides the result for every stage (R1-20).
+_cpu_default = min(16, max(1, (os.cpu_count() or 4) - 2))
+CPU_THREADS = max(1, int(os.environ.get("LYRICLOOM_CPU_THREADS", _cpu_default)))
 SEPARATOR_PYTHON = sys.executable
 
 
