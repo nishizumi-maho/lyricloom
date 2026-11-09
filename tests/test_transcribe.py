@@ -55,6 +55,39 @@ def test_real_singing_is_not_flagged():
     assert not looks_hallucinated(_tr(words * 9, step=500), 238.6)
 
 
+def test_a_sparse_ballad_with_a_long_instrumental_is_not_flagged():
+    """R1-31: the denominator is sung time (word spans), not the file length."""
+    from lyricloom.model import Transcript, Word
+    from lyricloom.stages.transcribe import looks_hallucinated
+    words = [Word(f"palavra{i}", 90_000 + i * 3_000, 90_000 + i * 3_000 + 2_000, 0.9) for i in range(40)]
+    assert not looks_hallucinated(Transcript("pt", words), 240.0)
+
+
+def test_too_few_words_in_a_long_file_is_still_flagged_even_with_short_sung_spans():
+    from lyricloom.stages.transcribe import looks_hallucinated
+    assert looks_hallucinated(_tr(["eu", "vou", "agora"]), 238.6)
+
+
+def test_whisper_timeout_names_the_reason(monkeypatch, tmp_path):
+    import subprocess
+
+    from lyricloom import config
+    from lyricloom.stages import transcribe as tr
+
+    def fake_run(cmd, cancel=None, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout_s", 0))
+
+    monkeypatch.setattr(tr, "run_process", fake_run)
+    cli = tmp_path / "whisper-cli"
+    cli.write_text("", encoding="utf-8")
+    model = tmp_path / "ggml.bin"
+    model.write_text("", encoding="utf-8")
+    monkeypatch.setattr(config, "whisper_cli", lambda: cli)
+    monkeypatch.setattr(tr, "_model_path", lambda spec: model)
+    with pytest.raises(RuntimeError, match="timed out"):
+        tr.transcribe(tmp_path / "missing.wav", tmp_path, "pt")
+
+
 def test_missing_whisper_cli_error_names_the_real_setting(tmp_path, monkeypatch):
     from lyricloom import config
     from lyricloom.stages import transcribe

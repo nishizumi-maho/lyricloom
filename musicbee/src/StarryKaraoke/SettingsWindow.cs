@@ -33,10 +33,11 @@ namespace MusicBeePlugin
         public Settings Result { get; private set; }
 
         public SettingsWindow(Settings current, Action<Settings> preview, Action<Exception> log = null,
-                              Func<string> diagnostics = null)
+                              Func<string> diagnostics = null, int monitorHz = 0)
         {
             _original = current.Clone();
             _edit = current.Clone();
+            _edit.MigrateFrameRate(monitorHz);
             _preview = preview;
             _log = log;
             _diagnostics = diagnostics;
@@ -182,21 +183,27 @@ namespace MusicBeePlugin
             Check("Show progress bar", _edit.ShowProgress, v => Set(x => x.ShowProgress = v));
             Check("Fullscreen shows only the lyrics", _edit.FullscreenLyricsOnly, v => Set(x => x.FullscreenLyricsOnly = v));
 
-            var fpsChoices = new List<string> { "Display refresh rate", "30", "60", "120" };
-            if (_edit.WindowFps > 0 && _edit.WindowFps != 30 && _edit.WindowFps != 60 && _edit.WindowFps != 120)
-                fpsChoices.Add(_edit.WindowFps.ToString(CultureInfo.InvariantCulture));
+            var hz = FrameRatePolicy.TargetFps(1, monitorHz);
+            var fpsChoices = new List<string>
+            {
+                $"Match display ({hz} Hz)",
+                $"Half refresh ({FrameRatePolicy.TargetFps(2, monitorHz)} Hz)",
+                $"Third refresh ({FrameRatePolicy.TargetFps(3, monitorHz)} Hz)"
+            };
             var winFps = new ComboBox
             {
                 ItemsSource = fpsChoices,
-                SelectedIndex = _edit.WindowFps == 0 ? 0 : Math.Max(0, fpsChoices.IndexOf(_edit.WindowFps.ToString(CultureInfo.InvariantCulture)))
+                SelectedIndex = FrameRatePolicy.NormalizeDivisor(_edit.WindowFpsDivisor) - 1
             };
             winFps.SelectionChanged += (s, e) => Safe.Run(() =>
             {
-                Set(x => x.WindowFps = winFps.SelectedIndex <= 0
-                    ? 0
-                    : int.Parse((string)winFps.SelectedItem, CultureInfo.InvariantCulture));
+                Set(x =>
+                {
+                    x.WindowFpsDivisor = Math.Max(1, winFps.SelectedIndex + 1);
+                    x.WindowFps = 0;
+                });
             }, _log);
-            Row("Window FPS", winFps);
+            Row("Window frame rate", winFps);
 
             Section("Party mode");
             Check("Fullscreen on play, hide cursor, keep the display awake", _edit.PartyMode, v => Set(x => x.PartyMode = v));

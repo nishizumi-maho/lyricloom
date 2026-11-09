@@ -17,27 +17,6 @@ using System.Windows.Threading;
 
 namespace MusicBeePlugin
 {
-    /// <summary>Song position between polls: runs on a stopwatch and eases towards each new reading, so
-    /// small jitter in the player position never makes the sweep jump.</summary>
-    internal sealed class PlaybackClock
-    {
-        private readonly Stopwatch _watch = Stopwatch.StartNew();
-        private double _basePos, _baseAt;
-        public bool Playing { get; private set; }
-
-        public double NowMs() => Playing ? _basePos + (_watch.Elapsed.TotalMilliseconds - _baseAt) : _basePos;
-
-        public void Sync(double positionMs, bool playing)
-        {
-            var now = _watch.Elapsed.TotalMilliseconds;
-            var predicted = NowMs();
-            var drift = positionMs - predicted;
-            _basePos = playing && Playing && Math.Abs(drift) < 250 ? predicted + drift * 0.15 : positionMs;
-            _baseAt = now;
-            Playing = playing;
-        }
-    }
-
     /// <summary>The karaoke window. F11 or a double-click toggles fullscreen, Esc leaves it, right-click
     /// opens the menu. In fullscreen the cursor hides after a moment, and Party Mode keeps the display
     /// awake while the song plays.</summary>
@@ -59,14 +38,18 @@ namespace MusicBeePlugin
         private readonly PlaybackClock _clock = new PlaybackClock();
         private readonly SceneLayer _sky, _glow, _text;
         private readonly BlurEffect _blur = new BlurEffect { KernelType = KernelType.Gaussian, RenderingBias = RenderingBias.Performance };
-        private readonly Func<(double PositionMs, bool Playing, float Volume, bool Mute)> _poll;
+        private readonly Func<(double PositionMs, bool Playing, float Volume, bool Mute, double SampledAtMs)> _poll;
         private readonly Stopwatch _frameWatch = Stopwatch.StartNew();
         private readonly Grid _root;
         private readonly Border _toast;
         private readonly TextBlock _toastText;
         private readonly DispatcherTimer _cursorTimer;
         private readonly DispatcherTimer _toastTimer;
-        private double _lastFrame, _lastPoll = -1e9, _lastOcclusionCheck = -1e9;
+        private double _lastPoll = -1e9, _lastOcclusionCheck = -1e9;
+        private TimeSpan _lastFrameTime;
+        private TimeSpan _lastRenderingTime;
+        private bool _hasFrameTime;
+        private bool _hasRenderingTime;
         private double _songTime;
         private int _songOffsetMs;
         private Settings _settings;
@@ -97,6 +80,15 @@ namespace MusicBeePlugin
 
         /// <summary>The DPI the scene uses for text layout (for tests).</summary>
         internal double ScenePixelsPerDip => _scene.PixelsPerDip;
+
+        /// <summary>Refresh rate of the monitor the window is on (for the settings labels).</summary>
+        internal int MonitorHz => _monitorHz;
+
+        /// <summary>Whether the moving layers use animated text hinting without layout rounding.</summary>
+        internal bool MovingTextIsAnimated =>
+            TextOptions.GetTextHintingMode(_text) == TextHintingMode.Animated &&
+            TextOptions.GetTextHintingMode(_glow) == TextHintingMode.Animated &&
+            !_text.UseLayoutRounding && !_glow.UseLayoutRounding;
 
         /// <summary>Whether the LyricLoom waiting status is showing (for tests).</summary>
         internal bool IsLyricLoomStatusVisible => _lyricLoomStatus.Visibility == Visibility.Visible;
@@ -134,7 +126,7 @@ namespace MusicBeePlugin
         private LoopMode _loopMode = LoopMode.Off;
         private double _loopHoldUntil;
 
-        public KaraokeWindow(Settings settings, Func<(double PositionMs, bool Playing, float Volume, bool Mute)> poll, PlayerControls controls,
+        public KaraokeWindow(Settings settings, Func<(double PositionMs, bool Playing, float Volume, bool Mute, double SampledAtMs)> poll, PlayerControls controls,
                              bool showActivated = true, Action<Exception> log = null)
         {
             _log = log;
@@ -175,6 +167,15 @@ namespace MusicBeePlugin
             _sky = new SceneLayer(this, KaraokeScene.Layer.Sky);
             _glow = new SceneLayer(this, KaraokeScene.Layer.Glow) { Effect = _blur, Opacity = 0.85 };
             _text = new SceneLayer(this, KaraokeScene.Layer.Text);
+            // Text that moves must not be snapped to whole pixels while it moves.
+            foreach (var layer in new FrameworkElement[] { _sky, _glow, _text })
+            {
+                TextOptions.SetTextHintingMode(layer, TextHintingMode.Animated);
+                TextOptions.SetTextRenderingMode(layer, TextRenderingMode.Grayscale);
+                TextOptions.SetTextFormattingMode(layer, TextFormattingMode.Ideal);
+                layer.UseLayoutRounding = false;
+                layer.SnapsToDevicePixels = false;
+            }
             _root = new Grid { Background = Brushes.Transparent, ClipToBounds = true };
             _root.Children.Add(_sky);
             _root.Children.Add(_glow);
@@ -303,7 +304,8 @@ namespace MusicBeePlugin
             LocationChanged += (s, e) => Safe.Run(() =>
             {
                 UpdateTextDpi();
-                if (_settings.WindowFps == 0) _monitorHz = MonitorRefreshRate(CurrentScreen());
+                _monitorHz = MonitorRefreshRate(CurrentScreen());
+                _settings.MigrateFrameRate(_monitorHz);
             }, _log);
             DpiChanged += (s, e) => Safe.Run(() =>
             {
@@ -405,6 +407,7 @@ namespace MusicBeePlugin
             }
             _scene.SetSong(lines, title, songMs);
             _songMs = songMs;
+            _clock.Reset();
             SetSongOffset(songOffsetMs);
             _lastPoll = -1e9;
             ClearLoop();
@@ -474,10 +477,11 @@ namespace MusicBeePlugin
             var monitorChanged = !string.Equals(_settings.FullscreenMonitor, s.FullscreenMonitor,
                                                 StringComparison.OrdinalIgnoreCase);
             _settings = s;
+            _monitorHz = MonitorRefreshRate(CurrentScreen());
+            s.MigrateFrameRate(_monitorHz);
             _scene.Apply(s);
             _scene.LyricsOnly = _fullscreen && s.FullscreenLyricsOnly;
             _transport.SetAccent(_scene.Accent);
-            if (s.WindowFps == 0) _monitorHz = MonitorRefreshRate(CurrentScreen());
             ApplyBlur();
             if (_fullscreen)
             {
@@ -600,6 +604,7 @@ namespace MusicBeePlugin
                 return;
             }
             _monitorHz = MonitorRefreshRate(CurrentScreen());
+            _settings.MigrateFrameRate(_monitorHz);
             _renderSuspended = IsFullyCovered();
             if (_renderSuspended) KeepAwake(false);
             StartFrames();
@@ -666,6 +671,13 @@ namespace MusicBeePlugin
                     NotifyPolling(false);
                     return;
                 }
+                // The composition clock is the frame's own timestamp. A duplicate time means WPF
+                // raised Rendering again without a new frame; ignore it. dt is measured between the
+                // frames we actually draw, so a lower rate still advances the animation correctly.
+                if (!(e is RenderingEventArgs rendering)) return;
+                if (_hasRenderingTime && rendering.RenderingTime == _lastRenderingTime) return;
+                _lastRenderingTime = rendering.RenderingTime;
+                _hasRenderingTime = true;
                 var now = _frameWatch.Elapsed.TotalSeconds;
                 if (now - _lastOcclusionCheck > 0.5)
                 {
@@ -679,26 +691,38 @@ namespace MusicBeePlugin
                     }
                 }
                 if (_renderSuspended) return;
-                var fps = FrameRatePolicy.EffectiveFps(_settings.WindowFps, _monitorHz, _playing,
+                var fps = FrameRatePolicy.EffectiveFps(_settings.WindowFpsDivisor, _monitorHz, _playing,
                                                         false, false, false);
                 if (fps <= 0) return;
-                if (now - _lastFrame < 1.0 / fps - 0.0015) return;
-                var dt = Math.Min(0.25, now - _lastFrame);
-                _lastFrame = now;
-                if (now - _lastPoll > 0.2)
+                TimeSpan elapsed;
+                double dt;
+                if (_hasFrameTime)
+                {
+                    elapsed = rendering.RenderingTime - _lastFrameTime;
+                    if (elapsed.TotalSeconds < 1.0 / fps * 0.9) return;
+                    dt = Math.Min(0.1, elapsed.TotalSeconds);
+                }
+                else
+                {
+                    dt = 0;
+                }
+                _lastFrameTime = rendering.RenderingTime;
+                _hasFrameTime = true;
+                if (now - _lastPoll > 0.05)
                 {
                     _lastPoll = now;
                     try
                     {
-                        var (pos, playing, volume, mute) = _poll();
-                        _clock.Sync(pos, playing);
+                        var (pos, playing, volume, mute, sampledAt) = _poll();
+                        _clock.Sample(pos, playing, sampledAt);
                         _playing = playing;
                         _volume = volume;
                         _mute = mute;
                     }
                     catch (Exception) { }
                 }
-                _songTime = _clock.NowMs() - EffectiveOffsetMs;
+                var playerMs = _clock.NowMs(PlaybackClock.TimestampMs());
+                _songTime = playerMs - EffectiveOffsetMs;
                 KeepAwake(_settings.PartyMode && _playing);
                 CheckLoop(now);
 
@@ -708,7 +732,7 @@ namespace MusicBeePlugin
                 _sky.InvalidateVisual();
                 _glow.InvalidateVisual();
                 _text.InvalidateVisual();
-                _transport.Update(_clock.NowMs(), _songMs, _playing, _volume, _mute, _songOffsetMs);
+                _transport.Update(playerMs, _songMs, _playing, _volume, _mute, _songOffsetMs);
                 _scene.HideProgress = _transport.IsShown;
             }, _log);
         }

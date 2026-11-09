@@ -5,7 +5,7 @@ import time
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QPoint, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QDialog, QMessageBox  # noqa: E402
 
@@ -214,6 +214,48 @@ def test_preflight_blocks_the_queue_when_a_model_is_missing(app, tmp_path, monke
         w.close()
 
 
+def test_search_lyrics_again_preflights_only_the_alignment_model(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    w = MainWindow(tmp_path)
+    asked = []
+    monkeypatch.setattr("lyricloom.app.main.model_catalog.status",
+                        lambda spec: "missing" if spec.id == "align-mms-fa" else "ready")
+    monkeypatch.setattr(w, "_ask_missing_models",
+                        lambda specs: asked.append(list(specs)) or "cancel")
+    try:
+        # The transcription model may be missing: "Search lyrics again" reuses everything but the
+        # alignment, so only the alignment model blocks the queue.
+        assert w.process([audio], research=True) is False
+        assert [spec.id for spec in asked[0]] == ["align-mms-fa"]
+        assert w._queue is None
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_a_missing_models_pause_still_honours_stop_after_this_song(tmp_path, monkeypatch):
+    first, second = _audio(tmp_path), _audio(tmp_path, "02 - Other.flac")
+    spec = models.get("align-mms-fa")
+    calls = []
+
+    def fake_process(path, **kwargs):
+        calls.append(path)
+        return runner.TrackResult(path, "failed", error="missing models", missing=[spec])
+
+    def stop_after(specs):
+        worker.stop()
+
+    monkeypatch.setattr("lyricloom.runner.process", fake_process)
+    worker = QueueWorker([first, second], force=True)
+    worker.missing_models.connect(stop_after)
+    rows = []
+    worker.track_done.connect(rows.append)
+    worker.run()
+
+    assert calls == [first]          # paused on the missing model, then the stop won
+    assert rows == []                # the missing track is retried, not reported as failed
+
+
 def test_missing_models_failure_pauses_and_retries_the_track(app, tmp_path, monkeypatch):
     audio = _audio(tmp_path)
     spec = models.get("align-mms-fa")
@@ -320,23 +362,130 @@ def test_marker_and_filter_for_a_song_made_with_other_models(app, tmp_path):
     lrc.write_text(LRC.format(transcribe="whisper-small"), encoding="utf-8")
     w = MainWindow(tmp_path)
     try:
-        _wait(app, lambda: w.table.rowCount() == 1)
+        _wait(app, lambda: w.proxy.rowCount() == 1)
         row = w.rows[0]
         assert app_model.other_model_stages(row) == ["transcribe"]
         assert "Transcription" in app_model.other_models_text(row)
-        assert w.table.item(0, 6).text() == "⇄ other"
-        assert "whisper-small" in w.table.item(0, 6).toolTip()
+        notes = w.model.index(0, 5)
+        assert "⇄ other" in notes.data()
+        assert "whisper-small" in notes.data(Qt.ToolTipRole)
 
         w.filter.setCurrentIndex(FILTERS.index("Made with other models"))
-        assert w.table.rowCount() == 1
+        assert w.proxy.rowCount() == 1
 
         # A song made with exactly the current choices is not marked and the filter hides it.
         lrc.write_text(LRC.format(transcribe="whisper-large-v3"), encoding="utf-8")
         the_time = time.time() + 2
         os.utime(lrc, (the_time, the_time))
         w.refresh()
-        _wait(app, lambda: w.table.rowCount() == 0)
+        _wait(app, lambda: w.proxy.rowCount() == 0)
         assert app_model.other_model_stages(w.rows[0]) == []
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_track_table_model_marks_a_song_made_with_other_models(app, tmp_path):
+    from lyricloom.app.library import TrackTableModel
+
+    audio = _audio(tmp_path)
+    lrc = audio.with_suffix(".lrc")
+    lrc.write_text(LRC.format(transcribe="whisper-small"), encoding="utf-8")
+    model = TrackTableModel([app_model.read_status(audio)])
+    notes = model.index(0, 5)
+    assert "⇄ other" in notes.data()
+    tooltip = notes.data(Qt.ToolTipRole)
+    assert "Made with other models" in tooltip
+    assert "Transcription" in tooltip and "whisper-small" in tooltip
+
+    # Exactly the current default is not marked.
+    lrc.write_text(LRC.format(transcribe=config.resolve_model("transcribe").id), encoding="utf-8")
+    same = TrackTableModel([app_model.read_status(audio)])
+    assert "other" not in same.index(0, 5).data()
+
+
+def test_proxy_filters_songs_made_with_other_models(app, tmp_path):
+    from lyricloom.app.library import TrackFilterProxyModel, TrackTableModel
+
+    other = _audio(tmp_path, "01 - Other.flac")
+    other.with_suffix(".lrc").write_text(LRC.format(transcribe="whisper-small"), encoding="utf-8")
+    same = _audio(tmp_path, "02 - Same.flac")
+    same.with_suffix(".lrc").write_text(
+        LRC.format(transcribe=config.resolve_model("transcribe").id), encoding="utf-8")
+    model = TrackTableModel([app_model.read_status(other), app_model.read_status(same)])
+    proxy = TrackFilterProxyModel()
+    proxy.setSourceModel(model)
+    assert proxy.rowCount() == 2
+
+    proxy.set_status_filter("Made with other models")
+    assert proxy.rowCount() == 1
+    assert proxy.index(0, 0).data() == "Artist"
+
+    proxy.set_status_filter("All")
+    proxy.set_search_text("made with other models")
+    assert proxy.rowCount() == 1
+
+
+def test_library_context_menu_starts_per_song_models_and_a_full_redo(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    audio.with_suffix(".lrc").write_text(LRC.format(transcribe="whisper-small"), encoding="utf-8")
+    w = MainWindow(tmp_path)
+    target = {"text": "Redo with current models"}
+
+    class FakeAction:
+        def __init__(self, text):
+            self._text = text
+            self.enabled = True
+
+        def text(self):
+            return self._text
+
+        def setEnabled(self, enabled):
+            self.enabled = enabled
+
+    class FakeMenu:
+        def __init__(self, parent=None):
+            self.items = []
+
+        def addAction(self, text):
+            action = FakeAction(text)
+            self.items.append(action)
+            return action
+
+        def addSeparator(self):
+            pass
+
+        def exec(self, pos):
+            return next(action for action in self.items if action.text() == target["text"])
+
+    class FakeDialog:
+        def exec(self):
+            return QDialog.Accepted
+
+        def chosen_models(self):
+            return {"transcribe": "whisper-small"}
+
+    calls = []
+
+    def fake_process(paths, **kwargs):
+        calls.append((list(paths), kwargs))
+        return True
+
+    monkeypatch.setattr("lyricloom.app.main.QMenu", FakeMenu)
+    monkeypatch.setattr("lyricloom.app.main.PerSongModelsDialog", lambda parent: FakeDialog())
+    monkeypatch.setattr(w, "process", fake_process)
+    try:
+        _wait(app, lambda: w.proxy.rowCount() == 1)
+        index = w.proxy.index(0, 0)
+        monkeypatch.setattr(w.table, "indexAt", lambda pos: index)
+        monkeypatch.setattr(w, "_selected_rows", lambda: list(w.rows))
+
+        w._table_context_menu(QPoint(0, 0))
+        assert calls[-1] == ([audio], {"force": True})
+
+        target["text"] = "Process with other models…"
+        w._table_context_menu(QPoint(0, 0))
+        assert calls[-1] == ([audio], {"models": {"transcribe": "whisper-small"}})
     finally:
         w.dirty = False
         w.close()

@@ -341,3 +341,81 @@ def test_separate_in_wsl_on_the_gpu(tmp_path, library, monkeypatch):
     assert out["device"] == "rocm", out.get("fallback")
     assert abs(sf.info(out["vocals16k"]).duration - 10.0) < 0.05
 
+
+def test_wsl_cpu_separation_is_reported_as_cpu_with_a_reason(tmp_path, monkeypatch):
+    """R1-26: the worker's device must reach the result, not a hard-coded "rocm"."""
+    monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        return {"vocals": str(tmp_path / "vocals.wav"), "device": "cpu"}
+
+    monkeypatch.setattr(sep_mod, "run_worker", fake)
+    _, device, fallback = sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
+    assert device == "cpu"
+    assert fallback and "GPU" in fallback
+
+
+def test_to_mono16k_decodes_m4a_through_ffmpeg(tmp_path):
+    """R1-23: libsndfile cannot read M4A; ffmpeg is already a dependency."""
+    import imageio_ffmpeg
+
+    source = tmp_path / "source.wav"
+    _wav(source)
+    m4a = tmp_path / "source.m4a"
+    proc = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-v", "error", "-y", "-i", str(source),
+                           "-c:a", "aac", "-b:a", "128k", str(m4a)], capture_output=True)
+    if proc.returncode != 0:
+        pytest.skip("this ffmpeg build cannot encode AAC")
+    out = tmp_path / "out16k.wav"
+    sep_mod.to_mono16k(m4a, out)
+    info = sf.info(str(out))
+    assert info.samplerate == 16000 and info.channels == 1
+
+
+def test_to_mono16k_streams_instead_of_reading_the_whole_file(tmp_path, monkeypatch):
+    source = tmp_path / "source.wav"
+    _wav(source)
+
+    def no_full_read(*args, **kwargs):
+        raise AssertionError("to_mono16k must stream, not sf.read the whole file")
+
+    monkeypatch.setattr(sep_mod.sf, "read", no_full_read)
+    out = tmp_path / "out16k.wav"
+    sep_mod.to_mono16k(source, out)
+    assert sf.info(str(out)).samplerate == 16000
+
+
+def test_a_failed_instrumental_subtraction_does_not_fail_the_track(tmp_path, library, monkeypatch):
+    """R1-24: optional work must never abort the track."""
+    song = library / "A" / "Synthetic Song" / "01 - Synthetic Song.flac"
+    _wav(song)
+    inst = library / "A" / "Synthetic Song" / "04 - Synthetic Song (instrumental).flac"
+    _wav(inst)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("subtraction is optional")
+
+    calls = []
+    monkeypatch.setattr(sep_mod, "find_instrumental", lambda audio: inst)
+    monkeypatch.setattr(sep_mod, "subtract", boom)
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(song, tmp_path / "work")
+    assert out["instrumental"]["used"] is False
+    assert "subtraction is optional" in out["instrumental"]["error"]
+    assert Path(out["vocals"]).exists()
+
+
+def test_a_failed_keep_vocals_does_not_fail_the_track(tmp_path, library, monkeypatch):
+    song = library / "A" / "B" / "01 - C.flac"
+    _wav(song)
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+
+    def boom(*args, **kwargs):
+        raise OSError("the vocals cache is read-only")
+
+    monkeypatch.setattr(sep_mod, "keep_vocals", boom)
+    out = sep_mod.separate(song, tmp_path / "work")
+    assert Path(out["vocals"]).exists()
+    assert "read-only" in out["kept_error"]
+

@@ -36,6 +36,7 @@ class TrackRow:
     fallback: str = ""     # why the WSL/ROCm separation ran on the CPU instead
     log_path: str = ""     # this track's log.txt, kept so Refresh and Details can find it
     models: dict[str, str] = field(default_factory=dict)  # [#models:] tag: stage -> model id
+    notes: list[str] = field(default_factory=list)  # warnings written in [#warning:...] (R1-09)
 
 
 MODEL_STAGE_LABELS = {"transcribe": "Transcription", "separate": "Vocal separation",
@@ -84,12 +85,12 @@ def other_model_stages(row: TrackRow, current: dict[str, set[str]] | None = None
             if stage in row.models and row.models[stage] not in current.get(stage, set())]
 
 
-def other_models_text(row: TrackRow) -> str:
+def other_models_text(row: TrackRow, current: dict[str, set[str]] | None = None) -> str:
     """A tooltip naming the stages a finished song used a different model for."""
-    stages = other_model_stages(row)
+    current = current if current is not None else current_model_ids()
+    stages = other_model_stages(row, current)
     if not stages:
         return ""
-    current = current_model_ids()
     lines = []
     for stage in stages:
         ids = sorted(current.get(stage, set()))
@@ -193,7 +194,13 @@ def read_status(audio: Path) -> TrackRow:
         row.error = f"invalid confidence in {lrc.name}: {conf!r}"
     row.review_lines = [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
     row.models = parse_models_tag(meta.get("#models", ""))
-    row.status = "review" if row.review_lines or source == "transcription" else "done"
+    row.notes = [part.strip() for part in meta.get("#warning", "").split(";") if part.strip()]
+    # A transcription-only lyric, or one the engine flagged with a warning, is an implicit review
+    # until the user accepts it. "Clear review flags" writes an empty [#review:] tag, which records
+    # that the whole lyric was accepted; the warnings stay visible as notes.
+    accepted = "#review" in meta
+    implicit_review = (source == "transcription" or bool(row.notes)) and not accepted
+    row.status = "review" if row.review_lines or implicit_review else "done"
     return row
 
 
@@ -204,7 +211,7 @@ def scan(root: Path) -> list[TrackRow]:
 # ---- scan cache: one JSON per library; a track is re-read only when its audio or .lrc changed ----
 # The schema version lets an old or hand-edited cache be discarded instead of crashing every scan.
 
-SCAN_SCHEMA = 4
+SCAN_SCHEMA = 5
 
 
 def _cache_file(root: Path) -> Path:
@@ -279,10 +286,13 @@ def _row_from_json(d: dict) -> TrackRow:
         used = {}
     d["models"] = {str(k): str(v) for k, v in used.items()
                    if isinstance(k, str) and isinstance(v, str)}
+    notes = d.get("notes", [])
+    if not isinstance(notes, list) or not all(isinstance(n, str) for n in notes):
+        notes = []
     return TrackRow(path=d["path"], artist=d["artist"], title=d["title"], status=d["status"],
                     source=d["source"], conf=d["conf"], review_lines=d["review_lines"], error=d["error"],
                     device=d["device"], fallback=d["fallback"], log_path=d["log_path"],
-                    models=d["models"])
+                    models=d["models"], notes=notes)
 
 
 def _unreadable_row(audio: Path, exc: Exception) -> TrackRow:
@@ -365,12 +375,16 @@ def store_result(root: Path, row: TrackRow) -> None:
 
 
 def delete_line(doc: LrcDoc, index: int) -> LrcDoc:
-    """Removes one line; review markers after it move up by one."""
+    """Removes one line; review markers after it move up by one. An explicitly empty
+    `[#review:]` (the user accepted the whole lyric) is kept."""
     meta = dict(doc.meta)
+    accepted = meta.get("#review") == ""
     review = [int(x) for x in meta.pop("#review", "").split(",") if x.strip().isdigit()]
     review = [i - 1 if i > index else i for i in review if i != index]
     if review:
         meta["#review"] = ",".join(map(str, review))
+    elif accepted:
+        meta["#review"] = ""
     return LrcDoc(meta, [l for i, l in enumerate(doc.lines) if i != index])
 
 
@@ -401,11 +415,43 @@ def _review(meta: dict) -> list[int]:
     return [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
 
 
+def review_lines(doc: LrcDoc | None) -> list[int]:
+    """The zero-based line indices still flagged for review."""
+    return _review(doc.meta) if doc is not None else []
+
+
 def _with_review(meta: dict, review: list[int]) -> dict:
+    accepted = meta.get("#review") == ""   # an explicitly empty tag means "reviewed, no flags"
     meta = {k: v for k, v in meta.items() if k != "#review"}
     if review:
         meta["#review"] = ",".join(map(str, sorted(review)))
+    elif accepted:
+        meta["#review"] = ""
     return meta
+
+
+def mark_line_reviewed(doc: LrcDoc, index: int) -> LrcDoc:
+    """Clears one line's review flag. Accepting the last flagged line records an empty tag, so
+    the track can leave the Review filter without losing the fact that a human accepted it."""
+    review = _review(doc.meta)
+    if index not in review:
+        return doc
+    review.remove(index)
+    meta = _with_review(doc.meta, review)
+    if not review:
+        meta["#review"] = ""
+    return LrcDoc(meta, list(doc.lines))
+
+
+def clear_review_flags(doc: LrcDoc) -> LrcDoc:
+    """Accepts every line: removes the flags and records the decision with an empty tag. The empty
+    tag is what lets a transcription-only lyric leave the Review filter."""
+    if doc.meta.get("#review") == "":
+        return doc
+    source = doc.meta.get("#source", "")
+    if "#review" not in doc.meta and not source.startswith("transcription"):
+        return doc   # already accepted/done; do not add a pointless tag
+    return LrcDoc(_with_review({**doc.meta, "#review": ""}, []), list(doc.lines))
 
 
 def insert_word(doc: LrcDoc, line: int, after: int, text: str, total_ms: int) -> LrcDoc:

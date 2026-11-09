@@ -142,6 +142,24 @@ namespace StarryKaraoke.Tests
         }
 
         [Fact]
+        public void A_word_shorter_than_60_ms_still_gets_a_60_ms_ramp()
+        {
+            var line = Timeline.Build(Lrc.Parse("[00:01.00]<00:01.00>ab <00:01.05>cd\n"),
+                                      9000, JapaneseMode.RomajiOnly, null)[0];
+            var m = line.Main;
+            Assert.Equal("ab cd", m.Text);
+            Assert.Equal(1060, m.CharEndMs[1], 3);        // 50 ms tag gap widened to the 60 ms minimum
+            Assert.True(m.CharEndMs[0] > 1000);
+            double last = 0;
+            for (var t = 990.0; t < 1300; t += 1)
+            {
+                var lit = m.LitChars(t);
+                Assert.True(lit >= last);
+                last = lit;
+            }
+        }
+
+        [Fact]
         public void Current_index_finds_last_started_line()
         {
             var lines = Timeline.Build(Lrc.Parse(Plain), 60000, JapaneseMode.RomajiOnly, null);

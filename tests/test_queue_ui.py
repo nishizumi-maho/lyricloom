@@ -37,7 +37,7 @@ def test_a_raising_track_does_not_wedge_the_queue(app, tmp_path, monkeypatch):
     audio = _audio(tmp_path)
     w = MainWindow(tmp_path)
     try:
-        _wait(app, lambda: w.table.rowCount() == 1)
+        _wait(app, lambda: w.proxy.rowCount() == 1)
         def broken(path):
             raise ValueError("bad .lrc")
 
@@ -54,6 +54,20 @@ def test_a_raising_track_does_not_wedge_the_queue(app, tmp_path, monkeypatch):
     finally:
         w.dirty = False
         w.close()
+
+
+def test_research_mode_calls_research_lyrics(tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+
+    def fake(path, cancel=None):
+        seen.append(path)
+        return runner.TrackResult(path, "done")
+
+    monkeypatch.setattr(runner, "research_lyrics", fake)
+    q = QueueWorker([audio], force=True, research=True)
+    q.run()
+    assert seen == [audio]
 
 
 def test_redo_restores_the_original_lrc_when_align_fails(tmp_path, monkeypatch):
@@ -89,7 +103,7 @@ def test_cancelled_track_has_its_own_status_and_shows_as_stopped(app, tmp_path, 
     try:
         w.rows = [TrackRow(audio, "Artist", "Song", "cancelled")]
         w._fill_table()
-        assert w.table.item(0, 2).text() == "Stopped"
+        assert w.proxy.index(0, 2).data() == "Stopped"
     finally:
         w.dirty = False
         w.close()

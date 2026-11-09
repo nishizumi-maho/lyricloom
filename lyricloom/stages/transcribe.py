@@ -3,8 +3,11 @@ anchors and for checking lyrics, and as the lyrics themselves only when no sourc
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from pathlib import Path
+
+import soundfile as sf
 
 from .. import config, models
 from ..model import Transcript, Word
@@ -29,13 +32,40 @@ MIN_WORDS_PER_MINUTE = 15     # real singing is several times denser than this
 MAX_CREDIT_SHARE = 0.3
 REPETITION_MIN_WORDS = 30
 REPETITION_MAX_DISTINCT = 5
+# Gaps longer than this are instrumental/quiet time, not singing: do not let an intro or a long
+# break inflate the denominator (R1-31).
+MAX_SUNG_GAP_S = 2.0
+# Even a very sparse 5-minute ballad has some sung time; a floor keeps a handful of words in a
+# four-minute file suspicious.
+MIN_EXPECTED_WINDOW_S = 60.0
+
+
+def sung_duration_s(words: list[Word]) -> float:
+    """Seconds covered by word spans, merging small gaps and ignoring instrumental breaks."""
+    spans = sorted((w.start_ms / 1000, w.end_ms / 1000) for w in words if w.end_ms > w.start_ms)
+    total, start, end = 0.0, None, None
+    for a, b in spans:
+        if start is None:
+            start, end = a, b
+        elif a <= end + MAX_SUNG_GAP_S:
+            end = max(end, b)
+        else:
+            total += end - start
+            start, end = a, b
+    if start is not None:
+        total += end - start
+    return total
 
 
 def looks_hallucinated(tr: Transcript, duration_s: float) -> bool:
     """True when Whisper's output is not a transcription of the singing: far too few words for the
-    song's length, mostly caption credits, or one short phrase repeated over and over."""
+    sung part of the song, mostly caption credits, or one short phrase repeated over and over.
+
+    R1-31: the denominator is the vocal activity measured from the word spans, not the audio file
+    length, so a sparse ballad with a long intro/outro is not treated as a hallucination."""
     n = len(tr.words)
-    if n < MIN_WORDS_PER_MINUTE * duration_s / 60:
+    window_s = max(sung_duration_s(tr.words), min(max(duration_s, 0.0), MIN_EXPECTED_WINDOW_S), 1.0)
+    if n < MIN_WORDS_PER_MINUTE * window_s / 60:
         return True
     if n == 0:
         return False
@@ -49,6 +79,18 @@ def looks_hallucinated(tr: Transcript, duration_s: float) -> bool:
 
 def _model_path(spec: models.ModelSpec) -> Path:
     return spec.dest(spec.model_file(), config.MODELS)
+
+
+def _duration_s(path: Path) -> float:
+    try:
+        return float(sf.info(str(path)).duration)
+    except (OSError, RuntimeError):
+        return 0.0
+
+
+def _timeout_s(path: Path) -> int:
+    """A generous limit proportional to the audio: 10x its length plus ten minutes (R1-21)."""
+    return max(600, int(_duration_s(path) * 10) + 600)
 
 
 def _cli_error(cli: Path) -> RuntimeError:
@@ -78,12 +120,19 @@ def transcribe(vocals16k: Path, work: Path, lang: str | None, prompt: str | None
             f"the Whisper model {spec.id!r} is missing: {model_path}. "
             f"Run `lyricloom models download {spec.id}` or open Help > Models.")
     out = work / name
+    code = lang if lang and lang not in ("", "other") else "auto"
     cmd = [str(cli), "-m", str(model_path), "-f", str(vocals16k),
-           "-l", lang if lang in ("ja", "pt", "en") else "auto", "-ojf", "-of", str(out),
+           "-l", code, "-ojf", "-of", str(out),
            "-ml", "1", "-sow", "--beam-size", "5", "--best-of", "5", "-t", str(config.CPU_THREADS), "-np", *extra]
     if prompt:
         cmd += ["--prompt", prompt]
-    proc = run_process(cmd, cancel=cancel)
+    timeout_s = _timeout_s(vocals16k)
+    try:
+        proc = run_process(cmd, cancel=cancel, timeout_s=timeout_s)
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            f"transcription timed out after {timeout_s} s; the model or the audio may be corrupt. "
+            "Try another Whisper model, or check the file.") from e
     if proc.returncode != 0:
         raise RuntimeError("whisper-cli failed: " + proc.stderr.decode("utf-8", "replace")[-1500:])
     return parse_whisper_json(json.loads(out.with_suffix(".json").read_text(encoding="utf-8")))
