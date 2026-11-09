@@ -1076,15 +1076,24 @@ class PrivacyPage(QWizardPage):
         updates = QGroupBox("Updates")
         updates_layout = QVBoxLayout(updates)
         self.check_updates = QCheckBox(
-            "Check for updates when LyricLoom starts (contacts GitHub)")
-        choice = updater.check_choice()
-        self.check_updates.setChecked(choice is True)
+            "Check for updates when LyricLoom starts and every 24 hours (contacts GitHub)")
+        self.check_updates.setChecked(updater.check_enabled())
         updates_layout.addWidget(self.check_updates)
+        self.update_install = QComboBox()
+        for label, mode in (("Install updates automatically when LyricLoom closes", "auto"),
+                            ("Ask before installing", "ask"),
+                            ("Only tell me that a new version exists", "notify")):
+            self.update_install.addItem(label, mode)
+        self.update_install.setCurrentIndex(max(0, self.update_install.findData(updater.install_mode())))
+        self.check_updates.toggled.connect(self.update_install.setEnabled)
+        self.update_install.setEnabled(self.check_updates.isChecked())
+        updates_layout.addWidget(self.update_install)
         update_note = QLabel(
-            "When this is on, LyricLoom sends one request to api.github.com when it starts and "
-            "asks for public release metadata. The request carries your IP address and a "
-            "User-Agent: LyricLoom/<version> header. Nothing about your library is sent. Off is "
-            "the default; Help > Check for updates always works without this setting.")
+            "When this is on, LyricLoom sends one request to api.github.com at start-up and every "
+            "24 hours and asks for public release metadata. The request carries your IP address and "
+            "a User-Agent: LyricLoom/<version> header. Nothing about you or your library is sent. "
+            "An update is downloaded only from LyricLoom's own GitHub release and installed only "
+            "after its published SHA-256 checksum matches. Help > Check for updates always works.")
         update_note.setWordWrap(True)
         updates_layout.addWidget(update_note)
         layout.addWidget(updates)
@@ -1146,6 +1155,7 @@ class PrivacyPage(QWizardPage):
                 self.remove_key_btn.setEnabled(True)
             config.update_settings({
                 "check_updates": self.check_updates.isChecked(),
+                "update_install": self.update_install.currentData(),
                 "assemblyai_enabled": self.cloud.isChecked(),
                 ASK_BEFORE_UPLOAD: self.ask.isChecked(),
             })
@@ -1296,7 +1306,8 @@ class SetupAssistant(QWizard):
             acceleration = "CPU"
         specs = models.default_models()
         ready = sum(1 for spec in specs if models.status(spec) == "ready")
-        updates = "on" if config.setting("check_updates") is True else "off"
+        updates = (f"on ({ {'auto': 'install automatically', 'ask': 'ask first', 'notify': 'notify only'}.get(updater.install_mode(), 'install automatically') })"
+                   if updater.check_enabled() else "off")
         cloud = "on" if config.assemblyai_enabled() else "off"
         plugin = musicbee.detect_musicbee()
         if plugin.plugin_installed:

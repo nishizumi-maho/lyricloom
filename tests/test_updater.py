@@ -49,22 +49,63 @@ def test_checksum_parser_accepts_sha256sum_and_bsd_output():
 def test_update_check_choice_is_absent_until_the_user_decides(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     assert updater.check_choice() is None
+    assert updater.check_enabled() is True          # absent means the owner's default: on
     config.set_setting("check_updates", False)
     assert updater.check_choice() is False
+    assert updater.check_enabled() is False
     config.set_setting("check_updates", True)
     assert updater.check_choice() is True
+    assert updater.check_enabled() is True
 
 
-def test_startup_check_makes_no_request_until_the_user_opts_in(tmp_path, monkeypatch):
+def test_startup_check_is_on_by_default_and_false_turns_it_off(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
-    assert updater.should_check_on_startup() is False
+    assert updater.should_check_on_startup() is True
     config.set_setting("check_updates", False)
     assert updater.should_check_on_startup() is False
     config.set_setting("check_updates", True)
     assert updater.should_check_on_startup() is True
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     assert updater.should_check_on_startup() is False
+    assert updater.should_check_automatically() is False
+
+
+def test_install_mode_defaults_to_auto_and_rejects_unknown_values(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    assert updater.install_mode() == "auto"
+    config.set_setting("update_install", "ask")
+    assert updater.install_mode() == "ask"
+    config.set_setting("update_install", "notify")
+    assert updater.install_mode() == "notify"
+    config.set_setting("update_install", "nonsense")
+    assert updater.install_mode() == "auto"
+
+
+def test_a_skipped_version_is_not_offered_again_until_a_newer_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    assert updater.is_skipped("2.1.1") is False
+    updater.skip_version("2.1.1")
+    assert updater.skipped_version() == "2.1.1"
+    assert updater.is_skipped("2.1.1") is True
+    assert updater.is_skipped("2.1.0") is True
+    assert updater.is_skipped("2.1.2") is False
+
+
+def test_stale_update_files_are_deleted_on_start(tmp_path, monkeypatch):
+    updates = tmp_path / "updates"
+    updates.mkdir()
+    stale = updates / "LyricLoom-Setup.exe"
+    stale.write_bytes(b"left over")
+    part = updates / "download.part"
+    part.write_bytes(b"partial")
+    keep_dir = updates / "not-a-file"
+    keep_dir.mkdir()
+    monkeypatch.setattr(updater, "UPDATE_DIR", updates)
+    monkeypatch.setattr(updater, "_VERIFIED", {})
+    updater.cleanup_stale_downloads()
+    assert not stale.exists() and not part.exists()
+    assert keep_dir.is_dir()
 
 
 def test_download_refuses_a_url_that_is_not_our_release(tmp_path, monkeypatch):
@@ -190,8 +231,101 @@ def test_check_refuses_an_asset_outside_the_release(monkeypatch):
         updater.check()
 
 
+def test_check_returns_the_linux_tarball_when_there_is_no_installer(monkeypatch):
+    release = {
+        "tag_name": "v2.1.1",
+        "html_url": "https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1",
+        "body": "notes",
+        "assets": [{"name": "LyricLoom-2.1.1-linux-x86_64.tar.gz",
+                    "browser_download_url": "https://github.com/nishizumi-maho/lyricloom/releases/"
+                                            "download/v2.1.1/LyricLoom-2.1.1-linux-x86_64.tar.gz",
+                    "size": 1}],
+    }
+    monkeypatch.setattr(updater, "_get_json", lambda url: release)
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    info = updater.check()
+    assert info is not None
+    assert info.asset_url == ""
+    assert info.tarball_name == "LyricLoom-2.1.1-linux-x86_64.tar.gz"
+
+
+def test_release_page_url_falls_back_to_this_projects_release_page():
+    evil = _info(page_url="https://evil.example/release")
+    assert updater.release_page_url(evil) == updater.RELEASES_PAGE
+    good = _info(page_url="https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1")
+    assert updater.release_page_url(good) == good.page_url
+
+
+def test_whats_new_opens_only_the_validated_release_url(monkeypatch):
+    opened = []
+    monkeypatch.setattr(updater.webbrowser, "open", lambda url: opened.append(url))
+    updater.open_release_page(_info(page_url="https://evil.example/release"))
+    updater.open_release_page(_info())
+    assert opened == [updater.RELEASES_PAGE,
+                      "https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1"]
+
+
+def test_musicbee_process_detection_reads_tasklist(monkeypatch):
+    class Result:
+        stdout = '"MusicBee.exe","4242","Console","1","120,000 K"\r\n'
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater.subprocess, "run", lambda *args, **kwargs: Result())
+    assert updater.musicbee_running() is True
+
+    Result.stdout = "INFO: No tasks are running which match the specified criteria.\r\n"
+    assert updater.musicbee_running() is False
+
+
+def _verified_installer(tmp_path, monkeypatch):
+    path = tmp_path / "LyricLoom-Setup.exe"
+    path.write_bytes(PAYLOAD)
+    monkeypatch.setattr(updater, "_VERIFIED", {path.resolve(): SHA})
+    calls = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **kwargs: calls.append((argv, kwargs)))
+    return path, calls
+
+
+def test_silent_installer_argv_relaunches_and_skips_plugins(tmp_path, monkeypatch):
+    path, calls = _verified_installer(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "musicbee_running", lambda: False)
+    updater.launch_installer(path, silent=True, relaunch=True, skip_plugin=False)
+    assert calls == [([str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RELAUNCH=1"],
+                      {"close_fds": True})]
+
+
+def test_silent_installer_argv_never_closes_musicbee(tmp_path, monkeypatch):
+    path, calls = _verified_installer(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "musicbee_running", lambda: True)
+    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False)
+    argv, _kwargs = calls[0]
+    assert argv == [str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                    "/NOCLOSEAPPLICATIONS", "/SKIPPLUGIN=1"]
+    assert updater.take_plugin_skip_notice() is True
+    assert updater.take_plugin_skip_notice() is False
+
+
+def test_silent_installer_argv_can_skip_the_plugin_without_musicbee(tmp_path, monkeypatch):
+    path, calls = _verified_installer(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "musicbee_running", lambda: False)
+    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=True)
+    assert calls[0][0][-1] == "/SKIPPLUGIN=1"
+
+
 def test_launch_installer_refuses_an_unverified_file(tmp_path):
     path = tmp_path / "LyricLoom-Setup.exe"
     path.write_bytes(b"not downloaded by LyricLoom")
     with pytest.raises(RuntimeError, match="did not download and verify"):
-        updater.launch_installer(path)
+        updater.launch_installer(path, silent=True, relaunch=True, skip_plugin=False)
+
+
+def test_silent_installer_refuses_an_unverified_file_before_any_process(tmp_path, monkeypatch):
+    path = tmp_path / "LyricLoom-Setup.exe"
+    path.write_bytes(b"not downloaded by LyricLoom")
+
+    def no_process(*args, **kwargs):
+        raise AssertionError("an unverified installer must never be launched")
+
+    monkeypatch.setattr(updater.subprocess, "Popen", no_process)
+    with pytest.raises(RuntimeError, match="did not download and verify"):
+        updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False)

@@ -35,6 +35,12 @@ def isolated_settings(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_update_dir(tmp_path, monkeypatch):
+    """A test never deletes or writes the real temporary update folder of a running LyricLoom."""
+    monkeypatch.setattr("lyricloom.updater.UPDATE_DIR", tmp_path / "updates")
+
+
+@pytest.fixture(autouse=True)
 def isolated_vocals(tmp_path, monkeypatch):
     """Kept vocals go to a temporary folder, and separation never starts the WSL distro;
     tests that route to WSL use a fake worker."""
