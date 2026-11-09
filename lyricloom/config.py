@@ -343,13 +343,21 @@ SEPARATOR_PYTHON = sys.executable
 
 # --------------------------------------------------------------------------- WSL / ROCm (Windows)
 
+def _decode_wsl_output(data: bytes) -> str:
+    """Decodes ``wsl.exe`` output.  Piped WSL output is UTF-16 on Windows; tests and some tools
+    emit UTF-8 instead."""
+    if b"\x00" in data:
+        return data.decode("utf-16-le", "replace")
+    return data.decode("utf-8-sig", "replace")
+
+
 def _wsl_distros() -> list[str]:
     if not IS_WINDOWS or shutil.which("wsl.exe") is None:
         return []
     try:
         out = subprocess.run(["wsl.exe", "-l", "-q"], capture_output=True, timeout=8,
                              stdin=subprocess.DEVNULL)
-        text = out.stdout.decode("utf-16-le", "replace") if b"\x00" in out.stdout else out.stdout.decode("utf-8", "replace")
+        text = _decode_wsl_output(out.stdout)
         return [line.strip().replace("\x00", "") for line in text.splitlines() if line.strip()]
     except (OSError, subprocess.SubprocessError):
         return []
