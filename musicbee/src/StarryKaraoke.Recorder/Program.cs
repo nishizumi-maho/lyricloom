@@ -9,6 +9,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using MusicBeePlugin;
 
 namespace StarryKaraoke.Recorder
@@ -28,6 +29,8 @@ namespace StarryKaraoke.Recorder
             var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
             try
             {
+                RecorderTemp.SweepStale(TimeSpan.FromHours(24));
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => RecorderTemp.DeleteActiveRunFolder();
                 var job = Job.FromArgs(args);
                 var window = new ProgressWindow(job);
                 app.MainWindow = window;
@@ -36,6 +39,9 @@ namespace StarryKaraoke.Recorder
             }
             catch (Exception e)
             {
+                // Even a refused or failed start must not leave the plugin's private copies in %TEMP%.
+                RecorderTemp.DeleteOwnedInputCopy(args.TryGetValue("lrc", out var lrc) ? lrc : null);
+                RecorderTemp.DeleteOwnedInputCopy(args.TryGetValue("settings", out var settings) ? settings : null);
                 MessageBox.Show(e.Message, "Starry Karaoke — record video", MessageBoxButton.OK, MessageBoxImage.Error);
                 return 1;
             }
@@ -52,7 +58,7 @@ namespace StarryKaraoke.Recorder
 
     internal sealed class Job
     {
-        public string Lrc, Audio, Out, Title, Dict, Ffmpeg;
+        public string Lrc, Audio, Out, Title, Dict, Ffmpeg, Lyrics, SettingsPath;
         public Settings Settings;
         public double DurationMs;
         public int Width = 1920, Height = 1080, Fps = 30;
@@ -67,15 +73,27 @@ namespace StarryKaraoke.Recorder
                 Dict = a.TryGetValue("dict", out var dict) ? dict : null,
                 DurationMs = double.Parse(Need("duration"), CultureInfo.InvariantCulture),
             };
-            job.Settings = a.TryGetValue("settings", out var sp) && File.Exists(sp)
-                ? Settings.Load(Path.GetDirectoryName(sp), Path.GetFileName(sp)) : new Settings();
+            job.SettingsPath = a.TryGetValue("settings", out var sp) && File.Exists(sp) ? sp : null;
+            job.Settings = job.SettingsPath != null
+                ? Settings.Load(Path.GetDirectoryName(job.SettingsPath), Path.GetFileName(job.SettingsPath)) : new Settings();
             var res = (job.Settings.VideoResolution ?? "1920x1080").Split(new[] { 'x', 'X' });
             if (res.Length == 2 && int.TryParse(res[0], out var w) && int.TryParse(res[1], out var h) && w >= 320 && h >= 240)
             { job.Width = w & ~1; job.Height = h & ~1; }
             job.Fps = Math.Max(10, Math.Min(240, job.Settings.VideoFps));
             job.Ffmpeg = FindFfmpeg(a.TryGetValue("ffmpeg", out var f) ? f : job.Settings.FfmpegPath);
             if (!File.Exists(job.Audio)) throw new FileNotFoundException("Audio not found: " + job.Audio);
+            if (!File.Exists(job.Lrc)) throw new FileNotFoundException("Lyrics not found: " + job.Lrc);
             if (job.DurationMs <= 0) throw new ArgumentException("Unknown song duration.");
+
+            // R4-01: refuse before doing any work. Compare canonical paths (symlinks/junctions and
+            // relative paths included), not just the strings the caller typed.
+            OutputSafety.ValidateOutput(job.Out, job.Audio, job.Lrc, job.SettingsPath, job.Ffmpeg);
+
+            job.Lyrics = File.ReadAllText(job.Lrc);
+            // The plugin writes copies of the lyrics and settings under our own temp root. They have
+            // been read into memory now; do not leave personal data behind (R4-13).
+            RecorderTemp.DeleteOwnedInputCopy(job.Lrc);
+            RecorderTemp.DeleteOwnedInputCopy(job.SettingsPath);
             return job;
         }
 
@@ -109,6 +127,9 @@ namespace StarryKaraoke.Recorder
         private readonly Stopwatch _watch = Stopwatch.StartNew();
         private readonly Renderer _renderer;
         private bool _done;
+        private bool _closeRequested;
+        private bool _cancelRequested;
+        private DispatcherTimer _forceTimer;
 
         public ProgressWindow(Job job)
         {
@@ -143,6 +164,8 @@ namespace StarryKaraoke.Recorder
             _renderer.Finished += e => Dispatcher.BeginInvoke((Action)(() =>
             {
                 _done = true;
+                StopForceTimer();
+                _cancel.IsEnabled = true;
                 _cancel.Content = "Close";
                 if (e == null)
                 {
@@ -152,12 +175,59 @@ namespace StarryKaraoke.Recorder
                 }
                 else if (e is OperationCanceledException) _status.Text = "Cancelled. No file was written.";
                 else _status.Text = "Error: " + e.Message;
+                // The user asked to close while we were still stopping; finish the close only now
+                // that the renderer has deleted its work folder and the job object is closed.
+                if (_closeRequested) Close();
             }));
             _open.Click += (s, e) => Process.Start("explorer.exe", "/select,\"" + job.Out + "\"");
-            _cancel.Click += (s, e) => { if (_done) Close(); else { _renderer.Cancel(); _cancel.IsEnabled = false; } };
-            Closing += (s, e) => { if (!_done) { _renderer.Cancel(); } };
+            _cancel.Click += (s, e) => { if (_done) Close(); else BeginCancel(); };
+            Closing += (s, e) =>
+            {
+                if (_done) return;
+                // Do not let OnMainWindowClose kill the render thread while ffmpeg is still running.
+                e.Cancel = true;
+                _closeRequested = true;
+                BeginCancel();
+            };
             Loaded += (s, e) => _renderer.Start();
             TaskbarItemInfo = new System.Windows.Shell.TaskbarItemInfo { ProgressState = System.Windows.Shell.TaskbarItemProgressState.Normal };
+        }
+
+        private void BeginCancel()
+        {
+            if (_cancelRequested) return;
+            _cancelRequested = true;
+            _renderer.Cancel();
+            _cancel.IsEnabled = false;
+            _cancel.Content = "Stopping...";
+            _status.Text = "Stopping...";
+
+            // Cancellation is cooperative for ffmpeg's final join. If it is still running after five
+            // seconds, terminate the job object's processes; if the render thread then cannot finish,
+            // close anyway after three more seconds.
+            _forceTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            _forceTimer.Tick += (s, e) =>
+            {
+                StopForceTimer();
+                _renderer.Kill();
+                _status.Text = "Stopping ffmpeg...";
+                _forceTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+                _forceTimer.Tick += (s2, e2) =>
+                {
+                    StopForceTimer();
+                    _done = true;
+                    Close();
+                };
+                _forceTimer.Start();
+            };
+            _forceTimer.Start();
+        }
+
+        private void StopForceTimer()
+        {
+            if (_forceTimer == null) return;
+            _forceTimer.Stop();
+            _forceTimer = null;
         }
 
         private void TaskbarProgress(int i, int n) => TaskbarItemInfo.ProgressValue = (double)i / n;
