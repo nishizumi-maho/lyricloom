@@ -3,11 +3,12 @@ anchors and for checking lyrics, and as the lyrics themselves only when no sourc
 from __future__ import annotations
 
 import json
-import subprocess
+import threading
 from pathlib import Path
 
 from .. import config
 from ..model import Transcript, Word
+from ..workers import run_process
 
 
 def parse_whisper_json(data: dict) -> Transcript:
@@ -47,9 +48,11 @@ def looks_hallucinated(tr: Transcript, duration_s: float) -> bool:
 
 
 def transcribe(vocals16k: Path, work: Path, lang: str | None, prompt: str | None = None,
-               name: str = "whisper", extra: tuple[str, ...] | list[str] = ()) -> Transcript:
+               name: str = "whisper", extra: tuple[str, ...] | list[str] = (),
+               cancel: threading.Event | None = None) -> Transcript:
     """`prompt` gives Whisper context (artist and title); `name` keeps several passes apart in the
-    work dir; `extra` adds decoding options (e.g. a different temperature for a second pass)."""
+    work dir; `extra` adds decoding options (e.g. a different temperature for a second pass);
+    `cancel` stops whisper-cli and its process tree when the queue is stopped."""
     work.mkdir(parents=True, exist_ok=True)
     if not Path(config.WHISPER_CLI).is_file():
         raise RuntimeError(
@@ -65,8 +68,7 @@ def transcribe(vocals16k: Path, work: Path, lang: str | None, prompt: str | None
            "-ml", "1", "-sow", "--beam-size", "5", "--best-of", "5", "-t", str(config.CPU_THREADS), "-np", *extra]
     if prompt:
         cmd += ["--prompt", prompt]
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if config.IS_WINDOWS else 0
-    proc = subprocess.run(cmd, capture_output=True, creationflags=flags)
+    proc = run_process(cmd, cancel=cancel)
     if proc.returncode != 0:
         raise RuntimeError("whisper-cli failed: " + proc.stderr.decode("utf-8", "replace")[-1500:])
     return parse_whisper_json(json.loads(out.with_suffix(".json").read_text(encoding="utf-8")))

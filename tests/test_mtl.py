@@ -25,7 +25,7 @@ def test_mismatched_word_count_is_an_error():
 
 
 def _fake_ctc(calls):
-    def fake(vocals16k, blocks, seg_tokens):
+    def fake(vocals16k, blocks, seg_tokens, cancel=None):
         calls.append("ctc")
         t, out = 1000, []
         for block in seg_tokens:
@@ -36,7 +36,7 @@ def _fake_ctc(calls):
 
 
 def _fake_mtl(calls, fail=False):
-    def fake(vocals, seg_texts):
+    def fake(vocals, seg_texts, cancel=None):
         calls.append("mtl")
         if fail:
             raise WorkerError("lyricloom.workers.align_mtl", "boom")

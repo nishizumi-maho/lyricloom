@@ -1,3 +1,4 @@
+import json
 import os
 import time
 
@@ -62,3 +63,64 @@ def test_cached_rows_load_without_touching_the_files(tmp_path, monkeypatch):
     model.scan_cached(root)
     assert [r.path.name for r in model.load_cached_rows(root)] == ["a.flac"]
     assert model.load_cached_rows(tmp_path / "other") == []
+
+
+def test_a_malformed_confidence_does_not_break_the_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK_ROOT", tmp_path / "work")
+    root = tmp_path / "lib"
+    bad = _track(root, "a.flac", "[re:LyricLoom 1.0.0]\n[#source:demo conf:oops]\n[00:01.00]x\n")
+    _track(root, "b.flac", "[re:LyricLoom 1.0.0]\n[#source:demo conf:0.80]\n[00:01.00]x\n")
+    rows = {r.path.name: r for r in model.scan_cached(root)}
+    assert set(rows) == {"a.flac", "b.flac"}
+    assert rows["a.flac"].conf == 0.0 and "invalid confidence" in rows["a.flac"].error
+    assert rows["b.flac"].conf == 0.8
+    assert bad.with_suffix(".lrc").exists()      # the bad file was not deleted or rewritten
+
+
+def test_a_corrupt_or_old_cache_is_discarded_and_rebuilt(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK_ROOT", tmp_path / "work")
+    root = tmp_path / "lib"
+    _track(root, "a.flac")
+    cache = model._cache_file(root)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text("{not json", encoding="utf-8")
+    assert model.load_cached_rows(root) == []
+    assert [r.path.name for r in model.scan_cached(root)] == ["a.flac"]
+    assert json.loads(cache.read_text(encoding="utf-8"))["schema"] == model.SCAN_SCHEMA
+
+    cache.write_text(json.dumps({"schema": 1, "rows": {"x": {"path": "x"}}}), encoding="utf-8")
+    assert model.load_cached_rows(root) == []
+    assert [r.path.name for r in model.scan_cached(root)] == ["a.flac"]
+
+
+def test_one_unreadable_file_is_counted_and_the_rest_still_scan(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK_ROOT", tmp_path / "work")
+    root = tmp_path / "lib"
+    _track(root, "a.flac")
+    _track(root, "b.flac")
+    real = model._stamp
+
+    def stamp(audio):
+        if audio.name == "a.flac":
+            raise PermissionError(13, "Access is denied")
+        return real(audio)
+
+    monkeypatch.setattr(model, "_stamp", stamp)
+    stats = {}
+    rows = model.scan_cached(root, stats)
+    assert stats["unreadable"] == 1
+    assert {r.path.name for r in rows} == {"a.flac", "b.flac"}
+    assert next(r for r in rows if r.path.name == "a.flac").status == "other"
+
+
+def test_a_malformed_cached_row_is_ignored_not_fatal(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK_ROOT", tmp_path / "work")
+    root = tmp_path / "lib"
+    _track(root, "a.flac")
+    model.scan_cached(root)
+    cache = model._cache_file(root)
+    data = json.loads(cache.read_text(encoding="utf-8"))
+    data["rows"][next(iter(data["rows"]))]["conf"] = "oops"
+    cache.write_text(json.dumps(data), encoding="utf-8")
+    assert model.load_cached_rows(root) == []
+    assert [r.path.name for r in model.scan_cached(root)] == ["a.flac"]

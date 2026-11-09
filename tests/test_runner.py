@@ -27,16 +27,17 @@ def lib(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", tmp_path / "Library")
     calls = {"separate": 0}
 
-    def fake_separate(audio, work):
+    def fake_separate(audio, work, cancel=None):
         calls["separate"] += 1
         return {"vocals": "v.wav", "vocals16k": "v16.wav", "model": "m", "device": "cpu"}
 
     monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
     monkeypatch.setattr(runner, "separate", fake_separate)
-    monkeypatch.setattr(runner, "transcribe", lambda v, w, lang, prompt=None, name="whisper", extra=(): Transcript(
-        "pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)]))
+    monkeypatch.setattr(runner, "transcribe",
+                        lambda v, w, lang, prompt=None, name="whisper", extra=(), cancel=None: Transcript(
+                            "pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)]))
     monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: AlignResult(
+    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None, cancel=None: AlignResult(
         [Line(0, [Segment("eu ", 0, 300, 0.9), Segment("vou", 400, 700, 0.9)], 0.9)], 0.9, False))
     return tmp_path / "Library", calls
 
@@ -100,7 +101,7 @@ def test_stage_cache_reused(lib):
 def _count_transcribe(monkeypatch):
     calls = []
 
-    def fake(v, w, lang, prompt=None, name="whisper", extra=()):
+    def fake(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
         calls.append({"wav": str(v), "prompt": prompt, "name": name, "extra": list(extra)})
         return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
 
@@ -216,7 +217,7 @@ def test_stages_are_reported_in_order(lib):
 
 def test_low_confidence_lines_are_listed_in_the_lrc(lib, monkeypatch):
     root, _ = lib
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: AlignResult(
+    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None, cancel=None: AlignResult(
         [Line(0, [Segment("a", 0, 300)], 0.9), Line(500, [Segment("b", 500, 800)], 0.4)], 0.7, True))
     runner.process(_flac(root / "a.flac"))
     assert parse_lrc((root / "a.lrc").read_text(encoding="utf-8")).meta["#review"] == "1"
@@ -227,8 +228,10 @@ def test_realign_with_pasted_text_reuses_the_audio_stages(lib, monkeypatch):
     audio = _flac(root / "a.flac")
     runner.process(audio)
     texts = []
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: texts.append(chosen.text) or AlignResult(
-        [Line(0, [Segment("x", 0, 300, 0.9)], 0.9)], 0.9, False))
+    monkeypatch.setattr(
+        runner, "align",
+        lambda meta, work, chosen, tr, v, vf=None, cancel=None: texts.append(chosen.text) or AlignResult(
+            [Line(0, [Segment("x", 0, 300, 0.9)], 0.9)], 0.9, False))
     res = runner.realign(audio, "minha letra\ncolada aqui")
     assert texts == ["minha letra\ncolada aqui"]
     assert res.source == "manual" and calls["separate"] == 1
