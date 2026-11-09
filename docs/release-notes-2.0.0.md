@@ -6,7 +6,7 @@ LyricLoom turns official lyrics into word-by-word synchronized `.lrc` files by a
 
 - Word-level enhanced LRC with line and word timestamps.
 - Six-stage pipeline: lyrics search, vocal separation, Whisper transcription, forced alignment, review, write.
-- Built-in starry karaoke player — **no MusicBee required** — plus optional MusicBee + [Starry Karaoke](https://github.com/nishizumi-maho/MusicBee-StarryKaraoke) support.
+- Built-in starry karaoke player — **no MusicBee required** — plus optional MusicBee + Starry Karaoke support. The plugin now ships in this repository under `musicbee/`.
 - English singing-model alignment (LyricsAlignment-MTL) and multilingual MMS_FA alignment.
 - Windows installer and portable ZIP; native Linux tarball; optional WSL 2 + ROCm path for AMD GPUs.
 - Japanese dual-script output (Japanese and romaji), word editor, review flags, per-stage cache.

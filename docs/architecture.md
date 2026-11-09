@@ -38,16 +38,20 @@ Every stage except `probe` has its own JSON cache. `write` also reads cached res
 | `lyricloom/align/` | Anchor matching, CTC/MTL backends, consensus, confidence, merge, refine, trim. |
 | `lyricloom/text/` | Japanese/Latin segmentation and readings; MMS tokenization. |
 | `lyricloom/workers/` | Subprocess entry points for torch/audio-separator work. |
-| `lyricloom/app/` | PySide6 window and pure model helpers. |
 | `lyricloom/vendor/mtl/` | Vendored LyricsAlignment-MTL inference code (MIT). |
-| `lyricloom/models.py` | Model catalog, per-language/per-track choices, verification status. |
+| `lyricloom/models.py` | Model catalog, per-language/per-track choices, custom models, verification status. |
 | `lyricloom/downloads.py` | Verified, resumable HTTPS downloads (`.part` + size + SHA-256). |
 | `lyricloom/runtime.py` | Model downloads and readiness checks. |
+| `lyricloom/setup.py` | System detection, WSL environment discovery/setup and whisper.cpp backend install, with no Qt. |
+| `lyricloom/updater.py` | GitHub release check, fail-closed installer download and launch modes. |
+| `lyricloom/animation.py` | Qt-free playback clock, smooth scroll path, line emphasis and frame-rate helpers. |
+| `lyricloom/musicbee.py` | Finds MusicBee and installs the bundled Starry Karaoke files. |
 | `lyricloom/cache.py` | Per-track work directory and JSON cache. |
-| `lyricloom/config.py` | Paths, settings, env vars, WSL/ROCm configuration. |
+| `lyricloom/config.py` | Paths, settings, env vars, model choices and WSL/ROCm configuration. |
 | `lyricloom/lrc.py` | Enhanced LRC parse/format. |
+| `lyricloom/app/` | PySide6 window, setup assistant, Models window, karaoke/lyric view, diagnostics and IPC. |
 
-The engine has no Qt imports. The GUI imports the engine, not the other way around. Heavy stages run in separate processes, so the GUI never imports torch, torchaudio or audio-separator.
+The engine has no Qt imports. The GUI imports the engine, not the other way around. Heavy stages run in separate processes, so the GUI does not import torch, torchaudio or audio-separator for processing; **Help > Diagnostics…** may import torch once, only to report CUDA availability.
 
 ## Stage 1: probe
 
@@ -129,7 +133,7 @@ If no candidate is accepted, the transcript becomes the lyric (`source = "transc
 5. Write `vocals.wav`, then a mono 16 kHz `vocals16k.wav`; both reads and the resample are streamed. A container libsndfile cannot read (M4A/AAC and others) is decoded through `imageio-ffmpeg`.
 6. Keep a lossless FLAC copy outside the library.
 
-The separator worker uses `audio-separator` with `vocals_mel_band_roformer.ckpt`, batch size 1, segment size 256, overlap from `LYRICLOOM_SEPARATOR_OVERLAP` (default 2), and device `auto`/`cuda`/`cpu`/`dml`.
+The separator worker uses the resolved separator model (Mel-Band RoFormer by default) with batch size 1, segment size 256, overlap from `LYRICLOOM_SEPARATOR_OVERLAP` (default 2), and device `auto`/`cuda`/`cpu`/`dml`. In WSL it prefers the copy in `wsl_models_dir` when its size matches and falls back to the Windows folder through `/mnt`.
 
 If the WSL attempt fails, the exception tail is stored as `fallback`, the Windows/Linux worker runs on the CPU, and the track result records both the device and the fallback reason. If the WSL worker succeeded but reports `device="cpu"`, the result says `cpu` with a "WSL had no usable GPU" fallback reason; it is never labelled ROCm.
 
@@ -140,7 +144,7 @@ Keeping the vocal stem and the instrumental subtraction are optional work: an un
 `stages/transcribe.py` calls:
 
 ```text
-whisper-cli -m <models>/ggml-large-v3.bin -f vocals16k.wav
+whisper-cli -m <resolved whisper model> -f vocals16k.wav
   -l ja|pt|en|auto -ojf -of <work>/<name>
   -ml 1 -sow --beam-size 5 --best-of 5 -t <threads> -np
   [--prompt "artist - title"] [extra flags]
@@ -239,9 +243,15 @@ Each track also has a `lock` file while a run is using its work directory. It st
 Each JSON cache has a `_version` field. `runner.STAGE_VERSIONS` currently is:
 
 ```python
-{"lyrics": "5", "separate": "5", "transcribe": "3",
+{"lyrics": "5", "separate": "4", "transcribe": "3",
  "transcribe_extra": "3", "transcribe_extra_aai": "3"}
 ```
+
+Cache entries written for the separate, transcribe and singing stages also carry an `_inputs`
+fingerprint of the resolved model and its parameters. A changed model, overlap, device or prompt
+therefore invalidates that stage and the later ones without touching unrelated work. A cache written
+by 2.0 has no `_inputs`; it is accepted and rewritten only when the stage still uses the catalog
+default models and the song has no per-song override.
 
 Bump a stage version only when that stage's output would change. The whole-file `ENGINE_VERSION` (`"8"`) is written to `#engine`; a track is skipped only when the `[re:]` marker is ours, `#engine` matches, and the lyric search was not left empty. This lets an engine change that only affects alignment avoid redoing separation and transcription.
 
@@ -253,7 +263,11 @@ The kept vocal stems live outside the work cache:
 <data>/vocals/<artist>/<album>/<song>.vocals.flac
 ```
 
-The relative path mirrors the library layout. If the song is outside the library, the path is derived from the two parent folder names. Kept vocals survive cache cleanup and are reused on later runs.
+The relative path mirrors the library layout. A song outside the library lives under
+`_external/<hash of the resolved path>/<name>.vocals.flac`, so two files with the same folder names
+on different drives cannot share a stem. A manifest beside the FLAC records the source audio's
+size/mtime and the separator model. Kept vocals survive cache cleanup and are reused on later runs
+only while that manifest matches.
 
 The library scan cache is one JSON per library:
 
@@ -279,11 +293,19 @@ The parent writes a JSON payload to the worker's stdin. The worker writes a sing
 
 Libraries may print to stdout, so only the marked line is parsed. A non-zero exit or missing result raises `WorkerError` with the stderr tail. WSL paths are translated with `wsl_path` (`F:\X` → `/mnt/f/X`) and back with `windows_path`.
 
+Every worker and `whisper-cli` runs through a cancellable process loop that kills the whole process
+tree (`taskkill /T` on Windows, the process group on POSIX). Cancelling a song therefore stops the
+Linux process too. A worker crash becomes a per-track failure or a documented CPU fallback.
+
+For WSL, the engine sends the model paths inside the distro first and the `/mnt` path last. The worker
+uses the first candidate whose size matches the catalog (`workers/copies.py`), so a copied separator,
+MMS or MTL file is preferred over the slower Windows path.
+
 This design:
 
 - releases all VRAM when the worker exits;
 - lets the WSL stages use a different Python interpreter;
-- keeps torch/audio-separator imports out of the GUI process;
+- keeps torch/audio-separator out of the GUI's processing path;
 - turns a crash into a per-track failure instead of a dead app.
 
 The trade-off is process startup and model load time per stage. The per-stage cache avoids repeating that work for the same song.
@@ -298,7 +320,18 @@ The trade-off is process startup and model load time per stage. The per-stage ca
 - edit helpers (`insert_word`, `delete_word`, `insert_line`, `merge_with_previous`, `apply_edits`) operate on `LrcDoc`/`Line`/`Segment`.
 - `track_progress` estimates progress from stage and elapsed time; separation dominates the estimate.
 
-`app/main.py` owns the Qt window, the `QMediaPlayer`, the queue thread and the editor table. The queue processes one track at a time and emits row updates. The UI never calls torch.
+`app/main.py` owns the Qt window, the `QMediaPlayer`, the queue thread and the editor table. The queue processes one track at a time and emits row updates. The queue and editor never call torch; Diagnostics may import it once for its report.
+
+The other GUI modules keep their own boundaries:
+
+- `app/lyric_view.py` is the shared QPainter lyric column; `app/karaoke.py` wraps it in the starry
+  window. Both consume `lyricloom/animation.py`, which has no Qt imports.
+- `app/setup_assistant.py` draws the first-run wizard and runs every engine probe/download in a
+  worker thread; `app/models_window.py` is the model manager and per-song model dialog.
+- `app/ipc.py` implements the one-instance local socket and command-line forwarding.
+- `app/update_ui.py` and the update controller in `app/dialogs.py` display the non-modal update bar
+  and run `updater.check()`/`updater.download()` off the GUI thread.
+- `app/diagnostics.py` builds the copyable Help > Diagnostics text and the rotating app log.
 
 ## Configuration
 
@@ -308,7 +341,9 @@ The trade-off is process startup and model load time per stage. The per-stage ca
 - models root: `LYRICLOOM_MODELS`, `models` setting, a developer `models/` folder, then the data root;
 - library: `library` setting, then `~/Music`;
 - vocals: `vocals` setting, then `<data>/vocals`;
-- tools: `whisper_cli` setting / `LYRICLOOM_WHISPER_CLI`, bundled `tools/bin`, project `tools/bin`, `<data>/bin`, then `PATH`.
+- models for a stage: per-song override, language choice, default choice, then the catalog default;
+- tools: `whisper_cli` setting / `LYRICLOOM_WHISPER_CLI`, bundled `tools/bin`, project `tools/bin`,
+  `<data>/bin`, then `PATH`.
 
 Environment variables that affect behavior:
 
@@ -316,15 +351,20 @@ Environment variables that affect behavior:
 |---|---|
 | `LYRICLOOM_DATA_DIR` | Moves settings, cache, vocals and default models. |
 | `LYRICLOOM_MODELS` | Moves only the models. |
+| `LYRICLOOM_WORK` | Moves the work cache. |
 | `LYRICLOOM_WHISPER_CLI` | Full path to a whisper.cpp `whisper-cli` (same as the `whisper_cli` setting). |
 | `LYRICLOOM_WHISPER_MODEL` | Deprecated: the old filename override. Use `model_choices` / `lyricloom models use`. |
 | `LYRICLOOM_SEPARATOR_DEVICE` | `auto`, `cpu`, `cuda` or `dml` for the separator worker. |
 | `LYRICLOOM_SEPARATOR_OVERLAP` | Separator overlap (default 2). |
 | `LYRICLOOM_CPU_THREADS` | Caps worker thread pools (default: logical CPUs minus two, capped at 16). |
 | `LYRICLOOM_ALIGN_DEVICE` | `auto`/`cpu`/`cuda` for CTC alignment. |
-| `ASSEMBLYAI_API_KEY` | Enables optional cloud transcription. |
+| `ASSEMBLYAI_API_KEY` | Supplies the optional AssemblyAI key. The separate `assemblyai_enabled` setting is still required for consent. |
 
-Settings are JSON at `<data>/settings.json`. WSL keys are documented in [docs/wsl-rocm.md](wsl-rocm.md#7-configure-lyricloom).
+Settings are JSON at `<data>/settings.json`. They include the library and cache paths, Japanese
+script, `model_choices` (default, language, custom), `smooth_animation` (1/2/3), `check_updates`,
+`update_install` (`auto`/`ask`/`notify`), `skipped_update_version`, `assemblyai_enabled`,
+`assemblyai_ask_before_upload`, `setup_complete` and the WSL keys. WSL keys are documented in
+[docs/wsl-rocm.md](wsl-rocm.md#7-configure-lyricloom).
 
 ## Extension points
 
@@ -357,12 +397,15 @@ Do not silently drop words or invent times; the first pass's word skeleton is th
 
 ### Add a model
 
-1. Add the download/readiness logic to `runtime.py`.
-2. Add a worker download kind in `workers/download.py` if the download needs torch/audio-separator.
-3. Add a CLI choice in `cli.py`.
-4. Document the path, size and license in [docs/models.md](models.md) and [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md).
+1. Add a `ModelSpec` with every file's URL, exact size and SHA-256 to `models.CATALOG`, and mark the
+   stage default if it should be the fallback.
+2. Add any worker-side loading path under `workers/` if the model needs torch/audio-separator/NLTK.
+3. Add the stage choice handling, if the existing `models use`/`models add` flow is not enough.
+4. Document the stage, path, size and license in [docs/models.md](models.md) and
+   [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md).
 
-Downloads must use a `.part` file and verify a checksum when the upstream publishes one.
+Downloads must use a `.part` file and verify the pinned size and SHA-256. Never let a worker fetch a
+model on its own; `models.ensure_ready` runs before a heavy stage.
 
 ### Change the output format
 
@@ -371,7 +414,7 @@ Downloads must use a `.part` file and verify a checksum when the upstream publis
 - `tests/test_lrc.py`, `tests/test_write.py`;
 - `docs/lrc-format.md`;
 - `ENGINE_VERSION` if existing files should be reprocessed;
-- the Starry Karaoke parser if the plugin needs a new construct (separate repository).
+- the Starry Karaoke parser in `musicbee/src/StarryKaraoke/Lrc.cs` if the plugin needs a new construct.
 
 ## Concurrency and failure handling
 
@@ -386,10 +429,14 @@ Downloads must use a `.part` file and verify a checksum when the upstream publis
 
 ## Tests and development
 
-- `pytest` runs the default suite; `pytest -m gpu` runs tests that need real models or a GPU (deselected by default).
+- `pytest` runs the default Python suite; `pytest -m gpu` runs tests that need real models or a GPU
+  (deselected by default).
+- `dotnet test musicbee/tests/StarryKaraoke.Tests -c Release -nologo` runs the plugin tests; the
+  recorder and plugin build with `dotnet build` or `musicbee/build.ps1`.
 - Source adapters have recorded fixtures under `tests/fixtures` and `tests/sources`.
 - `tests/test_lrc.py` and `tests/test_write.py` cover the file contract.
-- `tests/test_runner.py`, `tests/test_cache.py`, `tests/test_align_stage.py` cover orchestration and caching.
+- `tests/test_runner.py`, `tests/test_cache.py`, `tests/test_align_stage.py` cover orchestration and
+  caching; `tests/test_animation.py` and `tests/test_lyric_view.py` cover smooth motion.
 - `ruff check .` enforces style; line length is 120.
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for setup and pull-request guidance.
@@ -397,7 +444,9 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for setup and pull-request guidance.
 ## Design constraints
 
 - **Official lyrics first.** Whisper text is a fallback, not the default. The official lyric is kept in `.original.lrc`.
-- **Local by default.** Only lyric search, model downloads and the optional AssemblyAI path use the network.
+- **Local by default.** Lyric search, model/backend downloads, the optional update check,
+  WSL package setup and the optional AssemblyAI path are the only network users; each is listed in
+  [docs/privacy.md](privacy.md).
 - **One song at a time.** Memory/VRAM predictability beats parallel throughput for a desktop tool.
 - **Every expensive stage is cacheable and versioned.**
 - **Never modify the audio.** Only read it; write sidecar files.
