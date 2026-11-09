@@ -99,6 +99,13 @@ Source: "..\..\dist\MusicBeePlugin\RomajiLyrics\*"; DestDir: "{userappdata}\Musi
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
+[Registry]
+; Other programs (for example the Starry Karaoke MusicBee plugin) can find the
+; installed executable without guessing the per-user install directory.
+; The whole key is removed by the uninstaller.
+Root: HKCU; Subkey: "Software\LyricLoom"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\LyricLoom"; ValueType: string; ValueName: "Executable"; ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletevalue
+
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
