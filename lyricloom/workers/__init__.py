@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 
 from .. import config
 
@@ -145,6 +147,77 @@ def run_process(argv: list[str], *, input_bytes: bytes = b"", timeout_s: int | N
         stdout.seek(0)
         stderr.seek(0)
         return subprocess.CompletedProcess(argv, code, stdout.read(), stderr.read())
+
+
+def run_process_stream(argv: list[str], *, input_bytes: bytes = b"", timeout_s: float | None = None,
+                       env: dict | None = None, cwd: Path | str | None = None,
+                       cancel: threading.Event | None = None,
+                       on_line: Callable[[str], None] | None = None) -> subprocess.CompletedProcess:
+    """Runs one subprocess like :func:`run_process`, but calls ``on_line`` as output arrives.
+
+    A setup script can run for minutes, so its progress must reach the user while it works.  Both
+    stdout and stderr are read by daemon threads (a pipe must never fill up and deadlock the poll
+    loop) and passed to ``on_line`` without the line ending.  Cancelling kills the whole process
+    tree, exactly as :func:`run_process` does.  The return value still contains the complete
+    stdout/stderr, so a caller can parse a final result line afterwards.
+    """
+    check_cancelled(cancel)
+    events: queue.Queue[tuple[str, bytes | None]] = queue.Queue()
+    stdout_parts: list[bytes] = []
+    stderr_parts: list[bytes] = []
+    with tempfile.TemporaryFile() as stdin:
+        if input_bytes:
+            stdin.write(input_bytes)
+            stdin.seek(0)
+        kwargs = {}
+        if not config.IS_WINDOWS:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            cwd=str(cwd) if cwd is not None else None, creationflags=_process_flags(), **kwargs)
+
+        def pump(stream, kind: str, parts: list[bytes]) -> None:
+            try:
+                for line in iter(stream.readline, b""):
+                    parts.append(line)
+                    events.put((kind, line))
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+                events.put((kind, None))
+
+        threads = [
+            threading.Thread(target=pump, args=(proc.stdout, "stdout", stdout_parts), daemon=True),
+            threading.Thread(target=pump, args=(proc.stderr, "stderr", stderr_parts), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        pending = len(threads)
+        started = time.monotonic()
+        try:
+            while pending:
+                try:
+                    _kind, line = events.get(timeout=0.05)
+                except queue.Empty:
+                    line = b""
+                if line is None:
+                    pending -= 1
+                elif line and on_line is not None:
+                    on_line(line.decode("utf-8", "replace").rstrip("\r\n"))
+                if pending and cancel is not None and cancel.is_set():
+                    raise WorkerCancelled()
+                if pending and timeout_s is not None and time.monotonic() - started > timeout_s:
+                    raise subprocess.TimeoutExpired(argv, timeout_s)
+            code = proc.wait()
+        except BaseException:
+            _kill_tree(proc)
+            raise
+        finally:
+            for thread in threads:
+                thread.join(timeout=5)
+    return subprocess.CompletedProcess(argv, code, b"".join(stdout_parts), b"".join(stderr_parts))
 
 
 def wsl_path(path: Path | str) -> str:

@@ -28,6 +28,8 @@ packaging/
   pyinstaller/
     LyricLoom.spec              one Analysis, two executables, one COLLECT
     entry.py                    dispatches GUI vs worker by executable name
+  wsl/
+    setup-lyricloom-wsl.sh      creates an optional GPU environment inside WSL 2
   windows/
     LyricLoom.iss               Inno Setup 6 script
     version_info.txt            Windows version resource (keep in sync)
@@ -126,12 +128,16 @@ What the script does:
    (ignored by git) with CMake and the Visual Studio 2022 generator.
    `BUILD_SHARED_LIBS=ON` produces `whisper-cli.exe` plus the `ggml*.dll` /
    `whisper.dll` files, which are copied to `tools/bin`.
-2. Runs PyInstaller with `--clean` into `dist/LyricLoom/`. The bundle contains
+2. Builds a wheel of the current LyricLoom into `build/wsl/` with
+   `python -m pip wheel --no-deps . -w build\wsl`. The setup assistant uses
+   this wheel to create a WSL GPU environment without a source tree or PyPI
+   checkout of LyricLoom.
+3. Runs PyInstaller with `--clean` into `dist/LyricLoom/`. The bundle contains
    `LyricLoom.exe`, `LyricLoomWorker.exe`, `_internal/tools/bin/whisper-cli.exe`
-   and the ggml DLLs.
-3. Zips the whole one-folder bundle as
+   and the ggml DLLs, and `_internal/wsl/setup-lyricloom-wsl.sh` plus the wheel.
+4. Zips the whole one-folder bundle as
    `dist/LyricLoom-2.0.0-win64.zip`.
-4. Compiles `packaging/windows/LyricLoom.iss` into
+5. Compiles `packaging/windows/LyricLoom.iss` into
    `dist/LyricLoom-Setup-2.0.0.exe`, copies it to the stable name
    `dist/LyricLoom-Setup.exe`, and writes SHA256 files.
 
