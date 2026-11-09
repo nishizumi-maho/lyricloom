@@ -198,6 +198,21 @@ if not PROBE_SCRIPT.is_file():
 datas.append((str(PROBE_SCRIPT), "lyricloom/workers"))
 hiddenimports += ["lyricloom.setup"]
 
+# --------------------------------------------------------------------------- MusicBee plugin
+# The setup assistant copies the bundled Starry Karaoke plugin into MusicBee's per-user Plugins
+# folder.  scripts/build-windows.ps1 builds dist\MusicBeePlugin before PyInstaller runs.  A Linux
+# build has no MusicBee, but a developer running the spec directly on Windows without the plugin
+# should get a clear error instead of a build that cannot offer the page.
+MUSICBEE_PLUGIN = ROOT / "dist" / "MusicBeePlugin"
+if MUSICBEE_PLUGIN.is_dir():
+    add_tree(MUSICBEE_PLUGIN, "musicbee")
+elif IS_WINDOWS:
+    raise SystemExit(
+        "dist/MusicBeePlugin is missing.\n"
+        "Run scripts/build-windows.ps1 (it builds the Starry Karaoke plugin before PyInstaller), "
+        "or copy the plugin staging folder there first."
+    )
+
 # --------------------------------------------------------------------------- Analysis and executables
 entry_script = ROOT / "packaging" / "pyinstaller" / "entry.py"
 icon = str(ICON_FILE) if ICON_FILE.is_file() else None
