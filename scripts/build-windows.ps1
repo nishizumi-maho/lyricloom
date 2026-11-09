@@ -203,6 +203,20 @@ if (-not (Test-Path $whisperCli)) {
     throw "whisper-cli.exe is still missing from $toolsBin."
 }
 
+# --------------------------------------------------------------------------- WSL setup wheel
+# The PyInstaller spec bundles this wheel under _internal\wsl\ so the setup assistant can install
+# LyricLoom into a new WSL environment without a network fetch from a source tree.
+$wslBuild = Join-Path $buildDir 'wsl'
+New-Item -ItemType Directory -Force $wslBuild | Out-Null
+Get-ChildItem $wslBuild -Filter 'lyricloom-*.whl' -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force
+Write-Host "Building the LyricLoom wheel for WSL setup..."
+& $python -m pip wheel --no-deps . -w $wslBuild
+if ($LASTEXITCODE -ne 0) { throw 'Could not build the LyricLoom wheel for the WSL setup.' }
+$wslWheel = Get-ChildItem $wslBuild -Filter 'lyricloom-*.whl' -File |
+    Select-Object -First 1
+if (-not $wslWheel) { throw "pip wheel did not produce a lyricloom wheel in $wslBuild." }
+
 # --------------------------------------------------------------------------- PyInstaller
 & $python -c "import PyInstaller" 2>$null
 if ($LASTEXITCODE -ne 0) {

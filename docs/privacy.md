@@ -47,10 +47,13 @@ Large models are downloaded only when you ask for them: from **Help > Download m
 | Vocal separators | `github.com` release assets (audio-separator's registry) | Separator weights and their YAML/data files, downloaded by LyricLoom. | Help > Download models, or `lyricloom models download <id>` |
 | MMS_FA | `dl.fbaipublicfiles.com` (torchaudio's model host) | `model.pt`, with a pinned size and SHA-256. | Help > Download models, or `lyricloom models download <id>` |
 | NLTK corpora | `raw.githubusercontent.com` (a pinned commit) | The pinned `cmudict`, tagger, `punkt` and `punkt_tab` zips. | Help > Download models, or `lyricloom models download <id>` |
+| whisper.cpp Windows backends | `github.com` (the `ggml-org/whisper.cpp` v1.9.2 release assets) | The official BLAS (CPU) or cuBLAS (NVIDIA) Windows zip, with its exact size and SHA-256 pinned in the source. | Setup assistant > Backend, only when you choose to install one |
 
 Every file is written to a `.part` file and checked against the pinned size and SHA-256 before it is moved into place. NLTK data may also be read from an existing local `NLTK_DATA` directory; in that case nothing is downloaded.
 
 These requests reveal your IP address and the fact that you are downloading a particular model file. They do not include your music or library.
+
+The optional **WSL environment setup** also downloads packages, and only when you start it from the setup assistant: `apt` fetches `python3-venv` and `ffmpeg` from your distro's Ubuntu archive, `pip` fetches PyTorch wheels from `download.pytorch.org` (the pinned ROCm 6.2, CUDA 12.4 or CPU index) and `audio-separator`, `g2p_en`, `nltk` and their dependencies from PyPI (`pypi.org` and `files.pythonhosted.org`). The LyricLoom wheel itself comes from the installed app, not from the network. No audio, library path or settings file is sent to any of those hosts.
 
 `lyricloom doctor`, `lyricloom models list` and `lyricloom models verify` do not upload anything. `doctor` reads local paths and imports PyTorch.
 
