@@ -1,9 +1,11 @@
-"""Worker: download model data without starting the GUI or loading a model into memory."""
+"""Worker: download model data without starting the GUI or loading a model into memory.
+
+Kept for compatibility with older callers; all files now go through the verified downloader in
+:mod:`lyricloom.downloads` (see :mod:`lyricloom.runtime`).
+"""
 from __future__ import annotations
 
-import os
-
-from .. import config
+from .. import runtime
 from . import emit, read_payload
 
 
@@ -11,25 +13,11 @@ def main() -> None:
     p = read_payload()
     kind = p["kind"]
     if kind == "separator":
-        from audio_separator.separator import Separator
-
-        config.SEPARATOR_MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        sep = Separator(model_file_dir=str(config.SEPARATOR_MODEL_DIR))
-        sep.download_model_and_data(config.SEPARATOR_MODEL)
+        runtime.download_separator()
     elif kind == "mms":
-        os.environ.setdefault("TORCH_HOME", str(config.MODELS / "torch"))
-        import torchaudio
-
-        torchaudio.pipelines.MMS_FA.get_model(with_star=False)
+        runtime.download_mms()
     elif kind == "nltk":
-        import nltk
-
-        for package in ("cmudict", "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng",
-                        "punkt", "punkt_tab"):
-            try:
-                nltk.download(package, quiet=True)
-            except Exception:  # noqa: BLE001 - older NLTK versions do not have every package
-                pass
+        runtime.download_nltk()
     else:
         raise SystemExit(f"unknown download kind: {kind}")
     emit({"ok": True, "kind": kind})

@@ -63,6 +63,26 @@ def test_align_blocks_runs_in_wsl_on_the_gpu(monkeypatch):
     assert out[0][0].start_ms == 5100
 
 
+def test_wsl_alignment_prefers_the_checkpoint_copy_inside_the_distro(monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl})
+        return _result()
+
+    monkeypatch.setattr(ctc, "run_worker", fake)
+    monkeypatch.setattr(config, "ALIGN_WSL_ENABLED", True)
+    monkeypatch.setattr(config, "ALIGN_WSL_ENV", {"TORCH_HOME": "/opt/lyricloom/models/torch"})
+    ctc.align_blocks(Path(r"C:\work\vocals16k.wav"), [Block(0, 1, 5000, 9000)], [[["eu"]]])
+    payload = calls[0]["payload"]
+    spec = config.resolve_model("align")
+    assert payload["model_candidates"][0] == \
+        "/opt/lyricloom/models/torch/hub/checkpoints/model.pt"
+    assert payload["model_candidates"][-1].startswith("/mnt/")
+    assert payload["model_path"] == payload["model_candidates"][-1]
+    assert payload["model_size"] == spec.size
+
+
 def test_align_blocks_falls_back_to_the_cpu_when_wsl_fails(monkeypatch):
     calls = []
 

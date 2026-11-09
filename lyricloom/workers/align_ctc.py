@@ -1,18 +1,22 @@
 """Worker: CTC forced alignment with torchaudio's MMS_FA (multilingual wav2vec2).
 
-Payload {wav, device, blocks: [{start_ms, end_ms, lines: [[mms_tokens per segment]]}]}.
+Payload {wav, device, blocks: [{start_ms, end_ms, lines: [[mms_tokens per segment]]}],
+model_path, torch_home}.
 device "cuda" runs the model on the GPU (inside WSL, where torch finds the ROCm device through
-ROCm); "cpu" is the Windows fallback.
+ROCm); "cpu" is the Windows fallback.  The checkpoint is always a local file; this worker never
+downloads one.
 Result {blocks: [{lines: [{segments: [{start_ms, end_ms, score} | null]}]}]}, times relative to
 the block start. A segment whose tokens are empty (pure punctuation) or a block that cannot be
 aligned yields nulls instead of failing the track."""
 import os
+from pathlib import Path
 
 import soundfile as sf
 import torch
 import torchaudio
 
 from . import emit, read_payload
+from .copies import first_file
 
 SR = 16000
 WINDOW_S = 30  # emissions are computed in windows: attention over a whole song would not fit
@@ -67,12 +71,41 @@ def _align_block(model, tokenizer, aligner, wave, block) -> dict:
     return {"lines": result}
 
 
+def _load_model(bundle, model_path: Path, torch_home: Path):
+    """The bundled MMS_FA architecture, loaded from a local checkpoint only."""
+    default = torch_home / "hub" / "checkpoints" / "model.pt"
+    try:
+        same = model_path.resolve() == default.resolve()
+    except OSError:
+        same = False
+    if same:
+        # torch.hub sees the cached file and does not make a request.
+        return bundle.get_model(with_star=False)
+    from torchaudio.pipelines._wav2vec2.utils import _extend_model
+
+    state = torch.load(str(model_path), map_location="cpu", weights_only=True)
+    model = torchaudio.models.wav2vec2_model(**bundle._params)
+    model.load_state_dict(state)
+    model = _extend_model(model, normalize_waveform=True, apply_log_softmax=True, append_star=False)
+    model.eval()
+    return model
+
+
 def main() -> None:
     p = read_payload()
     torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "6")))
     device = "cuda" if p.get("device") in ("auto", "cuda") and torch.cuda.is_available() else "cpu"
+    torch_home = Path(p.get("torch_home") or os.environ.get("TORCH_HOME", "."))
+    os.environ["TORCH_HOME"] = str(torch_home)
+    default_model = torch_home / "hub" / "checkpoints" / "model.pt"
+    fallback = p.get("model_path") or str(default_model)
+    model_path = first_file(p.get("model_candidates"), int(p.get("model_size") or 0), fallback)
+    if not model_path.is_file():
+        raise SystemExit(
+            f"the alignment model is missing: {model_path}. Run `lyricloom models download "
+            "align-mms-fa` or open Help > Download models.")
     bundle = torchaudio.pipelines.MMS_FA
-    model = bundle.get_model(with_star=False).to(device)
+    model = _load_model(bundle, model_path, torch_home).to(device)
     wave = _load(p["wav"], device)
     tokenizer, aligner = bundle.get_tokenizer(), bundle.get_aligner()
     emit({"blocks": [_align_block(model, tokenizer, aligner, wave, b) for b in p["blocks"]]})

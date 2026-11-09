@@ -7,11 +7,12 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from . import ENGINE_VERSION, VERSION, cache, config
+from . import models as model_catalog
 from .brand import is_ours, tag
 from .align.confidence import REVIEW_THRESHOLD
 from .align.consensus import refrain_consensus, rover
@@ -42,6 +43,7 @@ class TrackResult:
     error: str = ""
     device: str = ""   # where the vocals were separated: rocm (WSL), dml, cpu or kept
     fallback: str = ""  # why the WSL/ROCm separation failed, when it ran on the CPU instead
+    models: dict[str, str] = field(default_factory=dict)  # stage -> model id used for this track
     cloud: bool = False  # the isolated vocal was uploaded to AssemblyAI for this track
 
 
@@ -117,9 +119,14 @@ def _extra_passes(audio: Path, work: Path, sep: dict, first: Transcript, lang: s
     mix16k = work / "mix16k.wav"
     to_mono16k(audio, mix16k)
     whisper_lang = lang if lang == "ja" else None
-    mix = transcribe(mix16k, work, whisper_lang, prompt, name="whisper_mix", cancel=cancel)
-    warm = transcribe(Path(sep["vocals16k"]), work, whisper_lang, prompt, name="whisper_t02",
-                      extra=["-tp", "0.2"], cancel=cancel)
+    previous = config.active_language()
+    config.set_active_language(lang)   # per-language model choice for the extra passes
+    try:
+        mix = transcribe(mix16k, work, whisper_lang, prompt, name="whisper_mix", cancel=cancel)
+        warm = transcribe(Path(sep["vocals16k"]), work, whisper_lang, prompt, name="whisper_t02",
+                          extra=["-tp", "0.2"], cancel=cancel)
+    finally:
+        config.set_active_language(previous)
     return rover([first, mix, warm, *(extra_voters or [])], lang)
 
 
@@ -188,19 +195,42 @@ STAGE_VERSIONS = {"lyrics": "4", "separate": "4", "transcribe": "3",
                   "transcribe_extra": "3", "transcribe_extra_aai": "3"}
 
 
-def _cached(audio: Path, stage: str, fresh: set[str], compute: Callable[[], dict]) -> dict:
+def _legacy_cache_ok(stage: str, required: list[model_catalog.ModelSpec] | None) -> bool:
+    """A 2.0 stage cache has no ``_inputs`` fingerprint.  It may only be accepted when this run
+    resolves the stage's catalog-default models and the user did not override one for this track;
+    otherwise the cache may have been made with something else and must be recomputed."""
+    if stage in config.active_models():
+        return False
+    return all(spec.default and not spec.custom for spec in (required or []))
+
+
+def _cached(audio: Path, stage: str, fresh: set[str], compute: Callable[[], dict],
+            inputs: dict | None = None,
+            required: list[model_catalog.ModelSpec] | None = None) -> dict:
     version = STAGE_VERSIONS[stage]
-    data = None if stage in fresh else cache.load(audio, stage, version)
+    legacy_ok = _legacy_cache_ok(stage, required)
+    data = (None if stage in fresh else
+            cache.load(audio, stage, version, inputs=inputs, legacy_ok=legacy_ok))
     if data is None:
+        # Never let a stage download a model on its own: check the resolved files first and turn a
+        # miss into a typed, actionable failure (R3-03).
+        model_catalog.ensure_ready(required or [])
         data = compute()
-        cache.save(audio, stage, version, data)
+        cache.save(audio, stage, version, data, inputs=inputs)
     return data
 
 
-def _write(audio: Path, meta, chosen: Candidate, result, cloud: bool = False) -> str:
+def _model_inputs(stage: str, spec: model_catalog.ModelSpec, **params) -> dict:
+    return {stage: model_catalog.fingerprint(spec), **params}
+
+
+def _write(audio: Path, meta, chosen: Candidate, result,
+           used_models: dict[str, str] | None = None, cloud: bool = False) -> str:
     """Writes the .lrc; returns the status. Low-confidence lines are listed in [#review:...]."""
     tags = {"ti": meta.title, "ar": meta.artist, "re": tag(VERSION),
             "#source": f"{chosen.source} conf:{result.track_conf:.2f}", "#engine": ENGINE_VERSION}
+    if used_models:
+        tags["#models"] = model_catalog.tag_value(used_models)
     low = [str(i) for i, l in enumerate(result.lines) if l.conf < REVIEW_THRESHOLD]
     if low:
         tags["#review"] = ",".join(low)
@@ -221,40 +251,66 @@ def realign(audio: Path, text: str, source: str = "manual",
         check_cancelled(cancel)
         meta = probe(audio)
         work = cache.work_dir(audio)
-        sep = cache.load(audio, "separate", STAGE_VERSIONS["separate"])
-        tr = cache.load(audio, "transcribe", STAGE_VERSIONS["transcribe"])
+        prompt = f"{meta.artist} - {meta.title}"
+        whisper_lang = meta.lang if meta.lang == "ja" else None
+        sep_spec = config.resolve_model("separate", meta.lang)
+        tr_spec = config.resolve_model("transcribe", meta.lang)
+        sep_inputs = _model_inputs("separator", sep_spec, overlap=config.SEPARATOR_OVERLAP,
+                                   device=config.SEPARATOR_DEVICE, wsl=config.SEPARATOR_WSL_ENABLED)
+        tr_inputs = _model_inputs("transcribe", tr_spec, separator=sep_inputs["separator"],
+                                  lang=whisper_lang, prompt=prompt)
+        sep = cache.load(audio, "separate", STAGE_VERSIONS["separate"], inputs=sep_inputs,
+                         legacy_ok=_legacy_cache_ok("separate", [sep_spec]))
+        tr = cache.load(audio, "transcribe", STAGE_VERSIONS["transcribe"], inputs=tr_inputs,
+                        legacy_ok=_legacy_cache_ok("transcribe", [tr_spec]))
         if sep is None or tr is None:
             raise RuntimeError("process the track once before realigning it")
         whisper = _transcript_from_json(tr)
         anchor = Transcript(whisper.lang, []) if looks_hallucinated(whisper, meta.duration_s) else whisper
         chosen = Candidate(source, text.strip())
+        lang = lyric_lang(meta, whisper)
+        config.set_active_language(lang)
+        align_spec = config.resolve_model("align", lang)
+        model_catalog.ensure_ready([align_spec])
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
-        return TrackResult(audio, _write(audio, meta, chosen, result), source, result.track_conf,
-                           device=sep.get("device", ""), fallback=sep.get("fallback", ""))
+        used = {"transcribe": tr_spec.id, "separate": sep_spec.id, **result.models_used}
+        status = _write(audio, meta, chosen, result, used_models=used)
+        return TrackResult(audio, status, source, result.track_conf,
+                           device=sep.get("device", ""), fallback=sep.get("fallback", ""),
+                           models=used)
     except WorkerCancelled:
         _log(audio, "cancelled by the user")
         return TrackResult(audio, "cancelled", error="Stopped by the user")
+    except model_catalog.MissingModels as e:
+        _log(audio, f"realign failed: {e}")
+        return TrackResult(audio, "failed", error=str(e))
     except Exception as e:  # noqa: BLE001 - reported to the app, never raised into the UI
         _log(audio, "realign failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"))
+    finally:
+        config.clear_active_models()
+        config.clear_active_language()
 
 
 def process(audio: Path, force: bool = False, only_stage: str | None = None,
             on_stage: Callable[[str], None] | None = None,
+            models: dict[str, str] | None = None,
             cancel: threading.Event | None = None, allow_cloud: bool | None = None) -> TrackResult:
-    """Processes one track.
+    """Runs one track.
 
-    ``cancel`` stops the running stage (its worker process tree is killed) and returns a
-    ``cancelled`` result. ``allow_cloud`` is the per-run consent for the optional AssemblyAI upload.
-    ``None`` uses the saved ``assemblyai_enabled`` setting; ``False`` never uploads, even when the
-    setting is on. A track result records whether audio actually left the machine
-    (`TrackResult.cloud`)."""
+    ``models`` is a per-song override ``{stage: model_id}`` (for that run only); it is written to
+    the track log and to the .lrc ``[#models:...]`` tag.  ``cancel`` stops the running stage (its
+    worker process tree is killed) and returns a ``cancelled`` result. ``allow_cloud`` is the
+    per-run consent for the optional AssemblyAI upload. ``None`` uses the saved
+    ``assemblyai_enabled`` setting; ``False`` never uploads, even when the setting is on. A track
+    result records whether audio actually left the machine (`TrackResult.cloud`)."""
     stage = on_stage or (lambda name: None)
     if only_stage is not None and only_stage not in STAGES:
         raise ValueError(f"unknown stage {only_stage}")
     fresh = set(STAGES[STAGES.index(only_stage):]) if only_stage else set()
     if "transcribe" in fresh:
         fresh.add("transcribe_extra")
+    config.set_active_models(models)
     cloud_allowed = config.assemblyai_enabled() and (allow_cloud is not False)
     uploaded = False
 
@@ -266,20 +322,36 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         if not (force or only_stage) and _already_done(audio):
             return TrackResult(audio, "skipped")
         meta = probe(audio)
+        config.set_active_language(meta.lang)
+        if models:
+            unknown = sorted(set(models) - set(model_catalog.STAGES))
+            if unknown:
+                _log(audio, f"ignoring unknown model stage(s): {', '.join(unknown)}")
         work = cache.work_dir(audio)
+        if models:
+            _log(audio, "model overrides for this run: " + model_catalog.tag_value(models))
         stage("lyrics")
         cands = _cands_from_json(_cached(audio, "lyrics", fresh, lambda: {
             "candidates": [asdict(c) for c in search_all(meta)]}))
         checkpoint()
         stage("separate")
-        sep = _cached(audio, "separate", fresh, lambda: _separate(audio, work, cancel))
+        sep_spec = config.resolve_model("separate", meta.lang)
+        sep_inputs = _model_inputs("separator", sep_spec, overlap=config.SEPARATOR_OVERLAP,
+                                   device=config.SEPARATOR_DEVICE, wsl=config.SEPARATOR_WSL_ENABLED)
+        sep = _cached(audio, "separate", fresh, lambda: _separate(audio, work, cancel),
+                      inputs=sep_inputs, required=[sep_spec])
         device = sep.get("device", "")
         checkpoint()
-        keep_vocals(audio, Path(sep["vocals"]))   # also for tracks separated before vocals were kept
+        keep_vocals(audio, Path(sep["vocals"]), model=sep_spec)   # also for tracks separated before vocals were kept
         stage("transcribe")
         prompt = f"{meta.artist} - {meta.title}"
+        whisper_lang = meta.lang if meta.lang == "ja" else None
+        tr_spec = config.resolve_model("transcribe", meta.lang)
+        tr_inputs = _model_inputs("transcribe", tr_spec, separator=sep_inputs["separator"],
+                                  lang=whisper_lang, prompt=prompt)
         tr_data = _cached(audio, "transcribe", fresh, lambda: asdict(
-            transcribe(Path(sep["vocals16k"]), work, meta.lang if meta.lang == "ja" else None, prompt, cancel=cancel)))
+            transcribe(Path(sep["vocals16k"]), work, whisper_lang, prompt, cancel=cancel)),
+            inputs=tr_inputs, required=[tr_spec])
         whisper = _transcript_from_json(tr_data)
         lang = lyric_lang(meta, whisper)
         hallucinated = looks_hallucinated(whisper, meta.duration_s)
@@ -313,6 +385,7 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
 
         chosen = choose(cands, anchor.text, lang)
         checkpoint()
+        transcription_spec = tr_spec
         if chosen is None:
             if hallucinated and assemblyai() is None:
                 raise RuntimeError("no lyrics found anywhere and the transcription is unusable (Whisper hallucinated)")
@@ -321,23 +394,40 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
                 fused = voter
             else:
                 vote_stage = "transcribe_extra_aai" if voter else "transcribe_extra"
+                extra_spec = config.resolve_model("transcribe", lang)
+                transcription_spec = extra_spec
+                extra_inputs = _model_inputs("transcribe", extra_spec,
+                                             separator=sep_inputs["separator"],
+                                             lang=lang, prompt=prompt,
+                                             assemblyai=bool(voter))
                 fused = _transcript_from_json(_cached(audio, vote_stage, fresh, lambda: asdict(
-                    _extra_passes(audio, work, sep, whisper, lang, prompt, [voter] if voter else [], cancel))))
+                    _extra_passes(audio, work, sep, whisper, lang, prompt, [voter] if voter else [], cancel)),
+                    inputs=extra_inputs, required=[extra_spec]))
             chosen = _transcript_candidate(fused, lang)
         stage("align")
+        align_spec = config.resolve_model("align", lang)
+        model_catalog.ensure_ready([align_spec])
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
         checkpoint()
+        used = {"transcribe": transcription_spec.id, "separate": sep_spec.id, **result.models_used}
         stage("write")
-        status = _write(audio, meta, chosen, result, cloud=uploaded)
+        status = _write(audio, meta, chosen, result, used_models=used, cloud=uploaded)
+        _log(audio, "models used: " + model_catalog.tag_value(used))
         return TrackResult(audio, status, chosen.source, result.track_conf, device=device,
-                           fallback=sep.get("fallback", ""), cloud=uploaded)
+                           fallback=sep.get("fallback", ""), models=used, cloud=uploaded)
     except WorkerCancelled:
         _log(audio, "cancelled by the user")
         return TrackResult(audio, "cancelled", error="Stopped by the user", cloud=uploaded)
+    except model_catalog.MissingModels as e:
+        _log(audio, f"missing models: {e}")
+        return TrackResult(audio, "failed", error=str(e), cloud=uploaded)
     except Exception as e:  # noqa: BLE001 - one broken track must not stop a folder run
         _log(audio, "failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"),
                            cloud=uploaded)
+    finally:
+        config.clear_active_models()
+        config.clear_active_language()
 
 
 def _log(audio: Path, msg: str) -> None:

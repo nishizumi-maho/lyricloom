@@ -1,3 +1,6 @@
+import hashlib
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -6,7 +9,6 @@ import pytest
 import soundfile as sf
 
 from lyricloom.workers import WorkerError, run_worker
-
 TESTS = Path(__file__).resolve().parent
 
 
@@ -146,6 +148,23 @@ def test_separate_runs_in_wsl_with_translated_paths(tmp_path, library, monkeypat
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the WSL path bridge is Windows-only")
+def test_wsl_separation_prefers_the_model_copy_inside_the_distro(tmp_path, library, monkeypatch):
+    calls = []
+    monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
+    monkeypatch.setattr(config, "WSL_MODELS_DIR", "/opt/lyricloom/models/separator")
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    audio = library / "Test Artist" / "Test Album" / "01 - Synthetic Song.flac"
+    _wav(audio)
+    sep_mod.separate(audio, tmp_path / "work")
+    payload = calls[0]["payload"]
+    assert payload["model_dir_candidates"][0] == "/opt/lyricloom/models/separator"
+    assert payload["model_dir_candidates"][-1].startswith("/mnt/")
+    assert payload["model_dir"] == payload["model_dir_candidates"][-1]
+    spec = config.resolve_model("separate")
+    assert payload["model_sizes"][spec.filename] == spec.size
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the WSL path bridge is Windows-only")
 def test_separate_falls_back_to_cpu_when_wsl_fails(tmp_path, library, monkeypatch):
     calls = []
     monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
@@ -162,8 +181,15 @@ def test_kept_vocals_mirror_the_library(tmp_path, library):
     assert sep_mod.kept_vocals_path(library / "Test Artist" / "Test Album" / "01 - Synthetic Song.flac") == \
         config.vocals_root() / "Test Artist" / "Test Album" / "01 - Synthetic Song.vocals.flac"
     outside = tmp_path / "Other" / "テスト歌手" / "2020 - Synthetic Album [Single]" / "01 - Synthetic Song.flac"
+    digest = hashlib.sha1(str(outside.resolve()).encode("utf-8")).hexdigest()[:12]
     assert sep_mod.kept_vocals_path(outside) == \
-        config.vocals_root() / "テスト歌手" / "2020 - Synthetic Album [Single]" / "01 - Synthetic Song.vocals.flac"
+        config.vocals_root() / "_external" / digest / "01 - Synthetic Song.vocals.flac"
+
+
+def test_kept_vocals_paths_do_not_collide_outside_the_library(tmp_path, library):
+    one = tmp_path / "Drive A" / "Artist" / "Album" / "01 - Song.flac"
+    two = tmp_path / "Drive B" / "Artist" / "Album" / "01 - Song.flac"
+    assert sep_mod.kept_vocals_path(one) != sep_mod.kept_vocals_path(two)
 
 
 def test_unc_path_falls_back_to_the_local_separator(tmp_path, monkeypatch):
@@ -238,6 +264,72 @@ def test_separate_reuses_kept_vocals_without_separating(tmp_path, library, monke
     assert out["device"] == "kept"
     assert np.array_equal(sf.read(out["vocals"], dtype="int32")[0], samples)
     assert sf.info(out["vocals"]).subtype == "PCM_24"
+
+
+def _legacy_kept_stem(tmp_path, library):
+    """A stem as 2.0 left it: the FLAC exists, but there is no JSON manifest beside it."""
+    audio = library / "A" / "B" / "01 - C.flac"
+    _wav(audio)
+    stem = tmp_path / "stem.wav"
+    samples = _wav(stem, "PCM_24")
+    kept = sep_mod.keep_vocals(audio, stem)
+    sep_mod._manifest_path(kept).unlink()
+    return audio, kept, samples
+
+
+def test_legacy_kept_stem_is_reused_and_gets_a_manifest(tmp_path, library, monkeypatch):
+    audio, kept, samples = _legacy_kept_stem(tmp_path, library)
+    later = audio.stat().st_mtime + 5
+    os.utime(kept, (later, later))
+
+    def no_worker(*a, **kw):
+        raise AssertionError("a current legacy stem must not be separated again")
+
+    monkeypatch.setattr(sep_mod, "run_worker", no_worker)
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert out["device"] == "kept"
+    assert np.array_equal(sf.read(out["vocals"], dtype="int32")[0], samples)
+    manifest = sep_mod._manifest_path(kept)
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["model"] == "separator-mel-band-roformer"
+
+
+def test_legacy_kept_stem_older_than_the_audio_is_not_reused(tmp_path, library, monkeypatch):
+    audio, kept, _ = _legacy_kept_stem(tmp_path, library)
+    earlier = audio.stat().st_mtime - 5
+    os.utime(kept, (earlier, earlier))
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert calls and out["device"] != "kept"
+
+
+def test_legacy_kept_stem_is_not_reused_for_a_non_default_separator(tmp_path, library, monkeypatch):
+    audio, kept, _ = _legacy_kept_stem(tmp_path, library)
+    later = audio.stat().st_mtime + 5
+    os.utime(kept, (later, later))
+    from lyricloom import models
+
+    models.use("separate", "separator-bs-roformer-vocals")
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert calls and out["device"] != "kept"
+
+
+def test_stale_kept_stem_is_not_reused(tmp_path, library, monkeypatch):
+    audio = library / "A" / "B" / "01 - C.flac"
+    _wav(audio)
+    stem = tmp_path / "stem.wav"
+    _wav(stem)
+    kept = sep_mod.keep_vocals(audio, stem)
+    assert kept is not None and kept.exists()
+    _wav(audio, seconds=2.0)                    # the user replaced the audio
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert calls and out["device"] != "kept"
+    assert any(p.name.endswith(".stale") for p in kept.parent.iterdir())
 
 
 @pytest.mark.gpu

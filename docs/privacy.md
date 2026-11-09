@@ -38,19 +38,23 @@ LyricLoom respects sites that block scripted requests (HTTP 401, 403 or 429). It
 
 ### Model downloads
 
-Models are downloaded from **Help > Download models**, the first-run prompt, or the explicit `lyricloom models download ...` command. A processing run can also start a missing artifact download from the stage that needs it: `audio-separator` for the separator, `torchaudio` for MMS_FA, and the singing-model worker for NLTK data. There is no always-on background downloader; the request happens only when that stage runs.
+Large models are downloaded only when you ask for them: from **Help > Download models**, the first-run prompt, or the explicit `lyricloom models download ...` command. There is no always-on background downloader. Processing a song never downloads a model: if a stage's resolved model is missing, the track fails with a message naming the file and the download command.
 
 | Download | Host | What is requested | When |
 |---|---|---|---|
-| Whisper large-v3 | `huggingface.co` | The model file, and the published file metadata for its checksum | Help > Download models, `lyricloom models download whisper`, or the first stage that needs it |
-| LyricsAlignment-MTL checkpoint | `github.com` | The checkpoint file from the upstream repository | Help > Download models, or `lyricloom models download mtl` |
-| Mel-Band RoFormer | The model host used by `audio-separator` | Separator weights and associated data | Help > Download models, or the first separation that needs it |
-| MMS_FA | PyTorch/torchaudio model host (`download.pytorch.org`) | The torchaudio MMS_FA checkpoint | Help > Download models, or the first alignment that needs it |
-| NLTK corpora | The NLTK data index and GitHub-hosted package files | `cmudict`, `averaged_perceptron_tagger`, `punkt` | Help > Download models, or the first singing-model run that needs them |
+| Whisper models | `huggingface.co` (a pinned commit URL) | Model file with its exact size and SHA-256 pinned in the source. | Help > Download models, the first-run prompt, or `lyricloom models download <id>` |
+| LyricsAlignment-MTL checkpoint | `raw.githubusercontent.com` (a pinned commit) | The checkpoint file. | Help > Download models, or `lyricloom models download <id>` |
+| Vocal separators | `github.com` release assets (audio-separator's registry) | Separator weights and their YAML/data files, downloaded by LyricLoom. | Help > Download models, or `lyricloom models download <id>` |
+| MMS_FA | `dl.fbaipublicfiles.com` (torchaudio's model host) | `model.pt`, with a pinned size and SHA-256. | Help > Download models, or `lyricloom models download <id>` |
+| NLTK corpora | `raw.githubusercontent.com` (a pinned commit) | The pinned `cmudict`, tagger, `punkt` and `punkt_tab` zips. | Help > Download models, or `lyricloom models download <id>` |
+
+Every file is written to a `.part` file and checked against the pinned size and SHA-256 before it is moved into place. NLTK data may also be read from an existing local `NLTK_DATA` directory; in that case nothing is downloaded.
 
 These requests reveal your IP address and the fact that you are downloading a particular model file. They do not include your music or library.
 
-**Turn it off:** download the models before processing, or block the hosts above; a missing model then fails the stage instead of being fetched. `lyricloom doctor` and `lyricloom models status` do not upload anything; `doctor` reads local paths and imports PyTorch.
+`lyricloom doctor`, `lyricloom models list` and `lyricloom models verify` do not upload anything. `doctor` reads local paths and imports PyTorch.
+
+**Turn it off:** download the models before processing, or block the hosts above; a missing model then fails the stage instead of being fetched.
 
 ### GitHub and updates
 

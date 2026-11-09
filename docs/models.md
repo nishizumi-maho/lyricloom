@@ -10,9 +10,14 @@ The normal Windows installer and the Linux tarball show a **first-run model dial
 |---|---|---:|---|
 | Whisper large-v3 (ggml) | Word-level transcript, anchors, last-resort lyrics | 3.1 GB | `<models>/ggml-large-v3.bin` |
 | Mel-Band RoFormer vocals | Isolating the vocal stem | 0.9 GB | `<models>/separator/vocals_mel_band_roformer.ckpt` |
-| MMS_FA (torchaudio) | Multilingual CTC forced alignment | 1.2 GB | `<models>/torch/hub/checkpoints/*.pth` |
+| MMS_FA (torchaudio) | Multilingual CTC forced alignment | 1.2 GB | `<models>/torch/hub/checkpoints/model.pt` |
 | LyricsAlignment-MTL | English singing-model word timing | 66 MB | `<models>/mtl/checkpoints/checkpoint_MTL` |
-| NLTK data | English grapheme-to-phoneme for MTL | Tens of MB | `~/nltk_data` (or `NLTK_DATA`) |
+| NLTK data | English grapheme-to-phoneme for MTL | Tens of MB | `<models>/nltk` (or an existing `NLTK_DATA`) |
+
+Suggested alternatives are in the same catalog: Whisper `ggml-large-v3-turbo.bin`, `ggml-medium.bin`
+and `ggml-small.bin`; two other vocal separators (a BS-RoFormer model and an MDX-Net `.onnx`
+model). Every catalog file has a pinned exact size and SHA-256. List them with
+`lyricloom models list`.
 
 Allow about **6 GB** for the models plus working space (the downloads themselves total about 5.3 GB). The kept vocal stems in the vocals cache can add several hundred MB per song if you process a large library.
 
@@ -28,7 +33,9 @@ Whisper transcribes the isolated vocals with word timestamps. LyricLoom uses tha
 
 It runs through **whisper.cpp**, not the Python `openai-whisper` package. The Windows installer ships a CPU `whisper-cli`; a locally built Vulkan or CUDA build can replace it for GPU transcription. On Linux you build or install it yourself (see [docs/install-linux.md](install-linux.md#build-whisper-cli)).
 
-The model is downloaded from the `ggerganov/whisper.cpp` repository on Hugging Face. LyricLoom checks the published SHA-256 when it downloads the file. If Hugging Face's checksum endpoint is unavailable, it falls back to the checksum pinned in the source.
+The model is downloaded from the `ggerganov/whisper.cpp` repository on Hugging Face. LyricLoom uses
+a pinned commit URL and checks the SHA-256 and size pinned in `lyricloom/models.py`; it never takes
+the checksum from the same mutable API that serves the file.
 
 ### Mel-Band RoFormer (`vocals_mel_band_roformer.ckpt`)
 
@@ -50,7 +57,7 @@ The checkpoint is cached by torchaudio under `$TORCH_HOME/hub/checkpoints`. Lyri
 
 ### LyricsAlignment-MTL (`checkpoint_MTL`)
 
-This model was trained on sung English and gives better word timing than CTC on many English songs. LyricLoom uses it only for English; other languages use MMS_FA. If the checkpoint or its Python code is missing, English falls back to CTC and the track still completes.
+This model was trained on sung English and gives better word timing than CTC on many English songs. LyricLoom uses it only for English; other languages use MMS_FA. It is attempted only when its checkpoint and NLTK data are ready, and if the worker still fails, English falls back to CTC and the track completes.
 
 The inference code is vendored under `lyricloom/vendor/mtl` (MIT). The checkpoint is downloaded from the upstream LyricsAlignment-MTL repository (about 66 MB). Its license follows the upstream project; check the upstream repository if you plan to redistribute the weights.
 
@@ -61,12 +68,17 @@ The Windows app runs the model on the CPU by default. With WSL/ROCm enabled it r
 The MTL model uses `g2p_en`, which needs three NLTK corpora:
 
 - `cmudict`
-- `averaged_perceptron_tagger`
-- `punkt`
+- `averaged_perceptron_tagger` (and `averaged_perceptron_tagger_eng` on newer NLTK)
+- `punkt` and `punkt_tab`
 
-They are small compared with the neural models. NLTK downloads them to its own data directory (`~/nltk_data` on Linux, `%USERPROFILE%\nltk_data` on Windows, or `NLTK_DATA` if set). The MTL worker also tries to download missing corpora on first use. For an offline machine, copy the NLTK data directory or set `NLTK_DATA`.
+They are small compared with the neural models and are part of the model catalog. LyricLoom
+downloads the pinned zips into `<models>/nltk` and extracts them there; the MTL worker reads that
+folder through `NLTK_DATA`. If an existing `NLTK_DATA` directory already has all the corpora,
+LyricLoom uses it instead and does not download anything. The worker never downloads NLTK data on
+its own.
 
-NLTK software is Apache-2.0; the individual data packages have their own terms. See the NLTK data package pages.
+NLTK software is Apache-2.0; the individual data packages have their own terms. See the NLTK data
+package pages.
 
 ## Where the models live
 
@@ -92,19 +104,24 @@ The `LYRICLOOM_MODELS` override is useful for a large SSD, a shared read-only mo
 <models>/
 ├── ggml-large-v3.bin
 ├── separator/
-│   └── vocals_mel_band_roformer.ckpt
+│   ├── vocals_mel_band_roformer.ckpt
+│   └── vocals_mel_band_roformer.yaml
 ├── mtl/
 │   └── checkpoints/
 │       └── checkpoint_MTL
+├── nltk/
+│   ├── corpora/
+│   ├── taggers/
+│   └── tokenizers/
 └── torch/
     └── hub/
         └── checkpoints/
-            └── <torchaudio MMS_FA checkpoint>.pth
+            └── model.pt
 ```
 
 `<models>` is the root from the table above.
 
-NLTK data is separate:
+NLTK data can also live in an existing local NLTK data directory:
 
 ```text
 Windows: %USERPROFILE%\nltk_data
@@ -112,6 +129,44 @@ Linux:   ~/nltk_data
 ```
 
 In a source or pipx install, `lyricloom doctor` prints the models root and the status of each model. The GUI's model dialog shows the same readiness information.
+
+## Choosing models
+
+Every stage's model is customizable, and a choice can differ per language:
+
+```bash
+lyricloom models list                                  # id, size, status, which languages choose it
+lyricloom models use transcribe whisper-small          # default choice
+lyricloom models use transcribe whisper-medium --lang ja
+lyricloom models add separate "C:\Models\my-vocals.ckpt"
+lyricloom models add separate UVR-MDX-NET-Voc-FT      # any name audio-separator's registry knows
+```
+
+Choices live in `settings.json` under `model_choices`:
+
+```json
+{
+  "default": {"transcribe": "whisper-large-v3"},
+  "languages": {"ja": {"transcribe": "whisper-large-v3-turbo"}},
+  "custom": []
+}
+```
+
+Resolution precedence is **per-song override > language choice > default choice > catalog
+default**. A per-song override comes from the app's "Process with other models…" action or
+`runner.process(..., models={"transcribe": "whisper-small"})`; it applies to that run only. Unknown
+ids, a model for another stage, a model that does not suit the language, or a missing custom file
+is logged and skipped, never a crash. Missing keys mean the catalog default.
+
+A custom model lives in the settings file, records its own size and SHA-256 when it is added
+(trust on first use), and is never overwritten by a catalog download. A custom separator file must
+use a filename that audio-separator's registry knows; pass the model name instead if the file is
+not present yet.
+
+Changing a model invalidates the cached stages that used it and the stages after them, so only
+the affected work is redone. A finished `.lrc` is not marked pending: the `.lrc` records what was
+used in its [`#models` tag](lrc-format.md#about-models), and the app can show that a song was made
+with other models.
 
 ## Download
 
@@ -124,33 +179,42 @@ The models are not bundled in the installer or tarball. Without network access, 
 ### The command line (source or pipx install)
 
 ```bash
-lyricloom models status
-lyricloom models download all
+lyricloom models list
+lyricloom models download all-defaults
 ```
 
-`download all` fetches Whisper, the separator, MMS_FA, MTL and NLTK data. You can fetch one at a time:
+`download all-defaults` fetches the default model for each stage plus the NLTK data. It continues
+with the remaining models if one download fails and prints a per-model result. You can fetch one
+model by id, or use the old short names:
 
 ```bash
-lyricloom models download whisper
-lyricloom models download separator
-lyricloom models download mms
-lyricloom models download mtl
-lyricloom models download nltk
+lyricloom models download whisper-large-v3-turbo
+lyricloom models download separator-bs-roformer-vocals
+lyricloom models download whisper      # old name: the default Whisper model
+lyricloom models download separator   # old name: the default separator
+lyricloom models download mms         # old name: MMS_FA
+lyricloom models download mtl         # old name: the singing model
+lyricloom models download nltk        # old name: the NLTK data
 ```
 
 The packaged Windows and Linux GUI builds are windowed applications and do not expose this console command in 2.0.0; use their model dialog, or a source/pipx install for the CLI.
 
-Downloads are written to a `.part` file and moved into place only after the size/checksum check. LyricLoom does not download the large models in the background; the first-run dialog or the explicit command is the trigger.
+Downloads are HTTPS only. Each file is written to a `.part` file, resumed with an HTTP `Range`
+request when the server supports it, retried with a short backoff, and moved into place only
+after its exact size and pinned SHA-256 match. A checksum mismatch deletes the `.part` file.
+LyricLoom never downloads a model while processing a song: before a heavy stage it checks the
+resolved files and fails the track with an actionable message naming the missing models and the
+`lyricloom models download` command.
 
 ### What each download command does
 
 | Command | Source | Notes |
 |---|---|---|
-| `models download whisper` | Hugging Face `ggerganov/whisper.cpp` | Verifies SHA-256. About 3 GB. |
-| `models download separator` | audio-separator's model registry | Runs in a worker so the GUI is not blocked. |
-| `models download mms` | torchaudio / PyTorch model host | Writes to `<models>/torch/hub/checkpoints`. |
-| `models download mtl` | GitHub `jhuang448/LyricsAlignment-MTL` | Verifies the pinned SHA-256. About 66 MB. |
-| `models download nltk` | NLTK data index | Writes to the NLTK data directory, not the models root. |
+| `models download whisper-large-v3` (or `whisper`) | Hugging Face `ggerganov/whisper.cpp`, pinned commit | Verifies the pinned SHA-256 and size. About 3 GB. |
+| `models download separator-mel-band-roformer` (or `separator`) | audio-separator's model registry on GitHub, downloaded by LyricLoom | Verifies every file, including the YAML config. About 0.9 GB. |
+| `models download align-mms-fa` (or `mms`) | PyTorch model host | Writes `model.pt` to `<models>/torch/hub/checkpoints`. |
+| `models download singing-mtl` (or `mtl`) | GitHub `jhuang448/LyricsAlignment-MTL`, pinned commit | Verifies the pinned SHA-256. About 66 MB. |
+| `models download singing-nltk-data` (or `nltk`) | NLTK data repository, pinned commit | Extracts the corpora under `<models>/nltk`. |
 
 ### If the models are already present
 
@@ -196,22 +260,34 @@ If you cannot use the download command, put the files here:
 | File | Destination |
 |---|---|
 | `ggml-large-v3.bin` | `<models>/ggml-large-v3.bin` |
-| `vocals_mel_band_roformer.ckpt` | `<models>/separator/vocals_mel_band_roformer.ckpt` |
-| MMS_FA `*.pth` | `<models>/torch/hub/checkpoints/` |
+| `vocals_mel_band_roformer.ckpt` and `.yaml` | `<models>/separator/` |
+| `download_checks.json` | `<models>/separator/` (the audio-separator registry snapshot) |
+| MMS_FA `model.pt` | `<models>/torch/hub/checkpoints/model.pt` |
 | `checkpoint_MTL` | `<models>/mtl/checkpoints/checkpoint_MTL` |
-| NLTK `cmudict`, `averaged_perceptron_tagger`, `punkt` | `~/nltk_data` or `%USERPROFILE%\nltk_data` |
+| NLTK zips or extracted corpora | `<models>/nltk/` or an existing `NLTK_DATA` directory |
 
-The MMS checkpoint filename is owned by torchaudio. Copy the whole `hub/checkpoints` directory from a working install rather than renaming files.
+The MMS checkpoint filename is the one torchaudio expects; keep it named `model.pt`.
 
-### Using a different Whisper model
+### Choosing whisper-cli
 
-`LYRICLOOM_WHISPER_MODEL` changes the expected file name inside the models root:
+The `whisper_cli` setting points at a specific whisper.cpp binary, for example a Vulkan or CUDA
+build. The `LYRICLOOM_WHISPER_CLI` environment variable does the same. Precedence is:
 
-```powershell
-$env:LYRICLOOM_WHISPER_MODEL = "ggml-large-v3-turbo.bin"
+1. the `whisper_cli` setting (or `LYRICLOOM_WHISPER_CLI`),
+2. the bundled `whisper-cli`,
+3. a developer checkout's `tools/bin`,
+4. `%LOCALAPPDATA%\LyricLoom\bin` (`~/.local/share/lyricloom/bin` on Linux),
+5. `PATH`.
+
+The binary must exist and support the model file. `lyricloom doctor` prints the path in use and
+whether it exists. The old `LYRICLOOM_WHISPER_MODEL` variable is superseded by the model catalog:
+
+```bash
+lyricloom models use transcribe whisper-large-v3-turbo
 ```
 
-The file must be a whisper.cpp-compatible GGML model, and `whisper-cli` must support it. The tested default is `ggml-large-v3.bin`; other models change speed, memory use and accuracy.
+Any whisper.cpp-compatible GGML `.bin` file can be registered as a custom model with `lyricloom
+models add transcribe <path>`.
 
 ## Verify
 
@@ -219,24 +295,31 @@ In a source or pipx install:
 
 ```bash
 lyricloom doctor
-lyricloom models status
+lyricloom models list
+lyricloom models verify whisper-large-v3
 ```
 
 In the packaged GUI, the model dialog is the readiness view.
 
-`models status` reports:
+`models list` reports the stage, id, exact size, state and the languages that choose each model:
 
 ```text
-models directory: ...
-  whisper    ready
-  separator  ready
-  mtl        ready
-  mms        ready
-  nltk       ready
-  ffmpeg     ready
+stage      id                                      size  status     chosen for
+transcribe whisper-large-v3 *                    2.9 GB  ready      default (implicit)
+...
 ```
 
-A model can be present but unusable (for example, a truncated download). `lyricloom doctor` checks basic file presence and size; if a stage still fails, read the per-track log for the actual error. The GUI model dialog uses the same checks.
+`models verify [id]` recomputes the full SHA-256 (the normal status check trusts a small
+`<file>.verified.json` sidecar with the file's size, mtime and digest, so start-up does not hash
+several gigabytes every time). A state is one of `ready`, `missing`, `corrupt` or `unverified`.
+If a model is corrupt, repair it without touching the others:
+
+```bash
+lyricloom models download <id>          # downloads it again after you delete the old file
+```
+
+To repair in one step, delete the file and its `.verified.json` sidecar and run the download
+command again. The per-track log names the exact missing file when a stage cannot start.
 
 For WSL, remember that MMS and MTL can live inside the Linux filesystem. The Windows `doctor` check does not see the WSL-only files. See [docs/wsl-rocm.md](wsl-rocm.md#8-verify).
 
@@ -264,11 +347,11 @@ What happens next:
 
 | Deleted | Effect |
 |---|---|
-| Whisper model | Transcription fails until it is downloaded again. |
-| Separator model | New separations fail; songs with already-kept vocal stems can still be aligned. |
+| Whisper model | Transcription fails with a message naming the file and the download command. |
+| Separator model | New separations fail; songs with already-kept vocal stems can still be aligned only when the kept-stem manifest matches. |
 | MMS_FA | CTC alignment fails; English may still use MTL, but non-English tracks cannot align. |
 | MTL checkpoint | English falls back to MMS_FA/CTC; processing continues. |
-| NLTK data | MTL may try to download it; offline English MTL may fail and fall back to CTC. |
+| NLTK data | English falls back to CTC; processing continues. |
 
 Deleting the models does **not** delete your `.lrc` files, the kept vocal stems, or the work cache. It also does not affect the audio files.
 

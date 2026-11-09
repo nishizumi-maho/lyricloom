@@ -26,6 +26,7 @@ The audio file itself is never modified.
 [re:LyricLoom 2.0.0]
 [#source:uta-net conf:0.94]
 [#engine:7]
+[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]
 [00:22.98]<00:22.98>こ<00:23.10>れ<00:23.30>は<00:23.50>合<00:24.05>成<00:24.30>の<00:24.62>歌<00:24.90>詞<00:25.12>で<00:25.30>す<00:25.62>
 [00:26.10]<00:26.10>例<00:26.30>で<00:26.55>す<00:27.10>
 
@@ -54,7 +55,27 @@ Tags are written at the top, in this order when present:
 | `[re:...]` | `[re:LyricLoom 2.0.0]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
 | `[#source:...]` | `[#source:uta-net conf:0.94]` | Where the lyric came from, followed by the track confidence. Sources include `lrclib`, `netease`, `qq`, `utaten`, `genius`, `websearch`, `transcription` and `manual`. |
 | `[#engine:...]` | `[#engine:7]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
+| `[#models:...]` | `[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]` | The model each stage used for this song, as `stage=model-id` pairs separated by `;`. Written on every successful run. |
 | `[#review:...]` | `[#review:3,7,12]` | Zero-based line numbers whose confidence is below the review threshold. The app tints these rows orange. |
+
+### About `[#models:...]`
+
+`#models` records the model ids that produced the timing, for example:
+
+```text
+[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa;singing=singing-mtl]
+```
+
+- `transcribe` is the Whisper model used for the transcript and anchors.
+- `separate` is the vocal separator.
+- `align` is the forced-alignment model (MMS_FA by default).
+- `singing` is present only when the English singing model timed the words. When English falls
+  back to CTC, or the song is another language, the tag has no `singing` entry.
+
+The ids match `lyricloom models list` and the `model_choices` setting. A per-song
+"Process with other models…" run records its own ids here, so the app can show that a lyric was
+made with different models. Changing a model does **not** mark a finished song as pending; the tag
+is the record of what was used, and a reprocess rewrites it.
 
 ### About `[#source:...]`
 
