@@ -45,6 +45,7 @@ def test_a_raising_track_does_not_wedge_the_queue(app, tmp_path, monkeypatch):
         monkeypatch.setattr("lyricloom.runner.process",
                             lambda path, **kwargs: runner.TrackResult(path, "done"))
         monkeypatch.setattr("lyricloom.app.main.QMessageBox.warning", lambda *a, **k: None)
+        monkeypatch.setattr(w, "_preflight", lambda *a, **k: True)
         w.process([audio])
         _wait(app, lambda: w._queue is None)
         assert not w.progress.isVisible()
@@ -159,6 +160,7 @@ def test_a_dirty_open_track_can_be_skipped_from_the_queue(app, tmp_path, monkeyp
     try:
         w.audio, w.doc, w.dirty = audio, LrcDoc({}, []), True
         monkeypatch.setattr(w, "_ask_open_track", lambda: "skip")
+        monkeypatch.setattr(w, "_preflight", lambda *a, **k: True)
         w.process([audio])
         assert w._queue is None
         assert "No tracks left" in w.statusBar().currentMessage()
@@ -171,6 +173,7 @@ def test_a_dirty_open_track_can_be_skipped_from_the_queue(app, tmp_path, monkeyp
         w.audio, w.doc, w.dirty = audio, LrcDoc({}, []), True
         monkeypatch.setattr(w, "_ask_open_track", lambda: "save")
         monkeypatch.setattr(w, "save", lambda: False)      # saving failed: do not start
+        monkeypatch.setattr(w, "_preflight", lambda *a, **k: True)
         w.process([audio])
         assert w._queue is None
     finally:

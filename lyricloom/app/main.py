@@ -18,27 +18,32 @@ import mutagen
 from PySide6.QtCore import QByteArray, QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSlider, QSplitter,
-                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
+                               QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+                               QProgressBar, QPushButton, QSlider, QSplitter, QSystemTrayIcon,
+                               QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import cache, config, runner, runtime
+from .. import models as model_catalog
 from .. import VERSION, updater
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
 from .details import TrackDetailsDialog, details_text
 from .diagnostics import DiagnosticsDialog, diagnostics_text, open_local_folder, setup_app_logging
-from .dialogs import (ModelsDialog, SettingsDialog, UpdateController, check_for_updates, validate_folder)
+from .dialogs import SettingsDialog, UpdateController, check_for_updates, validate_folder
 from .ipc import Server as IpcServer
 from .ipc import send as ipc_send
 from .karaoke import KaraokeWindow
-from .model import (STAGE_LABELS, TrackRow, apply_edits, delete_line, delete_word, insert_line, insert_word,
-                    load_cached_rows, merge_with_previous, read_status, scan_cached, store_result, track_progress)
+from .model import (STAGE_LABELS, TrackRow, apply_edits, current_model_ids, delete_line,
+                    delete_word, insert_line, insert_word, load_cached_rows,
+                    merge_with_previous, other_model_stages, other_models_text, read_status,
+                    scan_cached, store_result, track_progress)
+from .models_window import MissingModelsDialog, ModelsWindow, PerSongModelsDialog
 from .paths import expand_audio_paths, validate_audio_file
 
-FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done"]
+FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done", "Made with other models"]
 STATUS_LABELS = {"cancelled": "Stopped"}
 REVIEW_TINT = QColor(255, 196, 0, 70)
 _TS = re.compile(r"^(\d+):(\d{1,2})(?:[.:](\d{1,3}))?$")
@@ -83,6 +88,30 @@ def queue_summary(results: list) -> str:
     return "Queue finished: " + ", ".join(parts)
 
 
+BUSY_INSTANCE_MESSAGE = "LyricLoom is already running but is not responding"
+BUSY_RETRY_TIMEOUT_MS = 10_000
+
+
+def handle_busy_instance(server, command, *, send=None, notify=None) -> bool:
+    """After a failed listen: True when another live instance owns the name and we must exit.
+
+    ``remove_stale`` only removes a name after a probe; False means a live process holds it. That
+    process may simply have been busy when the first hand-over arrived, so try once more with a
+    longer timeout. If it still does not answer, say so instead of opening a second window that
+    would write the same settings and .lrc files.
+    """
+    if server.remove_stale():
+        return False   # a crashed process left the name behind; this instance may listen
+    sender = send or ipc_send
+    if sender(command, timeout_ms=BUSY_RETRY_TIMEOUT_MS) is not None:
+        return True
+    if notify is None:
+        QMessageBox.warning(None, config.APP_NAME, BUSY_INSTANCE_MESSAGE)
+    else:
+        notify(BUSY_INSTANCE_MESSAGE)
+    return True
+
+
 class FuncWorker(QObject):
     """Runs one function off the UI thread."""
     done = Signal(object)
@@ -100,22 +129,33 @@ class FuncWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+@dataclass
+class QueueItem:
+    """One track and the optional per-song model choices for that run."""
+    path: Path
+    models: dict[str, str] | None = None
+
+
 class QueueWorker(QObject):
     """Processes tracks one at a time.
 
     stop() stops after the current track; stop(now=True) sets the cancellation event that reaches
     the running worker process. pause() stops before the next track (a subprocess cannot pause).
+    A track that fails with MissingModels pauses the queue, emits `missing_models` and is retried
+    after the window downloads the models and resumes.
     """
     track_started = Signal(str)
     stage = Signal(str)
     track_done = Signal(object)
     device = Signal(object)   # the finished TrackResult: where the vocals were separated
     queue_error = Signal(str)
+    missing_models = Signal(object)
     finished = Signal()
 
-    def __init__(self, paths: list[Path], force: bool, redo: bool = False):
+    def __init__(self, paths: list[Path] | list[QueueItem], force: bool, redo: bool = False):
         super().__init__()
-        self._paths, self._force, self._redo = paths, force, redo
+        self._items = [p if isinstance(p, QueueItem) else QueueItem(Path(p)) for p in paths]
+        self._force, self._redo = force, redo
         self._stop_after = False
         self._cancel = threading.Event()
         self._pause = threading.Event()
@@ -145,7 +185,11 @@ class QueueWorker(QObject):
             self.finished.emit()
 
     def _run_tracks(self):
-        for p in self._paths:
+        last_missing: dict[Path, frozenset[str]] = {}
+        index = 0
+        while index < len(self._items):
+            item = self._items[index]
+            p = item.path
             while self._pause.is_set() and not self._cancel.is_set() and not self._stop_after:
                 time.sleep(0.05)
             if self._cancel.is_set() or self._stop_after:
@@ -158,14 +202,27 @@ class QueueWorker(QObject):
                     # transcription come from the cache when the song was done on this machine
                     moved = runner.forget_sync(p)
                     res = runner.process(p, force=True, only_stage="align",
-                                         on_stage=self.stage.emit, cancel=self._cancel)
+                                         on_stage=self.stage.emit, cancel=self._cancel,
+                                         models=item.models)
+                else:
+                    res = runner.process(p, force=self._force, on_stage=self.stage.emit,
+                                         cancel=self._cancel, models=item.models)
+                if res.missing and last_missing.get(p) != frozenset(s.id for s in res.missing):
+                    # The stage refused to run because a model is absent. Put the previous word
+                    # timing back, pause, and let the window offer the download; this track is
+                    # retried once the queue resumes. A second, different missing set (e.g. the
+                    # next stage) asks again instead of failing the song.
+                    last_missing[p] = frozenset(s.id for s in res.missing)
+                    if moved:
+                        runner.restore_sync(moved)
+                    self.pause()
+                    self.missing_models.emit(list(res.missing))
+                    continue
+                if moved:
                     if res.status in ("failed", "cancelled"):
                         runner.restore_sync(moved)
                     else:
                         runner.drop_sync_backup(moved)
-                else:
-                    res = runner.process(p, force=self._force, on_stage=self.stage.emit,
-                                         cancel=self._cancel)
                 row = read_status(p)
                 if res.status == "failed":
                     row.status, row.error = "failed", res.error
@@ -196,6 +253,7 @@ class QueueWorker(QObject):
                 except OSError:
                     row.log_path = ""
                 self.track_done.emit(row)
+            index += 1
 
 
 class MainWindow(QMainWindow):
@@ -225,6 +283,9 @@ class MainWindow(QMainWindow):
         self._shown_line = -1
         self.karaoke_window: KaraokeWindow | None = None
         self._update_controller = UpdateController(self)
+        self._models_window: ModelsWindow | None = None
+        self._models_after_download: list = []
+        self._duplicate_instance = False
         self.setWindowTitle(config.APP_NAME)
         self.resize(1400, 850)
         self.setMinimumSize(640, 480)
@@ -241,11 +302,14 @@ class MainWindow(QMainWindow):
         self._ipc_server = server
         if self._ipc_server is None:
             self._ipc_server = IpcServer(parent=self)
-            if not self._ipc_server.listen():
-                # The caller already tried to reach a running instance; a failed listen here is a
-                # stale name (Linux) or a process that appeared in between.
-                self._ipc_server.remove_stale()
-                self._ipc_server.listen()
+        if not self._ipc_server.listen():
+            # A crashed process can leave the name behind; a live but busy one answers a longer
+            # retry. If it owns the name, do not open a second window.
+            startup_command = startup if startup is not None else {"cmd": "activate"}
+            if handle_busy_instance(self._ipc_server, startup_command):
+                self._duplicate_instance = True
+            elif not self._ipc_server.listen():
+                LOG.warning("single-instance server %s could not listen", self._ipc_server.name)
         if self._ipc_server.is_listening:
             self._ipc_server.received.connect(self._external_message)
             self._ipc_server.set_ready()
@@ -270,7 +334,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(act_quit)
         help_menu = self.menuBar().addMenu("&Help")
-        help_menu.addAction(QAction("&Download models…", self, triggered=self.open_models))
+        help_menu.addAction(QAction("&Models…", self, triggered=lambda: self.open_models()))
         help_menu.addAction(QAction("Check for &updates…", self, triggered=lambda: check_for_updates(self)))
         help_menu.addAction(QAction("Open &data folder", self, triggered=self.open_data_folder))
         help_menu.addAction(QAction("Open &log folder", self, triggered=self.open_log_folder))
@@ -287,7 +351,7 @@ class MainWindow(QMainWindow):
             "Choose the folder that contains your music. LyricLoom scans its subfolders and writes "
             "the .lrc next to each audio file.\n\n"
             "The first song also downloads the vocal separator (about 0.9 GB). You can manage all "
-            "models later in Help > Download models.")
+            "models later in Help > Models.")
         self.choose_library()
         QTimer.singleShot(200, self._offer_models)
 
@@ -300,7 +364,7 @@ class MainWindow(QMainWindow):
             "LyricLoom needs about 5.3 GB of models for the full pipeline:\n\n"
             "  Whisper large-v3 (3.1 GB), vocal separator (0.9 GB),\n"
             "  MMS forced alignment (1.2 GB), English singing model (66 MB).\n\n"
-            "Download them now? You can also do this later from Help > Download models; "
+            "Download them now? You can also do this later from Help > Models; "
             "songs that need a missing model will ask again.")
         if answer == QMessageBox.Yes:
             self.open_models()
@@ -316,8 +380,94 @@ class MainWindow(QMainWindow):
             self.refresh()
             self.statusBar().showMessage("Settings saved. Restart LyricLoom to apply cache/GPU changes.", 8000)
 
-    def open_models(self):
-        ModelsDialog(self).exec()
+    def open_models(self, specs: list | None = None, download: bool = False,
+                    on_finished=None) -> ModelsWindow:
+        """Opens (or reuses) the Models window, optionally selecting and downloading models."""
+        if self._models_window is None:
+            self._models_window = ModelsWindow(self)
+            self._models_window.downloads_finished.connect(self._models_downloads_finished)
+        window = self._models_window
+        added = on_finished is not None
+        if added:
+            self._models_after_download.append(on_finished)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        if specs:
+            window.select_specs(specs)
+            if download and not window.start_download(specs) and added:
+                # The job never started (another one is running, or not enough disk space):
+                # do not leave a callback that a later, unrelated job would run.
+                try:
+                    self._models_after_download.remove(on_finished)
+                except ValueError:
+                    pass
+        return window
+
+    def _models_downloads_finished(self, ok: bool) -> None:
+        callbacks, self._models_after_download = self._models_after_download, []
+        for callback in callbacks:
+            callback(ok)
+
+    def _ask_missing_models(self, specs: list) -> str:
+        """The preflight/mid-queue dialog. Kept separate so tests can answer without a dialog."""
+        dialog = MissingModelsDialog(specs, self)
+        dialog.exec()
+        return dialog.choice
+
+    def _offer_missing_models(self, specs: list, on_download=None) -> str:
+        choice = self._ask_missing_models(specs)
+        if choice == "download":
+            self.open_models(specs, download=True, on_finished=on_download)
+        elif choice == "models":
+            self.open_models(specs, on_finished=on_download)
+        return choice
+
+    def _required_models(self, overrides: dict[str, str] | None = None,
+                         stages: tuple[str, ...] = ("transcribe", "separate", "align")) -> list:
+        """The models a queue could use: every default plus every language choice in use.
+
+        The NLTK data and the optional singing model are not blockers: the align stage falls back to
+        CTC when they are absent, so including them here would refuse a queue that can run. A Redo
+        only runs the alignment stage, so it only needs the alignment model.
+        """
+        choices = config.model_choices()
+        override = dict(overrides or {})
+        specs, seen = [], set()
+
+        def add(stage: str, lang: str | None = None) -> None:
+            spec = model_catalog.resolve(stage, lang=lang, overrides=override, choices=choices)
+            if spec.id not in seen:
+                seen.add(spec.id)
+                specs.append(spec)
+
+        for stage in stages:
+            add(stage)
+        languages = choices.get("languages") if isinstance(choices.get("languages"), dict) else {}
+        for lang, entry in languages.items():
+            if not isinstance(entry, dict):
+                continue
+            for stage in stages:
+                if stage in entry and stage not in override:
+                    add(stage, str(lang))
+        return specs
+
+    def _preflight(self, paths: list[Path], redo: bool,
+                   overrides: dict[str, str] | None = None) -> bool:
+        """True when every required model is present; otherwise asks and refuses to start."""
+        stages = ("align",) if redo else ("transcribe", "separate", "align")
+        missing = [spec for spec in self._required_models(overrides, stages)
+                   if model_catalog.status(spec) in ("missing", "corrupt")]
+        if not missing:
+            return True
+
+        def downloaded(ok: bool) -> None:
+            if ok:
+                QTimer.singleShot(0, lambda: self.process(paths, redo=redo, models=overrides))
+
+        self._offer_missing_models(missing, downloaded)
+        self.statusBar().showMessage("The queue was not started: some models are missing.", 8000)
+        return False
 
     def open_data_folder(self):
         config.APP_DATA.mkdir(parents=True, exist_ok=True)
@@ -379,7 +529,7 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.filter = QComboBox()
         self.filter.addItems(FILTERS)
-        self.search = QLineEdit(placeholderText="Search artist / title / status")
+        self.search = QLineEdit(placeholderText="Search artist / title / status / models")
         top.addWidget(self.filter)
         top.addWidget(self.search)
         lv.addLayout(top)
@@ -396,8 +546,9 @@ class MainWindow(QMainWindow):
         banner.addWidget(self.btn_retry_library)
         self.library_banner.hide()
         lv.addWidget(self.library_banner)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Artist", "Title", "Status", "Source", "Conf", "Notes"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(["Artist", "Title", "Status", "Source", "Conf", "Notes",
+                                              "Models"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
@@ -681,26 +832,37 @@ class MainWindow(QMainWindow):
     def _visible_rows(self) -> list[TrackRow]:
         f = FILTERS[self.filter.currentIndex()].lower()
         q = self.search.text().lower()
+        current = current_model_ids()
         rows = []
         for r in self.rows:
             status = STATUS_LABELS.get(r.status, r.status)
-            if (f == "all" or r.status == f) and (q in r.artist.lower() or q in r.title.lower()
-                                                  or q in status.lower() or q in r.status.lower()):
+            other = bool(other_model_stages(r, current))
+            if f == "made with other models":
+                if not other:
+                    continue
+            elif f != "all" and r.status != f:
+                continue
+            if (q in r.artist.lower() or q in r.title.lower() or q in status.lower()
+                    or q in r.status.lower() or (other and q in "made with other models")):
                 rows.append(r)
         return rows
 
     def _fill_table(self):
         rows = self._visible_rows()
+        current = current_model_ids()
         header = self.table.horizontalHeader()
         sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
             status = STATUS_LABELS.get(r.status, r.status)
+            other = other_model_stages(r, current)
             notes = "⚠ fallback" if r.fallback else ("⚠ error" if r.error else "")
-            values = [r.artist, r.title, status, r.source, f"{r.conf:.2f}" if r.source else "", notes]
+            marker = "⇄ other" if other else ""
+            values = [r.artist, r.title, status, r.source, f"{r.conf:.2f}" if r.source else "",
+                      notes, marker]
             keys = [r.artist.lower(), r.title.lower(), status.lower(), r.source.lower(),
-                    r.conf if r.source else -1.0, notes]
+                    r.conf if r.source else -1.0, notes, marker]
             tips = []
             if r.error:
                 tips.append("Error:\n" + r.error)
@@ -710,6 +872,8 @@ class MainWindow(QMainWindow):
                 tips.append("Device: " + self._device_text(r.device))
             if r.log_path:
                 tips.append("Log: " + r.log_path)
+            if other:
+                tips.append(other_models_text(r))
             for j, (v, key) in enumerate(zip(values, keys)):
                 item = _SortItem(v, key)
                 item.setData(Qt.UserRole, str(r.path))
@@ -950,6 +1114,9 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         act_process = menu.addAction("Process")
+        act_other_models = menu.addAction("Process with other models…")
+        act_current = menu.addAction("Redo with current models")
+        act_current.setEnabled(bool(other_model_stages(row)))
         act_redo = menu.addAction("Redo word timing")
         act_details = menu.addAction("Details…")
         menu.addSeparator()
@@ -957,8 +1124,14 @@ class MainWindow(QMainWindow):
         act_copy = menu.addAction("Copy path")
         act_log = menu.addAction("Open log")
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        selected = [r.path for r in self._selected_rows()]
+        paths = selected if path in selected else [path]
         if chosen is act_process:
             self.process([path])
+        elif chosen is act_other_models:
+            self._process_with_other_models(paths)
+        elif chosen is act_current:
+            self._redo_with_current_models(path)
         elif chosen is act_redo:
             self._redo_paths([path])
         elif chosen is act_details:
@@ -1071,6 +1244,20 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             self.process(paths, redo=True)
 
+    def _process_with_other_models(self, paths: list[Path]):
+        """The per-song model dialog: one combo per stage plus a language shortcut."""
+        if not paths or self._queue is not None:
+            return
+        dialog = PerSongModelsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            self.process(paths, models=dialog.chosen_models())
+
+    def _redo_with_current_models(self, path: Path):
+        """Re-runs every stage with what the current choices resolve, replacing the [#models] set."""
+        if self._queue is not None:
+            return
+        self.process([path], force=True)
+
     def _ask_open_track(self) -> str:
         box = QMessageBox(self)
         box.setWindowTitle("Unsaved edits")
@@ -1127,18 +1314,22 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
-    def process(self, paths: list[Path], redo: bool = False) -> bool:
+    def process(self, paths: list[Path], redo: bool = False,
+                models: dict[str, str] | None = None) -> bool:
         if not paths or self._queue is not None:
+            return False
+        if not self._validate_folders():
+            return False
+        if not self._preflight(paths, redo, models):
             return False
         paths = self._confirm_open_track(paths, redo)
         if not paths:
             return False
-        if not self._validate_folders():
-            return False
         self._queue_error = ""
         self._queue_results = []
         self._queue_started = time.monotonic()
-        self._queue = QueueWorker(paths, self.force.isChecked(), redo)
+        items = [QueueItem(path, models) for path in paths]
+        self._queue = QueueWorker(items, self.force.isChecked(), redo)
         self._prog = {"done": 0, "total": len(paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
         q = self._queue
@@ -1147,6 +1338,7 @@ class MainWindow(QMainWindow):
         q.device.connect(self._device_changed)
         q.track_done.connect(self._track_finished)
         q.queue_error.connect(self._queue_error_received)
+        q.missing_models.connect(self._queue_missing_models)
         q.finished.connect(self._queue_finished)
         self.btn_stop.setEnabled(True)
         self.btn_stop_now.setEnabled(True)
@@ -1242,6 +1434,24 @@ class MainWindow(QMainWindow):
     def _queue_error_received(self, message: str):
         self._queue_error = message
         self.statusBar().showMessage("Queue error: " + message, 12000)
+
+    def _queue_missing_models(self, specs: list):
+        """A track stopped on MissingModels: pause the queue, offer the download, resume on success."""
+        if self._queue is None:
+            return
+        self._queue.pause()
+        self.btn_pause.setText("Resume")
+        self.btn_pause.setEnabled(True)
+        names = ", ".join(spec.label for spec in specs)
+        self.statusBar().showMessage(f"Queue paused: missing models ({names})", 12000)
+
+        def downloaded(ok: bool) -> None:
+            if ok and self._queue is not None:
+                self._queue.resume()
+                self.btn_pause.setText("Pause after this song")
+                self.statusBar().showMessage("Models ready; resuming the queue …", 8000)
+
+        self._offer_missing_models(specs, downloaded)
 
     def _queue_finished(self):
         results = self._queue_results
@@ -1666,6 +1876,10 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Stopping after the current song; LyricLoom will close …")
             e.ignore()
             return
+        if self._models_window is not None:
+            if not self._models_window.close():   # asks before cancelling a running download
+                e.ignore()
+                return
         self._save_ui_state()
         if self._ipc_server is not None:
             self._ipc_server.close()
@@ -1756,14 +1970,19 @@ def run(argv: list[str] | None = None):
 
     server = IpcServer()
     if not server.listen():
-        # A crashed process can leave the name behind on Linux; only remove it after nobody
-        # answered above.
-        server.remove_stale()
+        # A crashed process can leave the name behind on Linux; a live but busy one gets one more
+        # chance with a longer timeout. If it still owns the name, do not open a second window.
+        if handle_busy_instance(server, command):
+            sys.exit(0)
         if not server.listen():
             LOG.warning("single-instance server %s could not listen", server.name)
     if server.is_listening:
         server.hold()   # buffer a command that arrives while MainWindow is built
     w = MainWindow(server=server, startup=startup)
+    if w._duplicate_instance:
+        w.dirty = False
+        w.close()
+        sys.exit(0)
     if not w._ipc_available:
         # Another process won the start race after our first attempt: forward and use its window.
         if ipc_send(command) is not None:

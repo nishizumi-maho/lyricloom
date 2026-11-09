@@ -76,7 +76,7 @@ def transcribe(vocals16k: Path, work: Path, lang: str | None, prompt: str | None
     if not model_path.is_file():
         raise RuntimeError(
             f"the Whisper model {spec.id!r} is missing: {model_path}. "
-            f"Run `lyricloom models download {spec.id}` or open Help > Download models.")
+            f"Run `lyricloom models download {spec.id}` or open Help > Models.")
     out = work / name
     cmd = [str(cli), "-m", str(model_path), "-f", str(vocals16k),
            "-l", lang if lang in ("ja", "pt", "en") else "auto", "-ojf", "-of", str(out),

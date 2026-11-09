@@ -2,7 +2,7 @@
 
 LyricLoom separates vocals, transcribes them and aligns lyrics with several large model files. They are not stored in the Git repository or in the release installers. This page explains what each model does, where it goes, how to download it, how to install it offline, and how to remove it.
 
-The normal Windows installer and the Linux tarball show a **first-run model dialog** that downloads the missing models. A source or pipx install also has the `lyricloom models` command described below.
+The normal Windows installer and the Linux tarball show the **Models window** on first run and offer the missing models. A source or pipx install also has the `lyricloom models` command described below.
 
 ## At a glance
 
@@ -128,7 +128,7 @@ Windows: %USERPROFILE%\nltk_data
 Linux:   ~/nltk_data
 ```
 
-In a source or pipx install, `lyricloom doctor` prints the models root and the status of each model. The GUI's model dialog shows the same readiness information.
+In a source or pipx install, `lyricloom doctor` prints the models root and the status of each model. The GUI's Models window shows the same readiness information.
 
 ## Choosing models
 
@@ -172,7 +172,7 @@ with other models.
 
 ### The first-run dialog
 
-On Windows and in the Linux tarball, start LyricLoom and use the **model dialog** that appears when files are missing. It lists each model, its size and its state, and starts only the downloads you approve. You can close it, process a song that only needs the models you already have, and reopen it later.
+On Windows and in the Linux tarball, start LyricLoom and use the **Models window** that appears when files are missing. It lists each model, its size and its state, and starts only the downloads you approve. You can close it, process a song that only needs the models you already have, and reopen it from **Help > Models**.
 
 The models are not bundled in the installer or tarball. Without network access, use the offline procedure below.
 
@@ -197,7 +197,7 @@ lyricloom models download mtl         # old name: the singing model
 lyricloom models download nltk        # old name: the NLTK data
 ```
 
-The packaged Windows and Linux GUI builds are windowed applications and do not expose this console command in 2.0.0; use their model dialog, or a source/pipx install for the CLI.
+The packaged Windows and Linux GUI builds are windowed applications and do not expose this console command in 2.0.0; use the Models window (Help > Models), or a source/pipx install for the CLI.
 
 Downloads are HTTPS only. Each file is written to a `.part` file, resumed with an HTTP `Range`
 request when the server supports it, retried with a short backoff, and moved into place only
@@ -218,19 +218,19 @@ resolved files and fails the track with an actionable message naming the missing
 
 ### If the models are already present
 
-If you copied a models folder from another machine or upgraded an existing install, the model dialog and `models status` show those files as ready and you can skip the download. If a file is reported missing or incomplete, download it again or replace it using the offline layout below.
+If you copied a models folder from another machine or upgraded an existing install, the Models window and `models status` show those files as ready and you can skip the download. If a file is reported missing or incomplete, download it again or replace it using the offline layout below.
 
 ## Offline install
 
 LyricLoom can run without internet access if the models and a `whisper-cli` binary are already present. Lyric search still needs a network connection unless the lyrics are cached or you paste them manually.
 
-1. On a connected machine, install the same LyricLoom version. Use the model dialog, or a source/pipx install and run:
+1. On a connected machine, install the same LyricLoom version. Use the Models window, or a source/pipx install and run:
 
    ```bash
    lyricloom models download all
    ```
 
-2. Find the models root with the model dialog or `lyricloom doctor` (source/pipx), or use the default path.
+2. Find the models root with the Models window or `lyricloom doctor` (source/pipx), or use the default path.
 3. Copy the entire models root to the offline machine, preserving the layout shown above.
 4. Copy the NLTK data directory (`~/nltk_data` or `%USERPROFILE%\nltk_data`) if you want the English singing model to work offline.
 5. Make sure `whisper-cli` is present on the offline machine:
@@ -299,7 +299,7 @@ lyricloom models list
 lyricloom models verify whisper-large-v3
 ```
 
-In the packaged GUI, the model dialog is the readiness view.
+In the packaged GUI, the Models window is the readiness view.
 
 `models list` reports the stage, id, exact size, state and the languages that choose each model:
 

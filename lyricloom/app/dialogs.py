@@ -2,9 +2,6 @@
 stays focused on the library and the editor."""
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
 import threading
 from pathlib import Path
 
@@ -13,14 +10,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QProgressDialog, QPushButton, QVBoxLayout, QWidget)
 
-from .. import VERSION, config, runtime, updater
-
-MODEL_ROWS = (
-    ("whisper", "Whisper large-v3", "3.1 GB", "Transcribes vocals when no lyric is found."),
-    ("separator", "Mel-Band RoFormer", "0.9 GB", "Separates vocals from the instrumental."),
-    ("mms", "MMS forced alignment", "1.2 GB", "Word timing for non-English lyrics."),
-    ("mtl", "English singing model", "66 MB", "Better word timing for English songs."),
-)
+from .. import VERSION, config, updater
 
 
 def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = False
@@ -173,146 +163,6 @@ class SettingsDialog(QDialog):
                 f"Could not save the settings to {config.SETTINGS_FILE}:\n{exc.strerror or exc}")
             return
         self.accept()
-
-
-class ModelWorker(QObject):
-    message = Signal(str)
-    progress = Signal(int, int)
-    done = Signal()
-    failed = Signal(str)
-
-    @Slot()
-    def run(self):
-        try:
-            missing = runtime.status()
-            if not missing["whisper"]:
-                self.message.emit("Downloading the Whisper model (about 3.1 GB)…")
-                runtime.download_whisper(self.progress.emit)
-            if not missing["separator"]:
-                self.message.emit("Downloading the vocal separator (about 0.9 GB)…")
-                self.progress.emit(0, 0)
-                runtime.download_separator()
-            if not missing["mms"]:
-                self.message.emit("Downloading the forced-alignment model (about 1.2 GB)…")
-                self.progress.emit(0, 0)
-                runtime.download_mms()
-            if not missing["mtl"]:
-                self.message.emit("Downloading the English singing model (about 66 MB)…")
-                runtime.download_mtl(self.progress.emit)
-            if not runtime._nltk_ready():
-                self.message.emit("Downloading the NLTK data used by the singing model…")
-                self.progress.emit(0, 0)
-                runtime.download_nltk()
-            self.done.emit()
-        except Exception as exc:  # noqa: BLE001 - shown in the dialog, never crashes the app
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
-
-
-class ModelsDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle("LyricLoom models")
-        self.setMinimumWidth(620)
-        self._thread: QThread | None = None
-        self._worker: ModelWorker | None = None
-        layout = QVBoxLayout(self)
-        intro = QLabel("Models are downloaded once and kept in the LyricLoom data folder. "
-                       "They are not bundled in the installer because they total about 5 GB.")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        self.rows: dict[str, QLabel] = {}
-        form = QFormLayout()
-        for key, name, size, why in MODEL_ROWS:
-            label = QLabel("…")
-            label.setToolTip(why)
-            self.rows[key] = label
-            form.addRow(f"{name} ({size})", label)
-        layout.addLayout(form)
-        self.status = QLabel("")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        self.progress = QProgressDialog("Preparing…", "", 0, 100, self)
-        self.progress.setWindowTitle("Downloading models")
-        self.progress.setCancelButton(None)
-        self.progress.setAutoClose(False)
-        self.progress.setAutoReset(False)
-        self.progress.hide()
-        layout.addWidget(self.progress)
-        buttons = QHBoxLayout()
-        self.open_btn = QPushButton("Open models folder")
-        self.open_btn.clicked.connect(self._open_folder)
-        self.download_btn = QPushButton("Download missing models")
-        self.download_btn.clicked.connect(self._download)
-        self.close_btn = QPushButton("Close")
-        self.close_btn.clicked.connect(self.accept)
-        buttons.addWidget(self.open_btn)
-        buttons.addStretch(1)
-        buttons.addWidget(self.download_btn)
-        buttons.addWidget(self.close_btn)
-        layout.addLayout(buttons)
-        self.refresh()
-
-    def refresh(self):
-        state = runtime.status()
-        for key, label in self.rows.items():
-            label.setText("Ready" if state.get(key) else "Missing")
-            label.setStyleSheet("" if state.get(key) else "color: #c06000;")
-        self.download_btn.setEnabled(not all(state.values()) or not runtime._nltk_ready())
-
-    def _open_folder(self):
-        config.MODELS.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(config.MODELS)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(config.MODELS)])
-
-    def _download(self):
-        if self._thread is not None:
-            return
-        self.download_btn.setEnabled(False)
-        self.close_btn.setEnabled(False)
-        self.progress.setRange(0, 0)
-        self.progress.show()
-        thread = QThread(self)
-        worker = ModelWorker()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.message.connect(self.status.setText)
-        worker.progress.connect(self._progress)
-        worker.done.connect(self._finished)
-        worker.failed.connect(self._failed)
-        worker.done.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(self._thread_done)
-        self._thread, self._worker = thread, worker
-        thread.start()
-
-    def _progress(self, done: int, total: int):
-        if total:
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(min(1000, int(done * 1000 / total)))
-        else:
-            self.progress.setRange(0, 0)
-
-    def _finished(self):
-        self.status.setText("All requested models are ready.")
-        self.refresh()
-
-    def _failed(self, message: str):
-        QMessageBox.critical(self, "Model download failed", message + "\n\nSee docs/models.md for offline installation.")
-
-    def _thread_done(self):
-        self._thread = None
-        self._worker = None
-        self.progress.hide()
-        self.download_btn.setEnabled(True)
-        self.close_btn.setEnabled(True)
-
-    def closeEvent(self, event):
-        if self._thread is not None:
-            event.ignore()
-            return
-        super().closeEvent(event)
 
 
 class _UpdateCheck(QObject):
