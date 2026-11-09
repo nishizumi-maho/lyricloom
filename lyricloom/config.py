@@ -146,6 +146,31 @@ def set_japanese_script(script: str) -> None:
     _save_setting("japanese_script", script)
 
 
+def smooth_animation_divisor() -> int:
+    """Frame-rate choice for the lyric animation: 1 = match display, 2 = half, 3 = third.
+
+    A lower rate is always an integer divisor of the monitor refresh rate; a non-divisor such as
+    60 on a 144 Hz display alternates between two and three refreshes and judders.
+    """
+    value = _settings().get("smooth_animation", 1)
+    if isinstance(value, str):
+        return {"display": 1, "half": 2, "third": 3}.get(value.strip().lower(), 1)
+    try:
+        divisor = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return divisor if divisor in (1, 2, 3) else 1
+
+
+def set_smooth_animation_divisor(divisor: int) -> None:
+    """Store the frame-rate choice (1, 2 or 3; anything else means match display)."""
+    try:
+        value = int(divisor)
+    except (TypeError, ValueError):
+        value = 1
+    _save_setting("smooth_animation", value if value in (1, 2, 3) else 1)
+
+
 def migrate_legacy_settings() -> bool:
     """Migrates settings and the data folders from the pre-rename LyricsBoca directory once.
 

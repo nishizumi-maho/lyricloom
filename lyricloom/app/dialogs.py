@@ -91,6 +91,19 @@ class SettingsDialog(QDialog):
         bform.addRow(self.notify_finished)
         layout.addWidget(behaviour)
 
+        animation = QGroupBox("Animation")
+        aform = QFormLayout(animation)
+        self.smooth = QComboBox()
+        self.smooth.addItems(["Match display (default)", "Half refresh", "Third refresh"])
+        self.smooth.setCurrentIndex(config.smooth_animation_divisor() - 1)
+        self.smooth.setToolTip("Lower rates are exact integer divisors of the display refresh rate")
+        aform.addRow("Smooth animation", self.smooth)
+        animation_note = QLabel("The karaoke view and the main lyric view animate at the display's "
+                                "refresh rate; lower choices stay exact divisors so motion never judders.")
+        animation_note.setWordWrap(True)
+        aform.addRow(animation_note)
+        layout.addWidget(animation)
+
         gpu = QGroupBox("GPU through WSL (Windows + AMD ROCm)")
         gform = QFormLayout(gpu)
         self.wsl = QCheckBox("Run separation and forced alignment in WSL")
@@ -151,6 +164,7 @@ class SettingsDialog(QDialog):
                 "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
                 "check_updates": self.check_updates.isChecked(),
                 "notify_queue_finished": self.notify_finished.isChecked(),
+                "smooth_animation": self.smooth.currentIndex() + 1,
                 "wsl_gpu": self.wsl.isChecked(),
                 "wsl_distro": self.distro.text().strip(),
                 "wsl_python": self.wsl_python.text().strip() or "python3",

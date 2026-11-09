@@ -176,24 +176,50 @@ def test_main_player_reports_errors_and_handles_end_of_media(app, tmp_path):
         w.close()
 
 
-def test_big_lyric_label_clears_for_a_track_without_lyrics(app, tmp_path):
+def test_main_compact_view_follows_the_player_and_stops_when_paused(app, tmp_path):
+    audio = _track(tmp_path, "01 - Song.flac",
+                   "[00:01.00]<00:01.00>old <00:01.50>words<00:02.00>\n")
+    w = _window(app, tmp_path)
+    try:
+        w.show()
+        app.processEvents()
+        w.load(audio)
+        w.player.position_ms = 1500
+        w.player.state = QMediaPlayer.PlayingState
+        w._tick()
+        w.now.advance(w.now.elapsed_ms())
+        assert w.now.current_line_text() == "old words"
+        assert w.now.is_animating
+
+        w.player.state = QMediaPlayer.PausedState
+        w._tick()
+        assert not w.now.is_animating
+        assert w.now.current_line_text() == "old words"
+    finally:
+        w.dirty = False
+        w.hide()
+        w.close()
+
+
+def test_compact_lyric_view_clears_for_a_track_without_lyrics(app, tmp_path):
     first = _track(tmp_path, "01 - First.flac",
                    "[re:LyricLoom 2.1.0]\n[00:01.00]<00:01.00>old <00:01.50>words<00:02.00>\n")
     second = _track(tmp_path, "02 - Second.flac")
     w = _window(app, tmp_path)
     try:
         w.load(first)
-        w.now.setText("old words")
         assert w.doc is not None and w.lines.count() == 1
+        assert len(w.now._lines) == 1
 
         w.load(second)
         assert w.doc is None
-        assert w.now.text() == ""
+        assert w.now.current_line_text() == ""
+        assert w.now._lines == []
 
         w.load(first)
-        w.now.setText("old words")
+        assert len(w.now._lines) == 1
         w._reload_lrc()
-        assert w.now.text() == ""
+        assert len(w.now._lines) == 1
     finally:
         w.dirty = False
         w.close()
