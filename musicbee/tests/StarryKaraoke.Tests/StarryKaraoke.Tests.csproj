@@ -12,5 +12,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\StarryKaraoke\StarryKaraoke.csproj" />
+    <ProjectReference Include="..\..\src\StarryKaraoke.Recorder\StarryKaraoke.Recorder.csproj" />
   </ItemGroup>
 </Project>

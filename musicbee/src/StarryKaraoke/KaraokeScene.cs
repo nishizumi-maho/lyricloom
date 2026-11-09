@@ -23,7 +23,15 @@ namespace MusicBeePlugin
         private List<Block> _blocks;
         private double _basePx;
         private Typeface _face;
-        private readonly double _dpi = 1.0;
+        private double _dpi = 1.0;
+
+        // Caches rebuilt only when the text, size, theme or DPI changes. FormattedText construction and
+        // gradient brush construction were the scene's two per-frame allocation hotspots.
+        private readonly Dictionary<TextKey, FormattedText> _texts = new Dictionary<TextKey, FormattedText>();
+        private readonly Dictionary<GradientKey, Brush> _gradients = new Dictionary<GradientKey, Brush>();
+        private int _clockSecond = int.MinValue;
+        private string _clock = "";
+        private readonly Dictionary<int, string> _clocks = new Dictionary<int, string>();
 
         // animation
         private double _scroll, _scrollVel;
@@ -58,7 +66,68 @@ namespace MusicBeePlugin
             public bool Sparkle;
         }
 
+        private struct TextKey : IEquatable<TextKey>
+        {
+            private readonly string _text;
+            private readonly double _px, _maxWidth;
+
+            public TextKey(string text, double px, double maxWidth)
+            {
+                _text = text ?? "";
+                _px = px;
+                _maxWidth = maxWidth;
+            }
+
+            public bool Equals(TextKey other) =>
+                string.Equals(_text, other._text, StringComparison.Ordinal) &&
+                _px.Equals(other._px) && _maxWidth.Equals(other._maxWidth);
+
+            public string Text => _text;
+
+            public override bool Equals(object obj) => obj is TextKey other && Equals(other);
+            public override int GetHashCode() { unchecked { return ((_text?.GetHashCode() ?? 0) * 397 ^ _px.GetHashCode()) * 397 ^ _maxWidth.GetHashCode(); } }
+        }
+
+        private struct GradientKey : IEquatable<GradientKey>
+        {
+            private readonly int _litX, _feather, _alpha;   // quantised to keep the cache small
+            private readonly uint _body, _tip;
+
+            public GradientKey(double litX, double feather, double alpha, Color body, Color tip)
+            {
+                _litX = (int)Math.Round(litX * 4);
+                _feather = (int)Math.Round(feather * 10);
+                _alpha = (int)Math.Round(Math.Max(0, Math.Min(1, alpha)) * 255);
+                _body = ToUint(body);
+                _tip = ToUint(tip);
+            }
+
+            private static uint ToUint(Color c) => ((uint)c.A << 24) | ((uint)c.R << 16) | ((uint)c.G << 8) | c.B;
+
+            public bool Equals(GradientKey other) =>
+                _litX == other._litX && _feather == other._feather && _alpha == other._alpha &&
+                _body == other._body && _tip == other._tip;
+
+            public override bool Equals(object obj) => obj is GradientKey other && Equals(other);
+            public override int GetHashCode() { unchecked { return (((_litX * 397 ^ _feather) * 397 ^ _alpha) * 397 ^ (int)_body) * 397 ^ (int)_tip; } }
+        }
+
         public KaraokeScene(Settings s) { Apply(s); }
+
+        /// <summary>Pixels per device-independent pixel of the render target. The window passes
+        /// <c>VisualTreeHelper.GetDpi(this).PixelsPerDip</c>; the offscreen recorder and Preview use 1.0.</summary>
+        public double PixelsPerDip
+        {
+            get => _dpi;
+            set
+            {
+                if (double.IsNaN(value) || double.IsInfinity(value) || value <= 0) return;
+                if (Math.Abs(value - _dpi) < 1e-9) return;
+                _dpi = value;
+                _blocks = null;       // glyph widths and edges were measured at the old DPI
+                ClearCaches();
+            }
+        }
 
         public void Apply(Settings s)
         {
@@ -80,6 +149,17 @@ namespace MusicBeePlugin
                                  FontStyles.Normal, FontWeights.Normal, FontStretches.Normal);
             _blocks = null;
             _stars = new Star[0];
+            ClearCaches();
+            _brushes.Clear();
+        }
+
+        private void ClearCaches()
+        {
+            _texts.Clear();
+            _gradients.Clear();
+            _clocks.Clear();
+            _clock = "";
+            _clockSecond = int.MinValue;
         }
 
         public void SetSong(List<KaraokeLine> lines, string title, double songMs)
@@ -91,6 +171,9 @@ namespace MusicBeePlugin
             _blocks = null;
             _scrollReady = false;
             _nextSong = "";
+            _texts.Clear();
+            _clock = "";
+            _clockSecond = int.MinValue;
             if (_s.RandomTheme) Apply(_s);
         }
 
@@ -121,6 +204,7 @@ namespace MusicBeePlugin
             // The star positions are normalised, so they do not need to be regenerated for a resize:
             // reshuffling the whole sky every time the user drags the window edge looks like a glitch.
             if (_stars.Length == 0) MakeStars(size);
+            if (size != _size) ClearCaches();
             _size = size;
             _basePx = Math.Max(18, Math.Min(110, size.Height / 13)) * Math.Max(0.4, Math.Min(2.5, _s.TextScale));
             var width = Math.Max(80, (size.Width - 2 * Margin(size)) / 1.09);   // room for the current line growing
@@ -144,12 +228,16 @@ namespace MusicBeePlugin
 
         private FormattedText Text(string s, double px, double maxWidth = double.PositiveInfinity)
         {
-            var ft = new FormattedText(s, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, _face, px, Brushes.White, _dpi);
+            var key = new TextKey(s, px, maxWidth);
+            if (_texts.TryGetValue(key, out var ft)) return ft;
+            ft = new FormattedText(key.Text, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight, _face, px, Brushes.White, _dpi);
             if (!double.IsInfinity(maxWidth) && maxWidth > 0)
             {
                 ft.MaxTextWidth = maxWidth;
                 ft.Trimming = TextTrimming.CharacterEllipsis;
             }
+            if (_texts.Count > 1024) _texts.Clear();
+            _texts[key] = ft;
             return ft;
         }
 
@@ -253,7 +341,7 @@ namespace MusicBeePlugin
             if (_s.ShowProgress && !LyricsOnly && !HideProgress) DrawProgress(dc, size, t, layer);
             if (_blocks.Count == 0)
             {
-                if (layer == Layer.Text) DrawCentered(dc, size, _songMs < 0 ? "" : "no synced lyrics", _basePx * 0.6, _dim, size.Height / 2);
+                if (layer == Layer.Text) DrawCentered(dc, size, _songMs < 0 ? "" : Strings.NoSyncedLyrics, _basePx * 0.6, _dim, size.Height / 2);
                 return;
             }
 
@@ -349,25 +437,35 @@ namespace MusicBeePlugin
             var body = layer == Layer.Glow ? _glow : _lit;
             var tip = layer == Layer.Glow ? _glow : _head;
             if (done) fill = Solid(Fade(body, alpha));
-            else
-            {
-                // one gradient does it all: gold, brightening towards the sweep, then fading out over the
-                // feather (the soft edge), transparent beyond it
-                var g = new LinearGradientBrush
-                {
-                    MappingMode = BrushMappingMode.Absolute,
-                    StartPoint = new Point(litX - feather * 5, 0),
-                    EndPoint = new Point(litX + feather * 0.6, 0)
-                };
-                var span = feather * 5.6;
-                g.GradientStops.Add(new GradientStop(Fade(body, alpha), 0));
-                g.GradientStops.Add(new GradientStop(Fade(tip, alpha), (feather * 4) / span));
-                g.GradientStops.Add(new GradientStop(Fade(tip, 0), 1));
-                g.Freeze();
-                fill = g;
-            }
+            else fill = LitFill(litX, feather, alpha, body, tip);
             dc.DrawGeometry(fill, null, r.Geo);
             dc.Pop();
+        }
+
+        /// <summary>The sweep's gold-to-transparent gradient, cached by its quantised position and alpha.
+        /// The first brush for a bucket is built with the exact values, so a still frame renders as before;
+        /// a later frame may reuse a brush from within the same quarter-pixel bucket.</summary>
+        private Brush LitFill(double litX, double feather, double alpha, Color body, Color tip)
+        {
+            var key = new GradientKey(litX, feather, alpha, body, tip);
+            if (_gradients.TryGetValue(key, out var cached)) return cached;
+
+            // one gradient does it all: gold, brightening towards the sweep, then fading out over the
+            // feather (the soft edge), transparent beyond it
+            var g = new LinearGradientBrush
+            {
+                MappingMode = BrushMappingMode.Absolute,
+                StartPoint = new Point(litX - feather * 5, 0),
+                EndPoint = new Point(litX + feather * 0.6, 0)
+            };
+            var span = feather * 5.6;
+            g.GradientStops.Add(new GradientStop(Fade(body, alpha), 0));
+            g.GradientStops.Add(new GradientStop(Fade(tip, alpha), (feather * 4) / span));
+            g.GradientStops.Add(new GradientStop(Fade(tip, 0), 1));
+            g.Freeze();
+            if (_gradients.Count > 2048) _gradients.Clear();
+            _gradients[key] = g;
+            return g;
         }
 
         private void DrawSky(DrawingContext dc, Size size)
@@ -456,11 +554,12 @@ namespace MusicBeePlugin
                 var line = _lines[i];
                 if (line.IsBreak || line.EndMs <= line.StartMs || i >= _blocks.Count) continue;
                 var age = t - line.EndMs;
-                if (age < 0 || age > 0.8) continue;
+                var burst = BurstProgress(age);
+                if (burst == null) continue;
                 var b = _blocks[i];
                 var cx = size.Width / 2;
                 var cy = mid + b.Top + b.Height / 2 - _scroll;
-                var progress = age / 0.8;
+                var progress = burst.Value;
                 var alpha = 1 - progress;
                 var count = glow ? 6 : 11;
                 for (var k = 0; k < count; k++)
@@ -474,11 +573,20 @@ namespace MusicBeePlugin
             }
         }
 
+        /// <summary>Where a line-end burst is in its 0.8 second life: 0 at the line end, 1 when it is gone.
+        /// Both the time and the line's end are in milliseconds; the window is in seconds.</summary>
+        internal static double? BurstProgress(double ageMs)
+        {
+            var ageSec = ageMs / 1000.0;
+            if (ageSec < 0 || ageSec > 0.8) return null;
+            return ageSec / 0.8;
+        }
+
         private void DrawLoopBadge(DrawingContext dc, Size size)
         {
             if (double.IsNaN(LoopStart)) return;
             var px = Math.Max(11, _basePx * 0.28);
-            var ft = Text("⟲  loop", px);
+            var ft = Text(Strings.LoopBadge, px);
             ft.SetForegroundBrush(Solid(Fade(_accent, 0.8)));
             var x = size.Width - Margin(size) - ft.Width;
             var y = Math.Max(10, size.Height * 0.045);
@@ -490,7 +598,7 @@ namespace MusicBeePlugin
             if (!_s.PartyMode || !_s.ShowNextSong || string.IsNullOrEmpty(_nextSong) || _songMs <= 0) return;
             if (t < _songMs - 15000) return;
             var px = Math.Max(11, _basePx * 0.3);
-            var ft = Text("A seguir: " + _nextSong, px, size.Width - 2 * Margin(size));
+            var ft = Text(Strings.NextSongLabel(_nextSong), px, size.Width - 2 * Margin(size));
             ft.SetForegroundBrush(Solid(Fade(_unlit, 0.78)));
             var y = size.Height - Math.Max(38, size.Height * 0.1) - ft.Height;
             dc.DrawText(ft, new Point((size.Width - ft.Width) / 2, y));
@@ -502,7 +610,7 @@ namespace MusicBeePlugin
             if (t < _songMs - 2500) return;
             var px = Math.Max(12, _basePx * 0.38);
             var pulse = (Math.Sin(_wallSec * 3) + 1) / 2;
-            DrawCentered(dc, size, "✦  thanks for singing  ✦", px, Mix(_accent, _head, 0.35 + 0.5 * pulse),
+            DrawCentered(dc, size, Strings.ThanksForSinging, px, Mix(_accent, _head, 0.35 + 0.5 * pulse),
                          size.Height - Math.Max(44, size.Height * 0.12));
         }
 
@@ -552,7 +660,7 @@ namespace MusicBeePlugin
             if (_lines.Count == 0) return;
             var left = (_lines[0].StartMs - t) / 1000;
             if (left > 60) return;
-            var msg = left > 3 ? "·  ·  ·" : Math.Ceiling(Math.Max(0.01, left)).ToString(CultureInfo.InvariantCulture);
+            var msg = left > 3 ? Strings.CountdownDots : Math.Ceiling(Math.Max(0.01, left)).ToString(CultureInfo.InvariantCulture);
             var pulse = 1 - (left - Math.Floor(left));
             DrawCentered(dc, size, msg, _basePx * 0.8, Mix(_dim, _lit, left > 3 ? 0.3 : pulse), mid - _basePx * 2.4);
         }
@@ -608,10 +716,19 @@ namespace MusicBeePlugin
 
         // ---------------------------------------------------------------- helpers
 
-        private static string Clock(double ms)
+        private string Clock(double ms)
         {
             var s = (int)Math.Max(0, ms / 1000);
-            return $"{s / 60}:{s % 60:00}";
+            if (s == _clockSecond) return _clock;
+            if (!_clocks.TryGetValue(s, out var text))
+            {
+                text = $"{s / 60}:{s % 60:00}";
+                if (_clocks.Count > 4096) _clocks.Clear();
+                _clocks[s] = text;
+            }
+            _clockSecond = s;
+            _clock = text;
+            return text;
         }
 
         private static double Smooth(double x)
