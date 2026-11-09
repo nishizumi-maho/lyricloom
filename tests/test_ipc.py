@@ -64,6 +64,17 @@ def test_server_name_is_stable_and_per_profile():
     assert len(ipc.server_name()) > len("LyricLoom-")
 
 
+def test_instance_name_override_isolates_a_profile_and_rejects_bad_names(monkeypatch):
+    monkeypatch.setenv("LYRICLOOM_INSTANCE_NAME", "LyricLoom-portable-1")
+    assert ipc.server_name() == "LyricLoom-portable-1"
+    for bad in ("", "  ", "a/b", "..\\pipe", "x" * 81):
+        monkeypatch.setenv("LYRICLOOM_INSTANCE_NAME", bad)
+        assert ipc.server_name().startswith("LyricLoom-") and "/" not in ipc.server_name()
+        assert ipc.server_name() != bad
+    monkeypatch.delenv("LYRICLOOM_INSTANCE_NAME")
+    assert ipc.server_name().startswith("LyricLoom-")
+
+
 def test_send_returns_none_without_a_server():
     assert ipc.send({"cmd": "activate"}, name=_name(), timeout_ms=200) is None
 

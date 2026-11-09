@@ -1,4 +1,12 @@
+import os
+import uuid
+
 import pytest
+
+# The single-instance server name normally derives from the user's real data folder. A test run must
+# never deliver commands to (or answer for) a LyricLoom the user is running, nor to another test run
+# on the same machine, so every pytest session gets its own name.
+os.environ["LYRICLOOM_INSTANCE_NAME"] = f"LyricLoom-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 @pytest.fixture(autouse=True)

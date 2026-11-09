@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 
 from PySide6.QtCore import QCoreApplication, QObject, QTimer, Signal, Slot
@@ -20,8 +22,16 @@ MAX_MESSAGE_BYTES = 64 * 1024
 DEFAULT_TIMEOUT_MS = 2000
 
 
+_INSTANCE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+
+
 def server_name() -> str:
-    """Stable per-user name; the data directory tells apart portable profiles and test runs."""
+    """Stable per-user name; the data directory tells apart portable profiles. A separate instance
+    (a test run, a second portable profile) can set ``LYRICLOOM_INSTANCE_NAME`` so it never talks
+    to, or answers for, the user's running LyricLoom."""
+    override = os.environ.get("LYRICLOOM_INSTANCE_NAME", "").strip()
+    if override and _INSTANCE_NAME.fullmatch(override):
+        return override
     digest = hashlib.sha1(str(config.APP_DATA).lower().encode("utf-8")).hexdigest()[:12]
     return f"LyricLoom-{digest}"
 
