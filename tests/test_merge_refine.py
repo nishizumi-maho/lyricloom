@@ -35,6 +35,15 @@ def test_presync_ignored_for_different_text():
     assert merge_presync([OURS], [pre])[0] is OURS
 
 
+def test_line_only_presync_uses_its_line_start_without_inventing_word_times():
+    """A plain LRC source has no word segments; only its line start can be used (R1-13)."""
+    pre = Line(1080, [Segment("試験が", None, None)])
+    out = merge_presync([OURS], [pre])
+    assert out[0].start_ms == 1080
+    assert [s.start_ms for s in out[0].segments] == [1000, 1400]   # CTC word timing is kept
+    assert out[0].conf == pytest.approx(0.9)
+
+
 def test_refine_monotonic():
     lines = [_line(1000, [("a ", 1000, 1500), ("b", 1000, 1200)]), _line(900, [("c", 900, 2000)])]
     out = refine(lines, 10000)

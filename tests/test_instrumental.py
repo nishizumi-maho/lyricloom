@@ -86,6 +86,20 @@ def test_subtract_rejects_an_unrelated_instrumental(tmp_path):
     assert not instrumental.subtract(mix, ins, tmp_path / "out.wav")["ok"]
 
 
+def test_subtract_streams_in_float32_without_a_whole_file_read(tmp_path, monkeypatch):
+    """R1-27: no sf.read of the complete mix/instrumental and no float64 copy."""
+    secs = 20
+    mix = _write(tmp_path / "mix.wav", _music(secs, seed=3) + _vocals(secs))
+    ins = _write(tmp_path / "inst.wav", _music(secs, seed=3))
+
+    def no_full_read(*args, **kwargs):
+        raise AssertionError("subtract must stream, not sf.read whole files")
+
+    monkeypatch.setattr(instrumental.sf, "read", no_full_read)
+    stats = instrumental.subtract(mix, ins, tmp_path / "out.wav")
+    assert "lag" in stats and Path(tmp_path / "out.wav").exists()
+
+
 def test_separate_feeds_the_subtraction_to_the_separator(tmp_path, monkeypatch):
     library = tmp_path / "Library"
     monkeypatch.setattr(config, "LIBRARY_ROOT", library)

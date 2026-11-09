@@ -34,7 +34,9 @@ def write_lrc(audio: Path, doc: LrcDoc) -> Path:
     return lrc
 
 
-_JAPANESE = re.compile(r"[぀-ヿ一-鿿]")
+# Japanese needs kana.  Han characters alone are also Chinese; script variants are only written
+# when the resolved language is Japanese (R1-03).
+_JAPANESE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
 
 
 def japanese_path(audio: Path) -> Path:
@@ -67,10 +69,17 @@ def to_romaji(doc: LrcDoc) -> LrcDoc:
     return LrcDoc(dict(doc.meta), lines)
 
 
-def write_lyrics(audio: Path, doc: LrcDoc) -> Path:
+def write_lyrics(audio: Path, doc: LrcDoc, lang: str | None = None) -> Path:
     """Writes the .lrc. Japanese lyrics are also kept in both scripts, <song>.japanese.lrc and
-    <song>.romaji.lrc, and the .lrc gets the one chosen in the app (config.japanese_script)."""
-    if not _is_japanese(doc):
+    <song>.romaji.lrc, and the .lrc gets the one chosen in the app (config.japanese_script).
+
+    ``lang`` is the resolved lyric language.  A Chinese or Korean lyric that merely contains Han
+    characters must not get Japanese readings and romaji sidecars (R1-03).  ``None`` falls back to
+    the document's [#language] tag, then to the old character heuristic for hand-written calls."""
+    if lang is None:
+        lang = doc.meta.get("#language")
+    japanese = (lang == "ja") if lang else _is_japanese(doc)
+    if not japanese:
         return write_lrc(audio, doc)
     romaji = to_romaji(doc)
     _replace(japanese_path(audio), doc)
@@ -93,15 +102,19 @@ def apply_script_preference(root: Path) -> int:
             continue                       # not a song's lyric (e.g. a comparison file)
         if not japanese_path(audio).exists():
             doc = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace"))
-            if "#engine" not in doc.meta or not is_ours(doc.meta.get("re")) or not _is_japanese(doc):
+            if (doc.meta.get("#language") not in (None, "ja")
+                    or "#engine" not in doc.meta or not is_ours(doc.meta.get("re"))
+                    or not _is_japanese(doc)):
                 continue                   # not a LyricLoom Japanese lyric
             _replace(japanese_path(audio), doc)
             _replace(romaji_path(audio), to_romaji(doc))
         chosen = (romaji_path if want_romaji else japanese_path)(audio).read_bytes()
         if lrc.read_bytes() != chosen:
+            if lrc.exists():               # never lose a hand-edited main .lrc (R1-35)
+                shutil.copy2(lrc, _backup_path(lrc))
             tmp = lrc.with_name(lrc.name + ".tmp")
             tmp.write_bytes(chosen)
-            os.replace(tmp, lrc)          # derived from the kept files: no backup needed
+            os.replace(tmp, lrc)
             n += 1
     return n
 
