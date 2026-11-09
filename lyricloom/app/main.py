@@ -1,40 +1,48 @@
 """LyricLoom desktop app: library list, processing queue, player with lyrics, simple editor."""
 from __future__ import annotations
 
+import argparse
+import base64
+import logging
 import os
 import re
 import sys
 import threading
 import time
 import traceback
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import mutagen
 
-from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence
+from PySide6.QtCore import QByteArray, QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView,
-                               QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton, QSlider, QSplitter, QTableWidget,
-                               QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
+                               QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSlider, QSplitter,
+                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import cache, config, runner, runtime
 from .. import VERSION
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
+from .details import TrackDetailsDialog, details_text
+from .diagnostics import DiagnosticsDialog, diagnostics_text, open_local_folder, setup_app_logging
 from .dialogs import (ModelsDialog, SettingsDialog, UpdateController, check_for_updates, validate_folder)
+from .ipc import Server as IpcServer
+from .ipc import send as ipc_send
 from .karaoke import KaraokeWindow
 from .model import (STAGE_LABELS, TrackRow, apply_edits, delete_line, delete_word, insert_line, insert_word,
-                    load_cached_rows, merge_with_previous, read_status, scan_cached, track_progress)
+                    load_cached_rows, merge_with_previous, read_status, scan_cached, store_result, track_progress)
+from .paths import expand_audio_paths, validate_audio_file
 
 FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done"]
 STATUS_LABELS = {"cancelled": "Stopped"}
 REVIEW_TINT = QColor(255, 196, 0, 70)
 _TS = re.compile(r"^(\d+):(\d{1,2})(?:[.:](\d{1,3}))?$")
+LOG = logging.getLogger(__name__)
 
 
 def parse_ts(text: str) -> int | None:
@@ -42,6 +50,37 @@ def parse_ts(text: str) -> int | None:
     if not m:
         return None
     return int(m.group(1)) * 60000 + int(m.group(2)) * 1000 + int((m.group(3) or "0").ljust(3, "0")[:3])
+
+
+class _SortItem(QTableWidgetItem):
+    """Table item with a numeric/lexical sort key so Confidence sorts as a number."""
+
+    def __init__(self, text: str, key=None):
+        super().__init__(text)
+        self._key = text if key is None else key
+
+    def __lt__(self, other):
+        a = self._key
+        b = getattr(other, "_key", other.text())
+        try:
+            return float(a) < float(b)
+        except (TypeError, ValueError):
+            return str(a).lower() < str(b).lower()
+
+
+def queue_summary(results: list) -> str:
+    """One line for the status bar, tray notification and summary dialog."""
+    labels = (("done", "done"), ("review", "review"), ("skipped", "skipped"),
+              ("failed", "failed"), ("cancelled", "stopped"))
+    counts = {status: sum(1 for r in results if getattr(r, "status", "") == status)
+              for status, _ in labels}
+    parts = [f"{counts[status]} {label}" for status, label in labels if counts[status]]
+    fallbacks = sum(1 for r in results if getattr(r, "fallback", ""))
+    if fallbacks:
+        parts.append(f"{fallbacks} fallback")
+    if not parts:
+        return "Queue finished: no tracks processed"
+    return "Queue finished: " + ", ".join(parts)
 
 
 class FuncWorker(QObject):
@@ -132,6 +171,11 @@ class QueueWorker(QObject):
                     row.status, row.error = "failed", res.error
                 elif res.status == "cancelled":
                     row.status, row.error = "cancelled", res.error or "Stopped by the user"
+                row.device, row.fallback = res.device, res.fallback
+                try:
+                    row.log_path = str(cache.work_dir(p) / "log.txt")
+                except OSError:
+                    row.log_path = ""
                 self.device.emit(res)
                 self.track_done.emit(row)
                 if res.status == "cancelled":
@@ -147,11 +191,16 @@ class QueueWorker(QObject):
                 except Exception:
                     row = TrackRow(p, "", p.stem, "failed")
                 row.status, row.error = "failed", message
+                try:
+                    row.log_path = str(cache.work_dir(p) / "log.txt")
+                except OSError:
+                    row.log_path = ""
                 self.track_done.emit(row)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, root: Path = None):
+    def __init__(self, root: Path = None, *, server: IpcServer | None = None,
+                 startup: dict | None = None):
         super().__init__()
         self.root = Path(root or config.library_root())
         self.rows: list[TrackRow] = []
@@ -161,6 +210,14 @@ class MainWindow(QMainWindow):
         self._threads: list[tuple[QThread, QObject]] = []
         self._queue: QueueWorker | None = None
         self._queue_error = ""
+        self._queue_results: list = []
+        self._queue_started = 0.0
+        self._external_backlog: list[tuple[list[Path], bool]] = []
+        self._pending_select: Path | None = None
+        self._pending_last_track = config.setting("library/last_track")
+        self._restored_last_track = startup is not None
+        self._notice = ""
+        self._tray: QSystemTrayIcon | None = None
         self._quit_after_queue = False
         self._pending_installer: Path | None = None
         self._cancel_background = threading.Event()
@@ -170,8 +227,10 @@ class MainWindow(QMainWindow):
         self._update_controller = UpdateController(self)
         self.setWindowTitle(config.APP_NAME)
         self.resize(1400, 850)
+        self.setMinimumSize(640, 480)
         self._build()
         self._build_menu()
+        self._restore_ui_state()
         self.player = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_out)
@@ -179,7 +238,25 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self, interval=50, timeout=self._tick)
         self.timer.start()
         self.refresh()
-        QTimer.singleShot(0, self._first_run)
+        self._ipc_server = server
+        if self._ipc_server is None:
+            self._ipc_server = IpcServer(parent=self)
+            if not self._ipc_server.listen():
+                # The caller already tried to reach a running instance; a failed listen here is a
+                # stale name (Linux) or a process that appeared in between.
+                self._ipc_server.remove_stale()
+                self._ipc_server.listen()
+        if self._ipc_server.is_listening:
+            self._ipc_server.received.connect(self._external_message)
+            self._ipc_server.set_ready()
+            self._ipc_available = True
+        else:
+            self._ipc_available = False
+            LOG.warning("single-instance server %s could not listen", self._ipc_server.name)
+        if startup is not None:
+            QTimer.singleShot(0, lambda: self._handle_external(startup))
+        else:
+            QTimer.singleShot(0, self._first_run)
         if config.setting("check_updates", True) and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
             QTimer.singleShot(4000, lambda: check_for_updates(self, silent=True))
 
@@ -196,6 +273,9 @@ class MainWindow(QMainWindow):
         help_menu.addAction(QAction("&Download models…", self, triggered=self.open_models))
         help_menu.addAction(QAction("Check for &updates…", self, triggered=lambda: check_for_updates(self)))
         help_menu.addAction(QAction("Open &data folder", self, triggered=self.open_data_folder))
+        help_menu.addAction(QAction("Open &log folder", self, triggered=self.open_log_folder))
+        help_menu.addSeparator()
+        help_menu.addAction(QAction("&Diagnostics…", self, triggered=self.show_diagnostics))
         help_menu.addSeparator()
         help_menu.addAction(QAction("&About LyricLoom", self, triggered=self.show_about))
 
@@ -248,6 +328,24 @@ class MainWindow(QMainWindow):
             import subprocess
             subprocess.Popen(["xdg-open", str(config.APP_DATA)])
 
+    def open_log_folder(self):
+        open_local_folder(config.LOG_DIR)
+
+    def show_diagnostics(self):
+        DiagnosticsDialog(diagnostics_text(self.root), self).exec()
+
+    def show_details(self):
+        rows = self._selected_rows()
+        if not rows:
+            self.statusBar().showMessage("Select a track to see its details", 4000)
+            return
+        row = rows[0]
+        log = Path(row.log_path) if row.log_path and Path(row.log_path).is_file() else None
+        if log is None:
+            log = self._track_log(row.path)
+        device = self._device_text(row.device) if row.device else ""
+        TrackDetailsDialog(details_text(row, device), log, self).exec()
+
     def show_about(self):
         QMessageBox.about(
             self, f"About {config.APP_NAME}",
@@ -262,6 +360,7 @@ class MainWindow(QMainWindow):
         lv = QVBoxLayout(left)
         lib = QHBoxLayout()
         self.root_label = QLabel()
+        self.root_label.setWordWrap(True)
         self.btn_library = QPushButton("Library…")
         self.btn_settings = QPushButton("Settings…")
         self.btn_key = QPushButton("AssemblyAI key…")
@@ -280,14 +379,30 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.filter = QComboBox()
         self.filter.addItems(FILTERS)
-        self.search = QLineEdit(placeholderText="Search artist / title")
+        self.search = QLineEdit(placeholderText="Search artist / title / status")
         top.addWidget(self.filter)
         top.addWidget(self.search)
         lv.addLayout(top)
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["Artist", "Title", "Status", "Source", "Conf"])
+        self.library_banner = QWidget()
+        banner = QHBoxLayout(self.library_banner)
+        banner.setContentsMargins(0, 0, 0, 0)
+        self.library_banner_label = QLabel()
+        self.library_banner_label.setWordWrap(True)
+        self.library_banner_label.setStyleSheet("color: #8a4b00;")
+        self.btn_choose_library = QPushButton("Choose another folder")
+        self.btn_retry_library = QPushButton("Try again")
+        banner.addWidget(self.library_banner_label, 1)
+        banner.addWidget(self.btn_choose_library)
+        banner.addWidget(self.btn_retry_library)
+        self.library_banner.hide()
+        lv.addWidget(self.library_banner)
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["Artist", "Title", "Status", "Source", "Conf", "Notes"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSortingEnabled(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._table_context_menu)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         lv.addWidget(self.table)
         btns = QHBoxLayout()
@@ -296,6 +411,8 @@ class MainWindow(QMainWindow):
         self.btn_pending = QPushButton("Process pending")
         self.btn_redo = QPushButton("Redo selected")
         self.btn_redo.setToolTip("Delete the word timing of the selected songs and align them again")
+        self.btn_details = QPushButton("Details…")
+        self.btn_details.setToolTip("Show the last result, fallback reason and log for the selected track")
         self.btn_stop = QPushButton("Stop after this song", enabled=False)
         self.btn_stop.setToolTip("Let the current song finish, then stop the queue")
         self.btn_stop_now = QPushButton("Stop now", enabled=False)
@@ -303,7 +420,7 @@ class MainWindow(QMainWindow):
         self.btn_pause = QPushButton("Pause after this song", enabled=False)
         self.btn_pause.setToolTip("Stop before the next song; the current song finishes")
         self.force = QCheckBox("Force")
-        for w in (self.btn_refresh, self.btn_sel, self.btn_pending, self.btn_redo,
+        for w in (self.btn_refresh, self.btn_sel, self.btn_pending, self.btn_redo, self.btn_details,
                   self.btn_stop, self.btn_stop_now, self.btn_pause, self.force):
             btns.addWidget(w)
         lv.addLayout(btns)
@@ -364,6 +481,7 @@ class MainWindow(QMainWindow):
         split.addWidget(left)
         split.addWidget(right)
         split.setSizes([620, 780])
+        self.splitter = split
         self.setCentralWidget(split)
 
         self.filter.currentIndexChanged.connect(self._fill_table)
@@ -373,6 +491,10 @@ class MainWindow(QMainWindow):
         self.btn_library.clicked.connect(self.choose_library)
         self.btn_settings.clicked.connect(self.open_settings)
         self.btn_key.clicked.connect(self.set_api_key)
+        self.btn_choose_library.clicked.connect(self.choose_library)
+        self.btn_retry_library.clicked.connect(self.refresh)
+        self.btn_details.clicked.connect(self.show_details)
+        self.setAcceptDrops(True)
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setMinimumWidth(420)
@@ -437,6 +559,15 @@ class MainWindow(QMainWindow):
         only tracks whose audio or .lrc changed."""
         self.root_label.setText(str(self.root))
         root = self.root
+        if not root.is_dir():
+            # An unplugged drive must not look like a library whose files were deleted.
+            if not self.rows:
+                self.rows = load_cached_rows(root)
+                self._fill_table()
+            self._set_library_available(False, root)
+            self.statusBar().showMessage(f"Library folder is unavailable: {root}", 12000)
+            return
+        self._set_library_available(True)
         if not self.rows:
             self.rows = load_cached_rows(root)
             self._fill_table()
@@ -448,12 +579,40 @@ class MainWindow(QMainWindow):
 
         self._run(FuncWorker(scan), self._scanned, self._scan_failed)
 
+    def _set_library_available(self, available: bool, root: Path | None = None) -> None:
+        self.library_banner.setVisible(not available)
+        if not available:
+            self.library_banner_label.setText(
+                f"Library folder is unavailable:\n{root or self.root}\n"
+                "Reconnect the drive, choose another folder, or try again.")
+
     def _scanned(self, result):
         root, rows, stats = result
         if root != self.root:   # the library was switched while this scan ran
             return
+        previous = {r.path: r for r in self.rows}
+        for row in rows:
+            old = previous.get(row.path)
+            if old is None:
+                continue
+            # Keep the last queue result visible even if the cache could not be written.
+            if not row.error:
+                row.error = old.error
+            if not row.fallback:
+                row.fallback = old.fallback
+            if not row.device:
+                row.device = old.device
+            if not row.log_path:
+                row.log_path = old.log_path
+            if row.status == "pending" and old.status in ("failed", "cancelled"):
+                row.status = old.status
         self.rows = rows
         self._fill_table()
+        if self._pending_select is not None:
+            self._select_pending()
+        elif not self._restored_last_track:
+            self._restored_last_track = True
+            self._restore_last_track()
         message = f"{len(rows)} track" + ("" if len(rows) == 1 else "s")
         unreadable = int(stats.get("unreadable", 0))
         if unreadable:
@@ -462,6 +621,15 @@ class MainWindow(QMainWindow):
 
     def _scan_failed(self, message: str):
         self.statusBar().showMessage("Scan failed: " + message + " — the previous list was kept", 12000)
+
+    def _restore_last_track(self) -> None:
+        if not self._pending_last_track:
+            return
+        try:
+            path = Path(self._pending_last_track)
+        except (TypeError, ValueError):
+            return
+        self._select_path(path, prompt=False)
 
     def set_api_key(self):
         state = "a key is set" if config.ASSEMBLYAI_ENABLED else "no key set: AssemblyAI is off"
@@ -501,6 +669,7 @@ class MainWindow(QMainWindow):
             self._show_io_error("Save the library setting", config.SETTINGS_FILE, exc)
             return
         self.rows = []
+        self._restored_last_track = True
         self.refresh()
 
     def _show_io_error(self, action: str, path: Path, exc: OSError) -> None:
@@ -512,33 +681,386 @@ class MainWindow(QMainWindow):
     def _visible_rows(self) -> list[TrackRow]:
         f = FILTERS[self.filter.currentIndex()].lower()
         q = self.search.text().lower()
-        return [r for r in self.rows if (f == "all" or r.status == f) and (q in r.artist.lower() or q in r.title.lower())]
+        rows = []
+        for r in self.rows:
+            status = STATUS_LABELS.get(r.status, r.status)
+            if (f == "all" or r.status == f) and (q in r.artist.lower() or q in r.title.lower()
+                                                  or q in status.lower() or q in r.status.lower()):
+                rows.append(r)
+        return rows
 
     def _fill_table(self):
         rows = self._visible_rows()
+        header = self.table.horizontalHeader()
+        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            for j, v in enumerate([r.artist, r.title, STATUS_LABELS.get(r.status, r.status),
-                                   r.source, f"{r.conf:.2f}" if r.source else ""]):
-                item = QTableWidgetItem(v)
+            status = STATUS_LABELS.get(r.status, r.status)
+            notes = "⚠ fallback" if r.fallback else ("⚠ error" if r.error else "")
+            values = [r.artist, r.title, status, r.source, f"{r.conf:.2f}" if r.source else "", notes]
+            keys = [r.artist.lower(), r.title.lower(), status.lower(), r.source.lower(),
+                    r.conf if r.source else -1.0, notes]
+            tips = []
+            if r.error:
+                tips.append("Error:\n" + r.error)
+            if r.fallback:
+                tips.append("Fallback:\n" + r.fallback)
+            if r.device:
+                tips.append("Device: " + self._device_text(r.device))
+            if r.log_path:
+                tips.append("Log: " + r.log_path)
+            for j, (v, key) in enumerate(zip(values, keys)):
+                item = _SortItem(v, key)
                 item.setData(Qt.UserRole, str(r.path))
                 if r.status == "review":
                     item.setBackground(REVIEW_TINT)
-                if r.error:
-                    item.setToolTip(r.error)
+                if tips:
+                    item.setToolTip("\n\n".join(tips))
                 self.table.setItem(i, j, item)
+        self.table.setSortingEnabled(True)
+        if 0 <= sort_column < self.table.columnCount():
+            self.table.sortItems(sort_column, sort_order)
 
     def _selected_rows(self) -> list[TrackRow]:
         paths = {self.table.item(i.row(), 0).data(Qt.UserRole) for i in self.table.selectionModel().selectedRows()}
         return [r for r in self.rows if str(r.path) in paths]
 
     def _update_row(self, row: TrackRow):
-        self.rows = [row if r.path == row.path else r for r in self.rows]
+        for i, r in enumerate(self.rows):
+            if r.path == row.path:
+                self.rows[i] = row
+                break
+        else:
+            self.rows.append(row)
         self._fill_table()
+
+    def _ensure_rows(self, paths: list[Path]) -> None:
+        """Adds rows for files that are not in the current scan (e.g. --process outside the library)."""
+        known = {r.path for r in self.rows}
+        added = False
+        for path in paths:
+            if path in known:
+                continue
+            try:
+                row = read_status(path)
+            except Exception as exc:  # noqa: BLE001 - a transient row must not break the window
+                row = TrackRow(path, path.parent.name, path.stem, "pending",
+                               error=f"could not read this file: {type(exc).__name__}: {exc}")
+            self.rows.append(row)
+            known.add(path)
+            added = True
+        if added:
+            self._fill_table()
+
+    def _select_path(self, path: Path, *, prompt: bool = True) -> bool:
+        try:
+            wanted = str(Path(path).resolve())
+        except (OSError, RuntimeError):
+            wanted = str(path)
+        for i in range(self.table.rowCount()):
+            item = self.table.item(i, 0)
+            if item is None:
+                continue
+            try:
+                value = str(Path(item.data(Qt.UserRole)).resolve())
+            except (OSError, RuntimeError):
+                value = str(item.data(Qt.UserRole))
+            if value == wanted:
+                if prompt and not self._confirm_discard():
+                    return False
+                self.table.selectRow(i)
+                return True
+        return False
+
+    def _select_pending(self) -> None:
+        path, self._pending_select = self._pending_select, None
+        if path is None:
+            return
+        self._restored_last_track = True   # an explicit command wins over the remembered track
+        # A filter or search must not hide the song the user or another program asked to see.
+        if self.filter.currentIndex() != 0:
+            self.filter.setCurrentIndex(0)
+        if self.search.text():
+            self.search.clear()
+        if not self._select_path(path):
+            self._ensure_rows([path])
+            self._select_path(path)
+
+    # ---------- external commands and drag-and-drop ----------
+    @Slot(object)
+    def _external_message(self, message: dict) -> None:
+        self._handle_external(message)
+
+    def _handle_external(self, message: dict) -> None:
+        command = message.get("cmd")
+        if command == "process":
+            rejected = list(message.get("rejected") or [])
+            paths = [Path(p) for p in message.get("paths", [])]
+            report = self._report_rejected(rejected) if rejected else None
+            if paths:
+                self.enqueue_external(paths, bool(message.get("redo")),
+                                      announce=message.get("source") == "ipc")
+                if report:
+                    self.statusBar().showMessage(report, 15000)
+            elif rejected and message.get("source") == "ipc":
+                self._flash_notice(f"Ignored {len(rejected)} path(s)", detail=report)
+            return
+        if command == "open":
+            self.open_external(Path(message["path"]))
+            return
+        if command == "activate":
+            self._bring_to_front()
+            return
+        if command == "report":
+            rejected = list(message.get("rejected") or [])
+            self._report_rejected(rejected)
+            if rejected and message.get("source") == "ipc":
+                self._flash_notice(f"Ignored {len(rejected)} path(s)")
+
+    def _report_rejected(self, rejected: list[str]) -> str | None:
+        if not rejected:
+            return None
+        shown = "; ".join(rejected[:3])
+        more = f"; and {len(rejected) - 3} more" if len(rejected) > 3 else ""
+        message = f"Ignored {len(rejected)} path(s): {shown}{more}"
+        self.statusBar().showMessage(message, 15000)
+        LOG.warning("%s", message)
+        return message
+
+    def enqueue_external(self, paths: list[Path], redo: bool = False, *, announce: bool = False) -> None:
+        paths = [Path(p) for p in paths]
+        if not paths:
+            return
+        if announce:
+            self._flash_notice(f"{len(paths)} file(s) queued from another program")
+        self._ensure_rows(paths)
+        if self.audio is None:
+            self._pending_select = paths[0]
+            self._select_pending()
+        if self._queue is not None:
+            self._external_backlog.append((paths, redo))
+            self.statusBar().showMessage(
+                f"{len(paths)} track(s) queued; they start when the current queue ends", 8000)
+            return
+        if not self.process(paths, redo=redo):
+            self.statusBar().showMessage("Could not start the queued track(s)", 8000)
+
+    def open_external(self, path: Path) -> None:
+        path = Path(path).resolve()
+        self._bring_to_front()
+        try:
+            inside = path.is_relative_to(self.root.resolve())
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        if not inside:
+            self.root = path.parent
+            try:
+                config.set_library_root(self.root)
+            except OSError as exc:
+                self._show_io_error("Save the library setting", config.SETTINGS_FILE, exc)
+            self.rows = []
+            self._pending_select = path
+            self.refresh()
+            self.statusBar().showMessage(f"Showing {path.name} from {self.root}", 8000)
+            return
+        self._ensure_rows([path])
+        self._pending_select = path
+        self._select_pending()
+        self.statusBar().showMessage(f"Showing {path.name}", 5000)
+
+    def _bring_to_front(self) -> None:
+        if self.isMinimized():
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _flash_notice(self, message: str, detail: str | None = None) -> None:
+        self._notice = message
+        self._refresh_title()
+        self.statusBar().showMessage(detail or message, 10000)
+        QApplication.alert(self, 0)
+        QTimer.singleShot(15000, self._clear_notice)
+
+    def _clear_notice(self) -> None:
+        self._notice = ""
+        try:
+            self._refresh_title()
+        except RuntimeError:
+            pass
+
+    def _notify(self, title: str, message: str) -> None:
+        """Tray notification plus taskbar flash for a queue that ended out of sight."""
+        self.statusBar().showMessage(message, 15000)
+        if not config.setting("notify_queue_finished", True):
+            return
+        QApplication.alert(self, 0)
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self._tray is None:
+            icon = self.windowIcon()
+            if icon.isNull():
+                icon = QApplication.windowIcon()
+            self._tray = QSystemTrayIcon(icon, self)
+            self._tray.messageClicked.connect(self._bring_to_front)
+        self._tray.show()
+        self._tray.showMessage(title, message, QSystemTrayIcon.Information, 10000)
+        QTimer.singleShot(12000, self._hide_tray)
+
+    def _hide_tray(self) -> None:
+        if self._tray is not None:
+            try:
+                self._tray.hide()
+                self._tray.deleteLater()
+            except RuntimeError:
+                pass
+            self._tray = None
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(u.isLocalFile() for u in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.drop_paths(paths)
+
+    def drop_paths(self, paths) -> None:
+        accepted, rejected = expand_audio_paths(paths)
+        self._report_rejected(rejected)
+        if accepted:
+            self.enqueue_external(accepted)
+
+    def _table_context_menu(self, pos) -> None:
+        row_index = self.table.rowAt(pos.y())
+        if row_index < 0:
+            return
+        item = self.table.item(row_index, 0)
+        if item is None:
+            return
+        path = Path(item.data(Qt.UserRole))
+        row = next((r for r in self.rows if r.path == path), None)
+        if row is None:
+            return
+        menu = QMenu(self)
+        act_process = menu.addAction("Process")
+        act_redo = menu.addAction("Redo word timing")
+        act_details = menu.addAction("Details…")
+        menu.addSeparator()
+        act_folder = menu.addAction("Open folder")
+        act_copy = menu.addAction("Copy path")
+        act_log = menu.addAction("Open log")
+        chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if chosen is act_process:
+            self.process([path])
+        elif chosen is act_redo:
+            self._redo_paths([path])
+        elif chosen is act_details:
+            self.table.selectRow(row_index)
+            self.show_details()
+        elif chosen is act_folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        elif chosen is act_copy:
+            QApplication.clipboard().setText(str(path))
+            self.statusBar().showMessage("Path copied", 3000)
+        elif chosen is act_log:
+            self._open_track_log(row)
+
+    def _track_log(self, path: Path) -> Path | None:
+        try:
+            return cache.work_dir(path) / "log.txt"
+        except OSError:
+            return None
+
+    def _open_track_log(self, row: TrackRow) -> None:
+        log = Path(row.log_path) if row.log_path else self._track_log(row.path)
+        if log is not None and log.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(log)))
+        else:
+            QMessageBox.information(self, "Track log", "There is no log for this track yet.")
+
+    # ---------- window state ----------
+    def _restore_ui_state(self) -> None:
+        geometry = config.setting("window/geometry")
+        if isinstance(geometry, str) and geometry:
+            try:
+                self.restoreGeometry(QByteArray.fromBase64(geometry.encode("ascii")))
+            except (TypeError, ValueError):
+                pass
+        state = config.setting("window/state")
+        if isinstance(state, str) and state:
+            try:
+                self.restoreState(QByteArray.fromBase64(state.encode("ascii")))
+            except (TypeError, ValueError):
+                pass
+        sizes = config.setting("splitter")
+        if isinstance(sizes, list) and len(sizes) == 2:
+            try:
+                self.splitter.setSizes([max(0, int(x)) for x in sizes])
+            except (TypeError, ValueError):
+                pass
+        columns = config.setting("table/columns")
+        if isinstance(columns, list):
+            for i, width in enumerate(columns[:self.table.columnCount()]):
+                if i == 1:   # the title column stays stretched
+                    continue
+                try:
+                    self.table.setColumnWidth(i, max(24, int(width)))
+                except (TypeError, ValueError):
+                    pass
+        self._clamp_to_screen()
+
+    def _clamp_to_screen(self) -> None:
+        screen = QGuiApplication.screenAt(self.frameGeometry().center()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        max_width = max(320, int(available.width() * 0.9))
+        max_height = max(240, int(available.height() * 0.9))
+        if self.minimumWidth() > max_width or self.minimumHeight() > max_height:
+            # A very small screen or a scaled remote desktop: keep the window usable and on-screen.
+            self.setMinimumSize(min(self.minimumWidth(), max_width), min(self.minimumHeight(), max_height))
+        width = min(self.width(), max_width)
+        height = min(self.height(), max_height)
+        if (width, height) != (self.width(), self.height()):
+            self.resize(width, height)
+        x = min(max(self.x(), available.left()), max(available.left(), available.right() - self.width() + 1))
+        y = min(max(self.y(), available.top()), max(available.top(), available.bottom() - self.height() + 1))
+        self.move(x, y)
+
+    def _save_ui_state(self) -> None:
+        values = {
+            "window/geometry": base64.b64encode(bytes(self.saveGeometry())).decode("ascii"),
+            "window/state": base64.b64encode(bytes(self.saveState())).decode("ascii"),
+            "splitter": self.splitter.sizes(),
+            "table/columns": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
+        }
+        if self.audio is not None:
+            values["library/last_track"] = str(self.audio)
+        try:
+            config.update_settings(values)
+        except OSError as exc:
+            LOG.warning("could not save window state: %s", exc)
+
+    def _refresh_title(self) -> None:
+        title = config.APP_NAME
+        if self._notice:
+            title = f"{config.APP_NAME} — {self._notice}"
+        if self.dirty:
+            title += " *"
+        self.setWindowTitle(title)
 
     # ---------- processing ----------
     def redo_selected(self):
-        paths = [r.path for r in self._selected_rows()]
+        self._redo_paths([r.path for r in self._selected_rows()])
+
+    def _redo_paths(self, paths: list[Path]):
         if not paths or self._queue is not None:
             return
         names = "\n".join(f"  {p.stem}" for p in paths[:8]) + ("\n  …" if len(paths) > 8 else "")
@@ -605,15 +1127,17 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
-    def process(self, paths: list[Path], redo: bool = False):
+    def process(self, paths: list[Path], redo: bool = False) -> bool:
         if not paths or self._queue is not None:
-            return
+            return False
         paths = self._confirm_open_track(paths, redo)
         if not paths:
-            return
+            return False
         if not self._validate_folders():
-            return
+            return False
         self._queue_error = ""
+        self._queue_results = []
+        self._queue_started = time.monotonic()
         self._queue = QueueWorker(paths, self.force.isChecked(), redo)
         self._prog = {"done": 0, "total": len(paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
@@ -632,6 +1156,7 @@ class MainWindow(QMainWindow):
         self.progress.show()
         self.prog_timer.start()
         self._run(q)
+        return True
 
     def _track_started(self, path: str):
         p = Path(path)
@@ -653,6 +1178,8 @@ class MainWindow(QMainWindow):
             return f"Device: ROCm (WSL {config.SEPARATOR_WSL_DISTRO})"
         if device == "cuda":
             return "Device: CUDA"
+        if device == "dml":
+            return "Device: DirectML"
         if device == "cpu":
             return "Device: CPU (fallback)"
         if device == "kept":
@@ -662,6 +1189,7 @@ class MainWindow(QMainWindow):
 
     def _device_changed(self, res):
         """Shows where the last song was separated, so a silent CPU fallback is visible."""
+        self._queue_results.append(res)
         if not res.device:
             return
         self.gpu.setText(self._device_text(res.device))
@@ -672,9 +1200,11 @@ class MainWindow(QMainWindow):
             if failed else self._gpu_tip)
 
     def _track_finished(self, row: TrackRow):
-        self._prog["done"] += 1
-        self._prog["since"] = time.monotonic()
+        if self._prog is not None:
+            self._prog["done"] += 1
+            self._prog["since"] = time.monotonic()
         self._update_row(row)
+        store_result(self.root, row)
         self._reload_if_current(row.path)
 
     def _update_progress(self):
@@ -714,23 +1244,49 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Queue error: " + message, 12000)
 
     def _queue_finished(self):
+        results = self._queue_results
+        elapsed = time.monotonic() - self._queue_started if self._queue_started else 0.0
+        total = int(self._prog.get("total", 0)) if self._prog else 0
+        long_queue = total > 1 or len(results) > 1 or elapsed >= 60
+        summary = queue_summary(results)
         cancelled = bool(self._prog and self._prog.get("done", 0) < self._prog.get("total", 0))
         self._queue = None
         self._prog = None
+        self._queue_results = []
+        self._queue_started = 0.0
         self.prog_timer.stop()
         self.progress.hide()
         self.btn_stop.setEnabled(False)
         self.btn_stop_now.setEnabled(False)
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("Pause after this song")
+
+        if self._external_backlog and self._pending_installer is None and not self._quit_after_queue:
+            paths, redo = self._external_backlog.pop(0)
+            self.statusBar().showMessage(
+                f"Starting the next queued batch ({len(paths)} track(s)) …", 5000)
+            if not self.process(paths, redo=redo):
+                self.statusBar().showMessage("Could not start the next queued batch", 8000)
+            return
+
         if self._queue_error:
             self.statusBar().showMessage("Queue finished with an error: " + self._queue_error, 12000)
-            QMessageBox.warning(self, "Queue error", self._queue_error)
+            LOG.warning("queue error: %s", self._queue_error)
+            if self.isActiveWindow():
+                QMessageBox.warning(self, "Queue error", self._queue_error)
+            else:
+                self._notify("Queue error", self._queue_error)
             self._queue_error = ""
         elif cancelled:
-            self.statusBar().showMessage("Queue stopped", 6000)
+            self.statusBar().showMessage(summary if results else "Queue stopped", 8000)
+        elif long_queue:
+            self.statusBar().showMessage(summary, 10000)
+            if self.isActiveWindow():
+                QMessageBox.information(self, "Queue finished", summary)
+            else:
+                self._notify("Queue finished", summary)
         else:
-            self.statusBar().showMessage("Queue finished", 5000)
+            self.statusBar().showMessage(summary if results else "Queue finished", 6000)
         if self._pending_installer is not None:
             QTimer.singleShot(0, self._install_pending_update)
         elif self._quit_after_queue:
@@ -1014,7 +1570,7 @@ class MainWindow(QMainWindow):
 
     def _set_dirty(self, dirty: bool):
         self.dirty = dirty
-        self.setWindowTitle(config.APP_NAME + (" *" if dirty else ""))
+        self._refresh_title()
 
     def _confirm_discard(self) -> bool:
         if not self.dirty:
@@ -1110,18 +1666,60 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Stopping after the current song; LyricLoom will close …")
             e.ignore()
             return
+        self._save_ui_state()
+        if self._ipc_server is not None:
+            self._ipc_server.close()
         self._stop_threads()
         super().closeEvent(e)
 
 
-def run():
-    if len(sys.argv) >= 3 and sys.argv[1] == "--worker":
+@dataclass
+class CommandLine:
+    process: list[str] = field(default_factory=list)
+    open_file: str | None = None
+    redo: bool = False
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=config.APP_NAME,
+        description="LyricLoom desktop app. With no arguments the library window opens.")
+    parser.add_argument("--process", nargs="+", action="append", metavar="FILE",
+                        help="queue one or more audio files (or folders) and start processing")
+    parser.add_argument("--open", dest="open_file", metavar="FILE",
+                        help="select one audio file in the library without processing it")
+    parser.add_argument("--redo", action="store_true",
+                        help="with --process, redo the word timing instead of the normal run")
+    return parser
+
+
+def parse_command_line(argv: list[str]) -> CommandLine:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.redo and not args.process:
+        parser.error("--redo is only valid together with --process")
+    if args.open_file and (args.process or args.redo):
+        parser.error("--open cannot be combined with --process or --redo")
+    process = [path for group in (args.process or []) for path in group]
+    return CommandLine(process=process, open_file=args.open_file, redo=bool(args.redo))
+
+
+def run(argv: list[str] | None = None):
+    argv = list(sys.argv if argv is None else argv)
+    if len(argv) >= 2 and argv[0] == "--worker":
         from ..workers.launcher import run as run_worker
 
-        run_worker(sys.argv[2])
+        run_worker(argv[1])
         return
+    if len(argv) >= 3 and argv[1] == "--worker":
+        from ..workers.launcher import run as run_worker
+
+        run_worker(argv[2])
+        return
+    has_program = bool(argv) and not argv[0].startswith("-")
+    cli = parse_command_line(argv[1:] if has_program else argv)
     config.migrate_legacy_settings()
-    app = QApplication(sys.argv)
+    app = QApplication(argv if has_program else [config.APP_NAME, *argv])
     app.setApplicationName(config.APP_NAME)
     app.setApplicationDisplayName(config.APP_NAME)
     app.setOrganizationName(config.APP_NAME)
@@ -1129,7 +1727,44 @@ def run():
     icon = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
     if icon.is_file():
         app.setWindowIcon(QIcon(str(icon)))
-    w = MainWindow()
+    setup_app_logging()
+
+    # A running instance owns the window. Hand over the command and exit without creating one;
+    # a process request from MusicBee must not steal focus.
+    if cli.process:
+        command = {"cmd": "process", "paths": cli.process, "redo": cli.redo}
+    elif cli.open_file:
+        command = {"cmd": "open", "path": cli.open_file}
+    else:
+        command = {"cmd": "activate"}
+    if ipc_send(command) is not None:
+        sys.exit(0)
+
+    startup = None
+    if cli.process:
+        accepted, rejected = expand_audio_paths(cli.process)
+        startup = {"cmd": "process", "paths": accepted, "rejected": rejected, "redo": cli.redo}
+    elif cli.open_file:
+        opened, error = validate_audio_file(cli.open_file)
+        startup = ({"cmd": "open", "path": opened} if opened is not None
+                   else {"cmd": "report", "rejected": [error or f"{cli.open_file}: invalid path"]})
+
+    server = IpcServer()
+    if not server.listen():
+        # A crashed process can leave the name behind on Linux; only remove it after nobody
+        # answered above.
+        server.remove_stale()
+        if not server.listen():
+            LOG.warning("single-instance server %s could not listen", server.name)
+    if server.is_listening:
+        server.hold()   # buffer a command that arrives while MainWindow is built
+    w = MainWindow(server=server, startup=startup)
+    if not w._ipc_available:
+        # Another process won the start race after our first attempt: forward and use its window.
+        if ipc_send(command) is not None:
+            w.dirty = False
+            w.close()
+            sys.exit(0)
     w.show()
     code = app.exec()
     w.finish_shutdown()
