@@ -103,6 +103,36 @@ def test_download_refuses_a_wrong_checksum(tmp_path, monkeypatch):
     assert not (tmp_path / "updates" / "LyricLoom-Setup.exe.part").exists()
 
 
+def test_download_does_not_reuse_a_predictable_part_name(tmp_path, monkeypatch):
+    updates = tmp_path / "updates"
+    updates.mkdir()
+    planted = updates / "LyricLoom-Setup.exe.part"
+    planted.write_bytes(b"planted earlier")
+    monkeypatch.setattr(updater, "UPDATE_DIR", updates)
+    monkeypatch.setattr(updater, "_client", _mock_client(lambda request: httpx.Response(200, content=PAYLOAD)))
+    path = updater.download(_info())
+    assert path.read_bytes() == PAYLOAD
+    assert planted.read_bytes() == b"planted earlier"
+    assert sorted(p.name for p in updates.iterdir()) == ["LyricLoom-Setup.exe", "LyricLoom-Setup.exe.part"]
+
+
+def test_download_does_not_follow_a_planted_part_symlink(tmp_path, monkeypatch):
+    updates = tmp_path / "updates"
+    updates.mkdir()
+    victim = tmp_path / "victim.bin"
+    victim.write_bytes(b"do not touch")
+    planted = updates / "LyricLoom-Setup.exe.part"
+    try:
+        planted.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available here")
+    monkeypatch.setattr(updater, "UPDATE_DIR", updates)
+    monkeypatch.setattr(updater, "_client", _mock_client(lambda request: httpx.Response(200, content=PAYLOAD)))
+    path = updater.download(_info())
+    assert path.read_bytes() == PAYLOAD
+    assert victim.read_bytes() == b"do not touch"
+
+
 def test_download_accepts_a_matching_published_checksum(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "UPDATE_DIR", tmp_path / "updates")
     monkeypatch.setattr(updater, "_client", _mock_client(lambda request: httpx.Response(200, content=PAYLOAD)))
