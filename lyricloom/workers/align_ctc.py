@@ -103,7 +103,7 @@ def main() -> None:
     if not model_path.is_file():
         raise SystemExit(
             f"the alignment model is missing: {model_path}. Run `lyricloom models download "
-            "align-mms-fa` or open Help > Download models.")
+            "align-mms-fa` or open Help > Models.")
     bundle = torchaudio.pipelines.MMS_FA
     model = _load_model(bundle, model_path, torch_home).to(device)
     wave = _load(p["wav"], device)

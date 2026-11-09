@@ -224,7 +224,7 @@ The separator checkpoint is passed from the Windows models folder and read throu
 %LOCALAPPDATA%\LyricLoom\models\separator\vocals_mel_band_roformer.ckpt
 ```
 
-Download it with the Windows app's model dialog, or from a source/pipx install with:
+Download it with the Windows app's Models window (Help > Models), or from a source/pipx install with:
 
 ```powershell
 lyricloom models download separator
@@ -275,7 +275,7 @@ sudo cp /mnt/c/Users/YOUR_USER/AppData/Local/LyricLoom/models/mtl/checkpoints/ch
 sudo chown -R "$USER":"$USER" /opt/lyricloom/mtl /opt/lyricloom/models/mtl
 ```
 
-If you do not have the Windows checkpoint yet, download it with the model dialog, or from a source/pipx install with:
+If you do not have the Windows checkpoint yet, download it with the Models window, or from a source/pipx install with:
 
 ```powershell
 lyricloom models download mtl
@@ -358,7 +358,7 @@ From Windows, in a source or pipx install:
 lyricloom doctor
 ```
 
-The packaged GUI is a windowed application and does not expose the console command in 2.0.0. If you use it, the status bar and the direct WSL test below are the verification; the model dialog handles the Windows-side models.
+The packaged GUI is a windowed application and does not expose the console command in 2.0.0. If you use it, the status bar and the direct WSL test below are the verification; the Models window handles the Windows-side models.
 
 Expected with `wsl_gpu` enabled:
 

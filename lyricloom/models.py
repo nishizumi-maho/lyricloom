@@ -481,7 +481,7 @@ class MissingModels(RuntimeError):
         ids = " ".join(s.id for s in self.models)
         super().__init__(
             f"missing models: {details}. The song was not processed, and no model was downloaded. "
-            f"Run `lyricloom models download {ids}` or open Help > Download models, then retry.")
+            f"Run `lyricloom models download {ids}` or open Help > Models, then retry.")
 
 
 def _human_size(n: int) -> str:
@@ -635,6 +635,11 @@ def download(spec: ModelSpec, progress=None, cancel=None, root: Path | None = No
                 f"{spec.id} is a custom local model; it cannot be downloaded. "
                 "Choose its file with `lyricloom models add` instead.")
         written.append(downloads.download_verified(file, dest, progress=progress, cancel=cancel))
+        if file.sha256:
+            try:
+                _write_sidecar(dest, dest.stat(), file.sha256)
+            except OSError:
+                pass   # the fast path is lost; the next status check hashes the verified file
         if file.extract:
             _extract_zip(dest, root)
     return written
@@ -684,6 +689,44 @@ def _read_choices() -> dict:
 def _write_choices(choices: dict) -> None:
     from . import config
     config.set_setting("model_choices", choices)
+
+
+def clear(stage: str, lang: str | None = None) -> bool:
+    """Removes a default or language choice so resolution falls back to the next level.
+
+    Returns True when a choice was removed.  The catalog default is never written, so an empty
+    setting and a missing key mean the same thing.
+    """
+    if stage not in STAGES:
+        raise ValueError(f"unknown model stage {stage!r}")
+    choices = _read_choices()
+    removed = False
+    if lang:
+        languages = dict(choices.get("languages") or {})
+        entry = dict(languages.get(lang) or {})
+        if stage in entry:
+            entry.pop(stage)
+            removed = True
+            if entry:
+                languages[lang] = entry
+            else:
+                languages.pop(lang, None)
+            if languages:
+                choices["languages"] = languages
+            else:
+                choices.pop("languages", None)
+    else:
+        default_map = dict(choices.get("default") or {})
+        if stage in default_map:
+            default_map.pop(stage)
+            removed = True
+            if default_map:
+                choices["default"] = default_map
+            else:
+                choices.pop("default", None)
+    if removed:
+        _write_choices(choices)
+    return removed
 
 
 def use(stage: str, model_id: str, lang: str | None = None) -> None:
@@ -785,6 +828,44 @@ def add(stage: str, source: str, label: str | None = None, root: Path | None = N
     choices["custom"] = custom
     _write_choices(choices)
     return spec
+
+
+def remove(model_id: str) -> None:
+    """Removes a custom model's registration and every choice that pointed at it.
+
+    The model's files are never deleted: a custom model is the user's own file, and this action only
+    forgets how LyricLoom found it.  Catalog models cannot be removed.
+    """
+    spec = find(model_id)
+    if spec is None:
+        raise ValueError(f"unknown model {model_id!r}")
+    if not spec.custom:
+        raise ValueError(f"{model_id!r} is a catalog model; only custom models can be removed")
+    choices = _read_choices()
+    custom = [raw for raw in choices.get("custom") or []
+              if not (isinstance(raw, dict) and str(raw.get("id")) == model_id)]
+    if custom:
+        choices["custom"] = custom
+    else:
+        choices.pop("custom", None)
+    default_map = {stage: model for stage, model in (choices.get("default") or {}).items()
+                   if model != model_id}
+    if default_map:
+        choices["default"] = default_map
+    else:
+        choices.pop("default", None)
+    languages = {}
+    for lang, entry in (choices.get("languages") or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        kept = {stage: model for stage, model in entry.items() if model != model_id}
+        if kept:
+            languages[lang] = kept
+    if languages:
+        choices["languages"] = languages
+    else:
+        choices.pop("languages", None)
+    _write_choices(choices)
 
 
 def _local_file(path: Path) -> ModelFile:

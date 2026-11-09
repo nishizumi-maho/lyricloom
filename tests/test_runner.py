@@ -437,4 +437,5 @@ def test_a_missing_model_fails_the_track_before_the_stage_runs(tmp_path, monkeyp
     assert "missing models" in res.error
     assert "separator-mel-band-roformer" in res.error
     assert "lyricloom models download" in res.error
+    assert [spec.id for spec in res.missing] == ["separator-mel-band-roformer"]
     assert called == []

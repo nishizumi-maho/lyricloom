@@ -46,6 +46,7 @@ class TrackResult:
     fallback: str = ""  # why the WSL/ROCm separation failed, when it ran on the CPU instead
     models: dict[str, str] = field(default_factory=dict)  # stage -> model id used for this track
     cloud: bool = False  # the isolated vocal was uploaded to AssemblyAI for this track
+    missing: list = field(default_factory=list)  # models.MissingModels raised before a heavy stage
 
 
 def _lines_from_json(data) -> list[Line] | None:
@@ -284,7 +285,7 @@ def realign(audio: Path, text: str, source: str = "manual",
         return TrackResult(audio, "cancelled", error="Stopped by the user")
     except model_catalog.MissingModels as e:
         _log(audio, f"realign failed: {e}")
-        return TrackResult(audio, "failed", error=str(e))
+        return TrackResult(audio, "failed", error=str(e), missing=list(e.models))
     except Exception as e:  # noqa: BLE001 - reported to the app, never raised into the UI
         _log(audio, "realign failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"))
@@ -421,7 +422,7 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         return TrackResult(audio, "cancelled", error="Stopped by the user", cloud=uploaded)
     except model_catalog.MissingModels as e:
         _log(audio, f"missing models: {e}")
-        return TrackResult(audio, "failed", error=str(e), cloud=uploaded)
+        return TrackResult(audio, "failed", error=str(e), cloud=uploaded, missing=list(e.models))
     except Exception as e:  # noqa: BLE001 - one broken track must not stop a folder run
         _log(audio, "failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"),
