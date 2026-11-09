@@ -1,6 +1,6 @@
 # Install LyricLoom on Windows
 
-LyricLoom 2.0.0 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the application, the worker and `whisper-cli`; you do not need Python, CUDA, or a separate Whisper installation. The large models are downloaded on first use (or from **Help > Download models**).
+LyricLoom 2.0.0 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the application, the worker and `whisper-cli`; you do not need Python, CUDA, or a separate Whisper installation. The large models are downloaded on first use (or from **Help > Models**).
 
 There are two ways to run it:
 
@@ -83,7 +83,7 @@ Use the launcher every time. If you move the folder, move `LyricLoomData` with i
 
 ### Models on first run
 
-The Windows installer deliberately does **not** include the large models. On first launch, LyricLoom checks for them and opens a model dialog that lists what is missing. Accept the downloads and keep the app open; the total is about 5.3 GB. The files go to `%LOCALAPPDATA%\LyricLoom\models`.
+The Windows installer deliberately does **not** include the large models. On first launch, LyricLoom checks for them and opens the Models window (Help > Models) that lists what is missing. Accept the downloads and keep the app open; the total is about 5.3 GB. The files go to `%LOCALAPPDATA%\LyricLoom\models`.
 
 You can defer a model and fetch it later from the same dialog. The app cannot process a song until the models that stage needs are present.
 
@@ -235,7 +235,7 @@ If you used a custom `LYRICLOOM_DATA_DIR` or `LYRICLOOM_MODELS`, delete those fo
 ## Common first-run problems
 
 - **The library is empty.** Check that the folder contains one of the supported audio extensions and that you selected the folder itself, not a parent with no audio. Click **Refresh**.
-- **Every track fails with a model error.** The models are missing. Reopen the model dialog and download them. See [docs/models.md](models.md).
+- **Every track fails with a model error.** The models are missing. Reopen Help > Models and download them. See [docs/models.md](models.md).
 - **Separation is extremely slow.** You are on the CPU. That is expected. See [GPU options](../README.md#gpu-options) and, for AMD, [docs/wsl-rocm.md](wsl-rocm.md).
 - **SmartScreen or antivirus blocks the app.** Verify the download hash, then allow the file. Do not turn off real-time protection permanently.
 - **Lyrics cannot be written.** The music folder is read-only, controlled by antivirus "Controlled folder access", or on a locked network/cloud location. Choose a local writable library.

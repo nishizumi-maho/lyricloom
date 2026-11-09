@@ -13,6 +13,7 @@ from pathlib import Path
 import mutagen
 
 from .. import config
+from .. import models as model_catalog
 from ..align.refine import refine
 from ..brand import is_ours
 from ..lrc import parse_lrc
@@ -34,7 +35,73 @@ class TrackRow:
     device: str = ""       # where the vocals were separated: rocm, cuda, dml, cpu or kept
     fallback: str = ""     # why the WSL/ROCm separation ran on the CPU instead
     log_path: str = ""     # this track's log.txt, kept so Refresh and Details can find it
+    models: dict[str, str] = field(default_factory=dict)  # [#models:] tag: stage -> model id
     notes: list[str] = field(default_factory=list)  # warnings written in [#warning:...] (R1-09)
+
+
+MODEL_STAGE_LABELS = {"transcribe": "Transcription", "separate": "Vocal separation",
+                      "align": "Alignment", "singing": "Singing model"}
+
+
+def parse_models_tag(raw: str) -> dict[str, str]:
+    """The ``[#models:stage=id;...]`` tag as a dict, ignoring unknown or malformed pairs."""
+    out: dict[str, str] = {}
+    for part in str(raw or "").split(";"):
+        stage, sep, model_id = part.partition("=")
+        stage, model_id = stage.strip(), model_id.strip()
+        if sep and stage in model_catalog.STAGES and model_id:
+            out[stage] = model_id
+    return out
+
+
+def current_model_ids() -> dict[str, set[str]]:
+    """Every model id the current choices can resolve for each stage.
+
+    The default choice plus every language override, because the .lrc tag does not record the
+    language: a song made with a language-specific model is not "made with other models".
+    """
+    choices = config.model_choices()
+    ids = {stage: {model_catalog.resolve(stage, choices=choices).id}
+           for stage in model_catalog.STAGES}
+    languages = choices.get("languages") if isinstance(choices.get("languages"), dict) else {}
+    for lang, entry in languages.items():
+        if not isinstance(entry, dict):
+            continue
+        for stage in model_catalog.STAGES:
+            if stage in entry:
+                try:
+                    ids[stage].add(model_catalog.resolve(stage, lang=str(lang), choices=choices).id)
+                except LookupError:
+                    pass
+    return ids
+
+
+def other_model_stages(row: TrackRow, current: dict[str, set[str]] | None = None) -> list[str]:
+    """Stages whose [#models:] id is not among what the current choices would resolve."""
+    if not row.models:
+        return []
+    current = current if current is not None else current_model_ids()
+    return [stage for stage in model_catalog.STAGES
+            if stage in row.models and row.models[stage] not in current.get(stage, set())]
+
+
+def other_models_text(row: TrackRow, current: dict[str, set[str]] | None = None) -> str:
+    """A tooltip naming the stages a finished song used a different model for."""
+    current = current if current is not None else current_model_ids()
+    stages = other_model_stages(row, current)
+    if not stages:
+        return ""
+    lines = []
+    for stage in stages:
+        ids = sorted(current.get(stage, set()))
+        labels = []
+        for model_id in ids:
+            spec = model_catalog.find(model_id)
+            labels.append(spec.label if spec is not None else model_id)
+        now = ", ".join(labels) or "the catalog default"
+        lines.append(f"{MODEL_STAGE_LABELS.get(stage, stage)}: {row.models[stage]} "
+                     f"(current: {now})")
+    return "Made with other models:\n" + "\n".join(lines)
 
 
 def _flac_tags(audio: Path) -> tuple[str, str] | None:
@@ -126,6 +193,7 @@ def read_status(audio: Path) -> TrackRow:
         row.conf = 0.0
         row.error = f"invalid confidence in {lrc.name}: {conf!r}"
     row.review_lines = [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
+    row.models = parse_models_tag(meta.get("#models", ""))
     row.notes = [part.strip() for part in meta.get("#warning", "").split(";") if part.strip()]
     # A transcription-only lyric, or one the engine flagged with a warning, is an implicit review
     # until the user accepts it. "Clear review flags" writes an empty [#review:] tag, which records
@@ -143,7 +211,7 @@ def scan(root: Path) -> list[TrackRow]:
 # ---- scan cache: one JSON per library; a track is re-read only when its audio or .lrc changed ----
 # The schema version lets an old or hand-edited cache be discarded instead of crashing every scan.
 
-SCAN_SCHEMA = 3
+SCAN_SCHEMA = 5
 
 
 def _cache_file(root: Path) -> Path:
@@ -213,12 +281,18 @@ def _row_from_json(d: dict) -> TrackRow:
     d["device"] = d.get("device") if isinstance(d.get("device"), str) else ""
     d["fallback"] = d.get("fallback") if isinstance(d.get("fallback"), str) else ""
     d["log_path"] = d.get("log_path") if isinstance(d.get("log_path"), str) else ""
+    used = d.get("models", {})
+    if not isinstance(used, dict):
+        used = {}
+    d["models"] = {str(k): str(v) for k, v in used.items()
+                   if isinstance(k, str) and isinstance(v, str)}
     notes = d.get("notes", [])
     if not isinstance(notes, list) or not all(isinstance(n, str) for n in notes):
         notes = []
     return TrackRow(path=d["path"], artist=d["artist"], title=d["title"], status=d["status"],
                     source=d["source"], conf=d["conf"], review_lines=d["review_lines"], error=d["error"],
-                    device=d["device"], fallback=d["fallback"], log_path=d["log_path"], notes=notes)
+                    device=d["device"], fallback=d["fallback"], log_path=d["log_path"],
+                    models=d["models"], notes=notes)
 
 
 def _unreadable_row(audio: Path, exc: Exception) -> TrackRow:

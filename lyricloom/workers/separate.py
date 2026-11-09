@@ -54,7 +54,7 @@ def main() -> None:
     if missing:
         raise SystemExit(
             "the separator model is missing: " + ", ".join(missing)
-            + ". Run `lyricloom models download <id>` or open Help > Download models.")
+            + ". Run `lyricloom models download <id>` or open Help > Models.")
     sep = Separator(output_dir=str(out_dir), model_file_dir=str(model_dir), output_format="WAV",
                     output_single_stem="Vocals", use_directml=False,
                     mdxc_params={"segment_size": 256, "override_model_segment_size": False,
