@@ -6,7 +6,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ...model import TrackMeta
-from .base import RawResult, check, host_matches, is_https_url
+from .base import RawResult, check, get_allowed, host_matches, is_https_url
 
 name = "genius"
 
@@ -59,7 +59,7 @@ def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
     for hit in parse_search(r.json())[:3]:
         if not allowed_page_url(hit["url"]):
             continue
-        text = parse_page(check(client.get(hit["url"])).text)
+        text = parse_page(get_allowed(client, hit["url"], allowed_page_url).text)
         if text:
             out.append(RawResult(hit["title"], hit["artist"], None, text, None, hit["url"]))
     return out

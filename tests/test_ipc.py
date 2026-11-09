@@ -154,6 +154,57 @@ def test_malformed_and_oversized_messages_are_rejected(app):
         app.processEvents()
 
 
+def test_two_messages_in_one_write_are_each_delivered_once(app, tmp_path):
+    name = _name()
+    server = ipc.Server(name=name)
+    assert server.listen()
+    received = []
+    server.received.connect(received.append)
+    try:
+        audio = _audio(tmp_path)
+        payload = (json.dumps({"cmd": "activate"}) + "\n" +
+                   json.dumps({"cmd": "open", "path": str(audio)}) + "\n").encode("utf-8")
+        socket = QLocalSocket()
+        socket.connectToServer(name)
+        assert socket.waitForConnected(3000), socket.errorString()
+        socket.write(payload)
+        buffer = b""
+        end = time.time() + 5
+        while buffer.count(b"\n") < 2 and time.time() < end:
+            app.processEvents()
+            if socket.bytesAvailable():
+                buffer += bytes(socket.readAll())
+            time.sleep(0.01)
+        socket.disconnectFromServer()
+        socket.deleteLater()
+        replies = [json.loads(line) for line in buffer.split(b"\n") if line]
+        assert replies == [{"ok": True}, {"ok": True}]
+        assert received == [
+            {"cmd": "activate", "source": "ipc"},
+            {"cmd": "open", "path": audio.resolve(), "source": "ipc"},
+        ]
+    finally:
+        server.received.disconnect()
+        server.close()
+        app.processEvents()
+
+
+def test_remove_stale_keeps_the_name_of_a_live_instance(app):
+    name = _name()
+    live = ipc.Server(name=name)
+    assert live.listen()
+    other = ipc.Server(name=name)
+    other.listen()   # on Windows Qt may allow a second pipe with the same name
+    try:
+        assert other.remove_stale() is False
+        reply = ipc.send({"cmd": "activate"}, name=name, timeout_ms=3000)
+        assert reply == {"ok": True}
+    finally:
+        live.close()
+        other.close()
+        app.processEvents()
+
+
 def test_a_second_instance_message_reaches_the_window_and_queues_valid_files(app, tmp_path, monkeypatch):
     w = MainWindow(tmp_path)
     try:

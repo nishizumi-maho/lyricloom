@@ -1,8 +1,9 @@
 """Single-instance IPC: a second LyricLoom hands its command line to the running one.
 
-A per-user named local socket carries one small JSON object per connection. The server is limited
-to the current user (``UserAccessOption``), accepts at most 64 KiB and rejects anything that is not
-a well-formed command. Nothing here imports the window, so tests can exercise the channel alone.
+A per-user named local socket carries small newline-terminated JSON objects. The server is limited
+to the current user (``UserAccessOption``), accepts at most 64 KiB per object and rejects anything
+that is not a well-formed command. Nothing here imports the window, so tests can exercise the
+channel alone.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from .paths import expand_audio_paths, validate_audio_file
 
 MAX_MESSAGE_BYTES = 64 * 1024
 DEFAULT_TIMEOUT_MS = 2000
+STALE_PROBE_MS = 5000
 
 
 def server_name() -> str:
@@ -57,7 +59,7 @@ def _validate(message) -> tuple[dict | None, str | None]:
 
 
 class _Client(QObject):
-    """Reads one newline-terminated JSON object from one connection."""
+    """Reads newline-terminated JSON objects from one connection."""
 
     def __init__(self, socket: QLocalSocket, server: "Server"):
         super().__init__(server)
@@ -76,12 +78,14 @@ class _Client(QObject):
         if self._rejected:
             return
         self._buffer += bytes(self._socket.readAll())
-        if len(self._buffer) > MAX_MESSAGE_BYTES:
-            self._reject("message is larger than 64 KiB")
-            return
-        if b"\n" in self._buffer:
-            line = self._buffer.split(b"\n", 1)[0]
+        while not self._rejected and b"\n" in self._buffer:
+            line, self._buffer = self._buffer.split(b"\n", 1)
+            if len(line) > MAX_MESSAGE_BYTES:
+                self._reject("message is larger than 64 KiB")
+                return
             self._handle(line)
+        if not self._rejected and len(self._buffer) > MAX_MESSAGE_BYTES:
+            self._reject("message is larger than 64 KiB")
 
     @Slot()
     def _done(self) -> None:
@@ -173,6 +177,20 @@ class _Client(QObject):
         self._finish()
 
 
+def _name_answers(name: str, timeout_ms: int) -> bool:
+    """True when something still listens on `name` (it may be too busy to reply to a command)."""
+    socket = QLocalSocket()
+    socket.connectToServer(name)
+    try:
+        return socket.waitForConnected(timeout_ms)
+    finally:
+        try:
+            socket.abort()
+        except RuntimeError:
+            pass
+        socket.deleteLater()
+
+
 class Server(QObject):
     """Owns the per-user QLocalServer and emits validated messages."""
 
@@ -213,11 +231,20 @@ class Server(QObject):
         else:
             self._pending.append(message)
 
-    def remove_stale(self) -> None:
-        """Removes a name a crashed process left behind (only call after connect failed)."""
+    def remove_stale(self, probe_ms: int = STALE_PROBE_MS) -> bool:
+        """Removes a name a crashed process left behind (only call after connect failed).
+
+        A name that still accepts a connection belongs to a live process, even when that process
+        is too busy to answer a message. Unlinking it on Linux would let a second window start and
+        write the same settings, so probe once more before removing it. Returns True when the name
+        was removed.
+        """
         if self._server is not None:
             self._server.close()
+        if _name_answers(self.name, probe_ms):
+            return False
         QLocalServer.removeServer(self.name)
+        return True
 
     def close(self) -> None:
         for client in list(self._clients):

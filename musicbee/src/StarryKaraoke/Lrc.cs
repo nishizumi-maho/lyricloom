@@ -21,9 +21,10 @@ namespace MusicBeePlugin
 
     internal static class Lrc
     {
-        private static readonly Regex TimeTag = new Regex(@"\G\[(\d+):(\d+(?:[.:]\d+)?)\]", RegexOptions.Compiled);
-        private static readonly Regex WordTag = new Regex(@"<(\d+):(\d+(?:[.:]\d+)?)>", RegexOptions.Compiled);
-        private static readonly Regex Offset = new Regex(@"^\[offset:\s*([+-]?\d+)\s*\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Bound every number: unbounded digits overflow int/double and make the whole file fail.
+        private static readonly Regex TimeTag = new Regex(@"\G\[(\d{1,6}):(\d{1,9}(?:[.:]\d{1,9})?)\]", RegexOptions.Compiled);
+        private static readonly Regex WordTag = new Regex(@"<(\d{1,6}):(\d{1,9}(?:[.:]\d{1,9})?)>", RegexOptions.Compiled);
+        private static readonly Regex Offset = new Regex(@"^\[offset:\s*([+-]?\d{1,9})\s*\]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static double Ms(string min, string sec) =>
             int.Parse(min, CultureInfo.InvariantCulture) * 60000.0 +

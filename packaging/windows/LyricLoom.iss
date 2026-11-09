@@ -212,15 +212,19 @@ begin
       begin
         if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
         begin
-          if (CompareText(FindRec.Name, 'work') <> 0) and
-             (CompareText(FindRec.Name, 'vocals') <> 0) and
-             (CompareText(FindRec.Name, 'models') <> 0) then
+          // A junction or symlink can point back to an ancestor; following it would loop.
+          if (FindRec.Attributes and FILE_ATTRIBUTE_REPARSE_POINT) = 0 then
           begin
-            Sub := Dir + '\' + FindRec.Name;
-            if ContainsMusicOutsideCaches(Sub) then
+            if (CompareText(FindRec.Name, 'work') <> 0) and
+               (CompareText(FindRec.Name, 'vocals') <> 0) and
+               (CompareText(FindRec.Name, 'models') <> 0) then
             begin
-              Result := True;
-              Exit;
+              Sub := Dir + '\' + FindRec.Name;
+              if ContainsMusicOutsideCaches(Sub) then
+              begin
+                Result := True;
+                Exit;
+              end;
             end;
           end;
         end
