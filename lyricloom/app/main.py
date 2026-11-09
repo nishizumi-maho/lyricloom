@@ -15,7 +15,7 @@ from pathlib import Path
 
 import mutagen
 
-from PySide6.QtCore import QByteArray, QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import QByteArray, QElapsedTimer, QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import (QAction, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence,
                            QUndoCommand, QUndoStack)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -39,6 +39,7 @@ from .ipc import Server as IpcServer
 from .ipc import send as ipc_send
 from .karaoke import KaraokeWindow
 from .library import FILTERS, REVIEW_TINT, TrackFilterProxyModel, TrackTableModel
+from .lyric_view import LyricView
 from .media import default_script_path, script_candidates, vocal_source
 from .model import (STAGE_LABELS, TrackRow, apply_edits, clear_review_flags, delete_line, delete_word,
                     insert_line, insert_word, load_cached_rows, mark_line_reviewed, merge_with_previous,
@@ -300,6 +301,8 @@ class MainWindow(QMainWindow):
         self._pending_play = False
         self._last_playback_error = ""
         self._paste_before: LrcDoc | None = None
+        self._sample_elapsed = QElapsedTimer()
+        self._sample_elapsed.start()
         self.karaoke_window: KaraokeWindow | None = None
         self._update_controller = UpdateController(self)
         self._models_window: ModelsWindow | None = None
@@ -321,6 +324,8 @@ class MainWindow(QMainWindow):
         self.player.durationChanged.connect(lambda d: self.seek.setRange(0, d))
         self.player.mediaStatusChanged.connect(self._media_status)
         self.player.errorOccurred.connect(self._media_error)
+        self.player.positionChanged.connect(self._position_changed)
+        self.player.playbackStateChanged.connect(self._playback_state_changed)
         self.timer = QTimer(self, interval=50, timeout=self._tick)
         self.timer.start()
         self.refresh()
@@ -471,6 +476,10 @@ class MainWindow(QMainWindow):
                 else:
                     message = f"Japanese lyrics now in {new_script}: {n} song(s) updated"
         self._set_script_combo(new_script)
+        divisor = config.smooth_animation_divisor()
+        self.now.set_divisor(divisor)
+        if self.karaoke_window is not None:
+            self.karaoke_window.set_animation_divisor(divisor)
         self.refresh()
         self.statusBar().showMessage(message, 8000)
 
@@ -716,11 +725,8 @@ class MainWindow(QMainWindow):
         for w in (self.btn_play, self.seek, self.time_label, self.vocals, self.btn_karaoke):
             pl.addWidget(w)
         rv.addLayout(pl)
-        self.now = QLabel("")
-        self.now.setTextFormat(Qt.RichText)
-        self.now.setWordWrap(True)
-        self.now.setFont(QFont(self.font().family(), 18))
-        self.now.setMinimumHeight(60)
+        self.now = LyricView(compact=True)
+        self.now.setMinimumHeight(64)
         self.now.setAccessibleName("Current lyric line")
         rv.addWidget(self.now)
         self.lines = QListWidget()
@@ -1701,7 +1707,7 @@ class MainWindow(QMainWindow):
         self.doc = parse_lrc(lrc.read_text(encoding="utf-8")) if lrc.exists() else None
         self.undo_stack.clear()
         self._set_dirty(False)
-        self.now.clear()
+        self.now.set_doc(self.doc)
         self._fill_lines()
 
     def _update_vocals_control(self, *, reset: bool) -> None:
@@ -1782,9 +1788,22 @@ class MainWindow(QMainWindow):
                 self.player.setPosition(0)
             self.player.play()
 
+    def _position_changed(self, position: int):
+        sampled_at = self._sample_elapsed.nsecsElapsed() / 1_000_000.0
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
+        self.now.sample(position, playing, sampled_at)
+
+    def _playback_state_changed(self, _state):
+        sampled_at = self._sample_elapsed.nsecsElapsed() / 1_000_000.0
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
+        self.now.sample(self.player.position(), playing, sampled_at)
+
     def _tick(self):
+        sampled_at = self._sample_elapsed.nsecsElapsed() / 1_000_000.0
         t = self.player.position()
-        self.btn_play.setText("Pause" if self.player.playbackState() == QMediaPlayer.PlayingState else "Play")
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
+        self.now.sample(t, playing, sampled_at)
+        self.btn_play.setText("Pause" if playing else "Play")
         if not self.seek.isSliderDown():
             self.seek.blockSignals(True)
             self.seek.setValue(t)
@@ -1794,22 +1813,12 @@ class MainWindow(QMainWindow):
             self.player.pause()
             self._stop_at = None
         if not self.doc:
-            if self.now.text():
-                self.now.clear()
             return
         idx = max((i for i, l in enumerate(self.doc.lines) if l.start_ms is not None and l.start_ms <= t), default=-1)
-        if idx != self._shown_line and self.player.playbackState() == QMediaPlayer.PlayingState:
+        if idx != self._shown_line and playing:
             self._shown_line = idx
             if idx >= 0 and not self.words.hasFocus():
                 self.lines.setCurrentRow(idx)
-        if idx >= 0:
-            line = self.doc.lines[idx]
-            sung = "".join(s.text for s in line.segments if s.start_ms is not None and s.start_ms <= t)
-            rest = line.text[len(sung):]
-            esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;")
-            self.now.setText(f"<b style='color:#2bb8c4'>{esc(sung)}</b>{esc(rest)}")
-        elif self.now.text():
-            self.now.clear()
 
     def _seek_to_line(self, item: QListWidgetItem):
         line = self.doc.lines[self.lines.row(item)]
@@ -1918,7 +1927,7 @@ class MainWindow(QMainWindow):
 
     def _restore_doc(self, doc: LrcDoc | None, line: int = -1, word: int = -1) -> None:
         self.doc = doc
-        self.now.clear()
+        self.now.set_doc(self.doc)
         self._fill_lines()
         if line >= 0 and self.lines.count():
             self.lines.setCurrentRow(min(line, self.lines.count() - 1))
