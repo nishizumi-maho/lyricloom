@@ -7,7 +7,7 @@ META = TrackMeta(Path("x.flac"), "A", "T", "", 20.0, "other")
 
 
 def _fake_ctc(score):
-    def fake(vocals16k, blocks, seg_tokens):
+    def fake(vocals16k, blocks, seg_tokens, cancel=None):
         out, t = [], 1000
         for block in seg_tokens:
             for line in block:

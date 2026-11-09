@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def lyric_lang(meta: TrackMeta, transcript: Transcript) -> str:
 
 
 def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript, vocals16k: Path,
-          vocals: Path | None = None) -> AlignResult:
+          vocals: Path | None = None, cancel: threading.Event | None = None) -> AlignResult:
     """vocals (full rate) enables the singing model for English songs; without it every song uses CTC."""
     lang = lyric_lang(meta, transcript)
     texts = [l.strip() for l in chosen.text.splitlines() if l.strip()]
@@ -55,7 +56,7 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
     if lang == "en" and vocals is not None and models.singing_ready(lang):
         try:
             singing_spec = config.resolve_model("singing", lang)
-            aligned, sung = align_lines_mtl(vocals, seg_texts), True
+            aligned, sung = align_lines_mtl(vocals, seg_texts, cancel=cancel), True
         except (WorkerError, ValueError, OSError) as e:
             log.warning("singing model failed, using the CTC aligner: %s", str(e)[-300:])
     if aligned is None:
@@ -66,7 +67,7 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
         previous = config.active_language()
         config.set_active_language(lang)
         try:
-            aligned = align_blocks(vocals16k, bs, seg_tokens)
+            aligned = align_blocks(vocals16k, bs, seg_tokens, cancel=cancel)
         finally:
             config.set_active_language(previous)
 

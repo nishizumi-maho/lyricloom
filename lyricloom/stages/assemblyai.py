@@ -2,12 +2,12 @@
 
 Portuguese/English use Universal-3.5 Pro (their most capable model, which also takes a context
 prompt); Japanese is not supported by it, so Japanese uses Universal-2. Word times come back in ms.
-The API key is read from the git-ignored file `assemblyai.key` in the project root, or from the
-ASSEMBLYAI_API_KEY environment variable."""
+The API key is read from ``assemblyai.key`` in LyricLoom's data directory (encrypted with Windows
+DPAPI, mode 0600 elsewhere) or from the ASSEMBLYAI_API_KEY environment variable. Cloud
+transcription also needs the separate ``assemblyai_enabled`` setting and a per-run allowance."""
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from pathlib import Path
@@ -24,12 +24,9 @@ TIMEOUT_S = 15 * 60
 
 
 def api_key() -> str:
-    key = os.environ.get("ASSEMBLYAI_API_KEY", "").strip()
-    path = config.ASSEMBLYAI_KEY_FILE
-    if not key and path.exists():
-        key = path.read_text(encoding="utf-8").strip()
+    key = config.read_assemblyai_key()
     if not key:
-        raise RuntimeError("no AssemblyAI key: set ASSEMBLYAI_API_KEY or create assemblyai.key")
+        raise RuntimeError("no AssemblyAI key: add one in the app or set ASSEMBLYAI_API_KEY")
     return key
 
 

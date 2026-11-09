@@ -25,7 +25,7 @@ def test_mismatched_word_count_is_an_error():
 
 
 def _fake_ctc(calls):
-    def fake(vocals16k, blocks, seg_tokens):
+    def fake(vocals16k, blocks, seg_tokens, cancel=None):
         calls.append("ctc")
         t, out = 1000, []
         for block in seg_tokens:
@@ -36,7 +36,7 @@ def _fake_ctc(calls):
 
 
 def _fake_mtl(calls, fail=False):
-    def fake(vocals, seg_texts):
+    def fake(vocals, seg_texts, cancel=None):
         calls.append("mtl")
         if fail:
             raise WorkerError("lyricloom.workers.align_mtl", "boom")
@@ -116,6 +116,25 @@ def test_singing_model_runs_in_wsl_on_the_gpu(monkeypatch):
     assert (out[0][0].start_ms, out[0][0].end_ms) == (1000, 1400)
 
 
+def test_wsl_singing_model_prefers_the_checkpoint_copy_inside_the_distro(monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"words": [["texto", 1000, 1400]]}
+
+    monkeypatch.setattr(mtl, "run_worker", fake)
+    monkeypatch.setattr(config, "MTL_WSL_ENABLED", True)
+    monkeypatch.setattr(config, "MTL_WSL_CHECKPOINT", "/opt/lyricloom/models/mtl")
+    mtl.align_lines_mtl(Path(r"C:\work\vocals.wav"), [["Texto, "]])
+    payload = calls[0]["payload"]
+    spec = config.resolve_model("singing", "en")
+    assert payload["checkpoint_dirs"][0] == "/opt/lyricloom/models/mtl"
+    assert payload["checkpoint_dirs"][-1].startswith("/mnt/")
+    assert payload["checkpoint_dir"] == payload["checkpoint_dirs"][-1]
+    assert payload["checkpoint_size"] == spec.size
+
+
 def test_singing_model_falls_back_to_its_own_venv(monkeypatch):
     calls = []
 
@@ -131,4 +150,18 @@ def test_singing_model_falls_back_to_its_own_venv(monkeypatch):
     assert [c["wsl"] for c in calls] == [config.ALIGN_WSL_DISTRO, None]
     assert calls[1]["python"] == str(config.MTL_PYTHON)
     assert calls[1]["payload"].get("cuda") is None    # the Windows venv stays on its CPU
+
+
+def test_singing_model_unc_path_uses_the_local_fallback(monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"words": [["texto", 1000, 1400]]}
+
+    monkeypatch.setattr(mtl, "run_worker", fake)
+    monkeypatch.setattr(config, "MTL_WSL_ENABLED", True)
+    out = mtl.align_lines_mtl(Path(r"\\server\share\vocals.wav"), [["Texto, "]])
+    assert [c["wsl"] for c in calls] == [None]
+    assert (out[0][0].start_ms, out[0][0].end_ms) == (1000, 1400)
 

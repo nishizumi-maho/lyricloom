@@ -16,6 +16,7 @@ import torch
 import torchaudio
 
 from . import emit, read_payload
+from .copies import first_file
 
 SR = 16000
 WINDOW_S = 30  # emissions are computed in windows: attention over a whole song would not fit
@@ -96,7 +97,9 @@ def main() -> None:
     device = "cuda" if p.get("device") in ("auto", "cuda") and torch.cuda.is_available() else "cpu"
     torch_home = Path(p.get("torch_home") or os.environ.get("TORCH_HOME", "."))
     os.environ["TORCH_HOME"] = str(torch_home)
-    model_path = Path(p["model_path"]) if p.get("model_path") else torch_home / "hub" / "checkpoints" / "model.pt"
+    default_model = torch_home / "hub" / "checkpoints" / "model.pt"
+    fallback = p.get("model_path") or str(default_model)
+    model_path = first_file(p.get("model_candidates"), int(p.get("model_size") or 0), fallback)
     if not model_path.is_file():
         raise SystemExit(
             f"the alignment model is missing: {model_path}. Run `lyricloom models download "

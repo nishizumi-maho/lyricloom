@@ -1,4 +1,5 @@
 import hashlib
+import json
 from pathlib import Path
 
 import numpy as np
@@ -27,15 +28,15 @@ def lib(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", tmp_path / "Library")
     calls = {"separate": 0, "transcribe": 0, "align": 0}
 
-    def fake_separate(audio, work):
+    def fake_separate(audio, work, cancel=None):
         calls["separate"] += 1
         return {"vocals": "v.wav", "vocals16k": "v16.wav", "model": "m", "device": "cpu"}
 
-    def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=()):
+    def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
         calls["transcribe"] += 1
         return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
 
-    def fake_align(meta, work, chosen, tr, v, vf=None):
+    def fake_align(meta, work, chosen, tr, v, vf=None, cancel=None):
         calls["align"] += 1
         return AlignResult(
             [Line(0, [Segment("eu ", 0, 300, 0.9), Segment("vou", 400, 700, 0.9)], 0.9)], 0.9, False)
@@ -113,7 +114,7 @@ def test_stage_cache_reused(lib):
 def _count_transcribe(monkeypatch):
     calls = []
 
-    def fake(v, w, lang, prompt=None, name="whisper", extra=()):
+    def fake(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
         calls.append({"wav": str(v), "prompt": prompt, "name": name, "extra": list(extra)})
         return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
 
@@ -154,7 +155,7 @@ def _aai(monkeypatch, enabled=True):
         return SUNG
 
     monkeypatch.setattr(runner, "transcribe_assemblyai", fake)
-    monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_ENABLED", enabled)
+    monkeypatch.setattr("lyricloom.config.assemblyai_enabled", lambda: enabled)
     return calls
 
 
@@ -187,9 +188,11 @@ def test_assemblyai_votes_in_transcription_only_songs(lib, monkeypatch):
     voters = {}
     real_rover = runner.rover
     monkeypatch.setattr(runner, "rover", lambda ts, lang: voters.setdefault("n", len(ts)) and real_rover(ts, lang))
-    runner.process(_flac(root / "a.flac"))
+    res = runner.process(_flac(root / "a.flac"))
     assert voters["n"] == 4
     assert [c["name"] for c in calls] == ["assemblyai_vocals"]
+    assert res.cloud is True
+    assert "cloud transcription used: AssemblyAI" in _track_log(root / "a.flac")
 
 
 def test_no_assemblyai_when_disabled(lib, monkeypatch):
@@ -199,6 +202,22 @@ def test_no_assemblyai_when_disabled(lib, monkeypatch):
     monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
     runner.process(_flac(root / "a.flac"))
     assert calls == []
+
+
+def test_allow_cloud_false_never_calls_the_client(lib, monkeypatch):
+    root, _ = lib
+    calls = _aai(monkeypatch, enabled=True)
+    monkeypatch.setattr(runner, "search_all", lambda meta: [])
+    monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
+    res = runner.process(_flac(root / "a.flac"), allow_cloud=False)
+    assert calls == []
+    assert res.cloud is False
+
+
+def _track_log(audio: Path) -> str:
+    from lyricloom import cache
+
+    return (cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
 
 
 def test_hallucination_without_lyrics_or_assemblyai_fails_instead_of_writing_garbage(lib, monkeypatch):
@@ -229,10 +248,46 @@ def test_stages_are_reported_in_order(lib):
 
 def test_low_confidence_lines_are_listed_in_the_lrc(lib, monkeypatch):
     root, _ = lib
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: AlignResult(
+    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None, cancel=None: AlignResult(
         [Line(0, [Segment("a", 0, 300)], 0.9), Line(500, [Segment("b", 500, 800)], 0.4)], 0.7, True))
     runner.process(_flac(root / "a.flac"))
     assert parse_lrc((root / "a.lrc").read_text(encoding="utf-8")).meta["#review"] == "1"
+
+
+def _strip_inputs(audio: Path, *stages: str) -> None:
+    """Turn stage caches into the shape 2.0 wrote: no `_inputs` fingerprint."""
+    for stage in stages:
+        path = runner.cache.work_dir(audio) / f"{stage}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("_inputs", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_legacy_stage_caches_keep_pasted_lyrics_realign_working(lib):
+    """A song finished by 2.0 has no model fingerprints in its caches; Redo/pasted realign must
+    reuse separation and transcription instead of asking the user to process the track again."""
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    _strip_inputs(audio, "separate", "transcribe")
+    before = dict(calls)
+    res = runner.realign(audio, "minha letra\ncolada aqui")
+    assert res.status == "done" and res.source == "manual"
+    assert calls["separate"] == before["separate"]
+    assert calls["transcribe"] == before["transcribe"]
+    # The reused caches were rewritten with the current fingerprint.
+    for stage in ("separate", "transcribe"):
+        data = json.loads((runner.cache.work_dir(audio) / f"{stage}.json").read_text(encoding="utf-8"))
+        assert "_inputs" in data
+
+
+def test_legacy_stage_cache_is_not_reused_for_a_per_run_override(lib):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    _strip_inputs(audio, "separate", "transcribe")
+    runner.process(audio, force=True, models={"separate": "separator-bs-roformer-vocals"})
+    assert calls["separate"] == 2
 
 
 def test_realign_with_pasted_text_reuses_the_audio_stages(lib, monkeypatch):
@@ -240,8 +295,10 @@ def test_realign_with_pasted_text_reuses_the_audio_stages(lib, monkeypatch):
     audio = _flac(root / "a.flac")
     runner.process(audio)
     texts = []
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: texts.append(chosen.text) or AlignResult(
-        [Line(0, [Segment("x", 0, 300, 0.9)], 0.9)], 0.9, False))
+    monkeypatch.setattr(
+        runner, "align",
+        lambda meta, work, chosen, tr, v, vf=None, cancel=None: texts.append(chosen.text) or AlignResult(
+            [Line(0, [Segment("x", 0, 300, 0.9)], 0.9)], 0.9, False))
     res = runner.realign(audio, "minha letra\ncolada aqui")
     assert texts == ["minha letra\ncolada aqui"]
     assert res.source == "manual" and calls["separate"] == 1

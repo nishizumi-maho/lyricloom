@@ -12,6 +12,7 @@ if not hasattr(np, "Inf"):   # the model's utils.py predates NumPy 2, which drop
     np.Inf = np.inf
 
 from . import emit, read_payload
+from .copies import first_checkpoint_dir
 
 # The model's frames are 3 x 256 samples at 22050 Hz.
 FRAME_S = 256 / 22050 * 3
@@ -23,7 +24,11 @@ def main() -> None:
     nltk_dir = p.get("nltk_dir")
     if nltk_dir:
         os.environ["NLTK_DATA"] = str(nltk_dir) + os.pathsep + os.environ.get("NLTK_DATA", "")
-    os.chdir(p["checkpoint_dir"])       # checkpoints are loaded by relative path
+    # checkpoints are loaded by relative path; prefer the copy inside the distro over /mnt
+    checkpoint_dir = first_checkpoint_dir(p.get("checkpoint_dirs"),
+                                          int(p.get("checkpoint_size") or 0),
+                                          p["checkpoint_dir"])
+    os.chdir(checkpoint_dir)
     # PyInstaller's frozen modules have no source file, and inflect (through g2p_en) decorates
     # functions with typeguard, which calls inspect.getsource() and fails in a frozen build.
     # Timing is unaffected; skip the runtime type-check instrumentation.

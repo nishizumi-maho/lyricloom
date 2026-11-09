@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
@@ -14,6 +16,7 @@ namespace MusicBeePlugin
         private readonly Settings _original;
         private readonly Settings _edit;
         private readonly Action<Settings> _preview;
+        private readonly Action<Exception> _log;
         private readonly StackPanel _panel = new StackPanel { Margin = new Thickness(16) };
         private readonly List<Action> _colorRows = new List<Action>();
         private ComboBox _themeCombo;
@@ -21,21 +24,66 @@ namespace MusicBeePlugin
         private bool _settingTheme;
         public Settings Result { get; private set; }
 
-        public SettingsWindow(Settings current, Action<Settings> preview)
+        public SettingsWindow(Settings current, Action<Settings> preview, Action<Exception> log = null)
         {
             _original = current.Clone();
             _edit = current.Clone();
             _preview = preview;
+            _log = log;
             Title = "Starry Karaoke — Settings";
-            Width = 460;
+            Width = 480;
             SizeToContent = SizeToContent.Height;
             ResizeMode = ResizeMode.NoResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
+            Section("Window");
+            var auto = new ComboBox
+            {
+                ItemsSource = new[] { "Off", "When the song has word-timed lyrics", "When it has any synced lyrics" },
+                SelectedIndex = Math.Max(0, Math.Min(2, (int)_edit.AutoOpenLyrics)),
+                Width = 230
+            };
+            auto.SelectionChanged += (s, e) => Safe.Run(
+                () => Set(x => x.AutoOpenLyrics = (AutoOpenLyrics)auto.SelectedIndex), _log);
+            Row("Open automatically", auto);
+
+            var unsupported = new ComboBox
+            {
+                ItemsSource = new[] { "Keep the window open", "Hide the window", "Close the window" },
+                SelectedIndex = Math.Max(0, Math.Min(2, (int)_edit.OnUnsupportedSong)),
+                Width = 230
+            };
+            unsupported.SelectionChanged += (s, e) => Safe.Run(
+                () => Set(x => x.OnUnsupportedSong = (UnsupportedSongAction)unsupported.SelectedIndex), _log);
+            Row("On an unsupported song", unsupported);
+            Check("Bring the window to the front when it opens automatically", _edit.AutoOpenFocus,
+                  v => Set(x => x.AutoOpenFocus = v));
+
+            Section("LyricLoom");
+            var llPath = new TextBox { Text = _edit.LyricLoomPath, Width = 100, VerticalContentAlignment = VerticalAlignment.Center };
+            llPath.TextChanged += (s, e) => Safe.Run(() => Set(x => x.LyricLoomPath = llPath.Text.Trim().Trim('"')), _log);
+            var browse = new Button { Content = "Browse...", Width = 74, Margin = new Thickness(6, 0, 0, 0) };
+            browse.Click += (s, e) => Safe.Run(() =>
+            {
+                var dlg = new Microsoft.Win32.OpenFileDialog
+                {
+                    Title = "LyricLoom.exe",
+                    Filter = "LyricLoom (LyricLoom.exe)|LyricLoom.exe|Programs (*.exe)|*.exe|All files (*.*)|*.*"
+                };
+                if (dlg.ShowDialog(this) == true) llPath.Text = dlg.FileName;
+            }, _log);
+            var test = new Button { Content = "Test", Width = 54, Margin = new Thickness(6, 0, 0, 0) };
+            test.Click += (s, e) => Safe.Run(() => TestLyricLoom(llPath.Text), _log);
+            var llRow = new StackPanel { Orientation = Orientation.Horizontal };
+            llRow.Children.Add(llPath);
+            llRow.Children.Add(browse);
+            llRow.Children.Add(test);
+            Row("LyricLoom.exe (empty = automatic)", llRow);
+
             Section("Theme");
             var currentTheme = Themes.Get(_edit.Theme) != null ? _edit.Theme : Themes.Custom;
             _themeCombo = new ComboBox { ItemsSource = Themes.Names, SelectedItem = currentTheme };
-            _themeCombo.SelectionChanged += (s, e) =>
+            _themeCombo.SelectionChanged += (s, e) => Safe.Run(() =>
             {
                 if (_settingTheme) return;
                 var name = _themeCombo.SelectedItem as string ?? Themes.Custom;
@@ -48,7 +96,7 @@ namespace MusicBeePlugin
                 if (_randomThemeCheck != null && _randomThemeCheck.IsChecked == true)
                     _randomThemeCheck.IsChecked = false;
                 RefreshColors();
-            };
+            }, _log);
             Row("Preset", _themeCombo);
             _randomThemeCheck = Check("Random theme for each song", _edit.RandomTheme, v => Set(x => x.RandomTheme = v));
 
@@ -56,17 +104,27 @@ namespace MusicBeePlugin
             var fonts = Fonts.SystemFontFamilies.Select(f => f.Source).OrderBy(x => x).ToList();
             if (!fonts.Contains(_edit.FontFamily)) fonts.Insert(0, _edit.FontFamily);
             var font = new ComboBox { ItemsSource = fonts, SelectedItem = _edit.FontFamily, IsEditable = true };
-            font.SelectionChanged += (s, e) => { if (font.SelectedItem is string f) Set(x => x.FontFamily = f); };
-            font.LostFocus += (s, e) => Set(x => x.FontFamily = font.Text);
+            font.SelectionChanged += (s, e) => Safe.Run(() =>
+            {
+                if (font.SelectedItem is string f) Set(x => x.FontFamily = f);
+            }, _log);
+            font.LostFocus += (s, e) => Safe.Run(() => Set(x => x.FontFamily = font.Text), _log);
             Row("Font", font);
             Row("Text size", Slider(0.5, 2.0, _edit.TextScale, v => Set(x => x.TextScale = v)));
 
-            var jp = new ComboBox { ItemsSource = new[] { "Romaji only", "Japanese + romaji below", "Japanese only" }, SelectedIndex = (int)_edit.Japanese };
-            jp.SelectionChanged += (s, e) => Set(x => x.Japanese = (JapaneseMode)jp.SelectedIndex);
+            var jp = new ComboBox
+            {
+                ItemsSource = new[] { "Romaji only", "Japanese + romaji below", "Japanese only" },
+                SelectedIndex = Math.Max(0, Math.Min(2, (int)_edit.Japanese))
+            };
+            jp.SelectionChanged += (s, e) => Safe.Run(() => Set(x => x.Japanese = (JapaneseMode)jp.SelectedIndex), _log);
             Row("Japanese songs", jp);
 
             var offset = new TextBox { Text = _edit.LyricsOffsetMs.ToString(CultureInfo.InvariantCulture) };
-            offset.TextChanged += (s, e) => { if (int.TryParse(offset.Text, out var v)) Set(x => x.LyricsOffsetMs = v); };
+            offset.TextChanged += (s, e) => Safe.Run(() =>
+            {
+                if (int.TryParse(offset.Text, out var v)) Set(x => x.LyricsOffsetMs = v);
+            }, _log);
             Row("Lyrics delay (ms, + = later)", offset);
 
             Section("Colors");
@@ -98,7 +156,12 @@ namespace MusicBeePlugin
                 SelectedIndex = 0
             };
             if (_edit.WindowFps > 0) winFps.SelectedItem = _edit.WindowFps.ToString(CultureInfo.InvariantCulture);
-            winFps.SelectionChanged += (s, e) => Set(x => x.WindowFps = winFps.SelectedIndex <= 0 ? 0 : int.Parse((string)winFps.SelectedItem, CultureInfo.InvariantCulture));
+            winFps.SelectionChanged += (s, e) => Safe.Run(() =>
+            {
+                Set(x => x.WindowFps = winFps.SelectedIndex <= 0
+                    ? 0
+                    : int.Parse((string)winFps.SelectedItem, CultureInfo.InvariantCulture));
+            }, _log);
             Row("Window FPS", winFps);
 
             Section("Party mode");
@@ -111,22 +174,37 @@ namespace MusicBeePlugin
             Row("Start how long before the lyrics (s)", Slider(0, 10, _edit.IntroLeadMs / 1000.0, v => Set(x => x.IntroLeadMs = (int)(v * 1000))));
 
             Section("Recorded video");
-            var res = new ComboBox { ItemsSource = new[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" }, IsEditable = true, Text = _edit.VideoResolution };
-            res.SelectionChanged += (s, e) => { if (res.SelectedItem is string r) Set(x => x.VideoResolution = r); };
-            res.LostFocus += (s, e) => Set(x => x.VideoResolution = res.Text);
+            var res = new ComboBox
+            {
+                ItemsSource = new[] { "1280x720", "1920x1080", "2560x1440", "3840x2160" },
+                IsEditable = true, Text = _edit.VideoResolution
+            };
+            res.SelectionChanged += (s, e) => Safe.Run(() =>
+            {
+                if (res.SelectedItem is string r) Set(x => x.VideoResolution = r);
+            }, _log);
+            res.LostFocus += (s, e) => Safe.Run(() => Set(x => x.VideoResolution = res.Text), _log);
             Row("Resolution", res);
             var fps = new ComboBox { ItemsSource = new[] { 24, 25, 30, 50, 60, 120, 144, 240 }, SelectedItem = _edit.VideoFps };
-            fps.SelectionChanged += (s, e) => { if (fps.SelectedItem is int f) Set(x => x.VideoFps = f); };
+            fps.SelectionChanged += (s, e) => Safe.Run(() =>
+            {
+                if (fps.SelectedItem is int f) Set(x => x.VideoFps = f);
+            }, _log);
             Row("Video FPS (higher = slower)", fps);
             var ff = new TextBox { Text = _edit.FfmpegPath };
-            ff.TextChanged += (s, e) => Set(x => x.FfmpegPath = ff.Text.Trim().Trim('"'));
+            ff.TextChanged += (s, e) => Safe.Run(() => Set(x => x.FfmpegPath = ff.Text.Trim().Trim('"')), _log);
             Row("ffmpeg.exe (empty = automatic)", ff);
 
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
             var reset = new Button { Content = "Defaults", Width = 84, Margin = new Thickness(0, 0, 8, 0) };
-            reset.Click += (s, e) => { Result = Keep(new Settings()); Close(); };
+            reset.Click += (s, e) => Safe.Run(() => { Result = Keep(new Settings()); Close(); }, _log);
             var ok = new Button { Content = "OK", Width = 84, IsDefault = true, Margin = new Thickness(0, 0, 8, 0) };
-            ok.Click += (s, e) => { Result = _edit; Close(); };
+            ok.Click += (s, e) => Safe.Run(() =>
+            {
+                _edit.Validate();
+                Result = _edit;
+                Close();
+            }, _log);
             var cancel = new Button { Content = "Cancel", Width = 84, IsCancel = true };
             buttons.Children.Add(reset);
             buttons.Children.Add(ok);
@@ -134,7 +212,28 @@ namespace MusicBeePlugin
             _panel.Children.Add(buttons);
 
             Content = new ScrollViewer { Content = _panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = SystemParameters.WorkArea.Height * 0.9 };
-            Closed += (s, e) => { if (Result == null) _preview(_original); };
+            Closed += (s, e) => Safe.Run(() => { if (Result == null) _preview(_original); }, _log);
+        }
+
+        private void TestLyricLoom(string configured)
+        {
+            var found = LyricLoomLocator.Default.Find(configured);
+            if (string.IsNullOrEmpty(found))
+            {
+                MessageBox.Show(this,
+                    "LyricLoom was not found.\n\nDownload it from " + LyricLoomLauncher.DownloadUrl,
+                    "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var version = "";
+            try
+            {
+                var info = FileVersionInfo.GetVersionInfo(found);
+                if (!string.IsNullOrEmpty(info.FileVersion)) version = "\nVersion " + info.FileVersion;
+            }
+            catch (Exception) { }
+            MessageBox.Show(this, "LyricLoom found:\n" + found + version,
+                "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         /// <summary>Defaults, but keeping where the window is.</summary>
@@ -142,19 +241,23 @@ namespace MusicBeePlugin
         {
             d.WindowLeft = _original.WindowLeft; d.WindowTop = _original.WindowTop;
             d.WindowWidth = _original.WindowWidth; d.WindowHeight = _original.WindowHeight;
+            d.WindowMonitor = _original.WindowMonitor;
             d.Fullscreen = _original.Fullscreen; d.WindowOpen = _original.WindowOpen;
             return d;
         }
 
         private void Set(Action<Settings> change)
         {
-            change(_edit);
-            _preview(_edit.Clone());
+            Safe.Run(() =>
+            {
+                change(_edit);
+                _preview(_edit.Clone());
+            }, _log);
         }
 
         private void RefreshColors()
         {
-            foreach (var refresh in _colorRows) refresh();
+            foreach (var refresh in _colorRows) Safe.Run(refresh, _log);
         }
 
         private void Section(string title) =>
@@ -175,16 +278,17 @@ namespace MusicBeePlugin
         private CheckBox Check(string label, bool value, Action<bool> changed)
         {
             var c = new CheckBox { Content = label, IsChecked = value, Margin = new Thickness(0, 3, 0, 3) };
-            c.Checked += (s, e) => changed(true);
-            c.Unchecked += (s, e) => changed(false);
+            c.Checked += (s, e) => Safe.Run(() => changed(true), _log);
+            c.Unchecked += (s, e) => Safe.Run(() => changed(false), _log);
             _panel.Children.Add(c);
             return c;
         }
 
-        private static Slider Slider(double min, double max, double value, Action<double> changed)
+        private Slider Slider(double min, double max, double value, Action<double> changed)
         {
-            var s = new Slider { Minimum = min, Maximum = max, Value = Math.Max(min, Math.Min(max, value)), VerticalAlignment = VerticalAlignment.Center };
-            s.ValueChanged += (o, e) => changed(e.NewValue);
+            var safeValue = double.IsNaN(value) || double.IsInfinity(value) ? min : Math.Max(min, Math.Min(max, value));
+            var s = new Slider { Minimum = min, Maximum = max, Value = safeValue, VerticalAlignment = VerticalAlignment.Center };
+            s.ValueChanged += (o, e) => Safe.Run(() => changed(e.NewValue), _log);
             return s;
         }
 
@@ -202,14 +306,14 @@ namespace MusicBeePlugin
             }
             Show();
             var pick = new Button { Content = "...", Width = 30, Margin = new Thickness(8, 0, 0, 0) };
-            pick.Click += (s, e) =>
+            pick.Click += (s, e) => Safe.Run(() =>
             {
                 var c = Settings.ParseColor(get(), Colors.White);
                 using (var dlg = new System.Windows.Forms.ColorDialog { FullOpen = true, Color = System.Drawing.Color.FromArgb(c.R, c.G, c.B) })
                     if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
                         hex.Text = Settings.ToHex(Color.FromRgb(dlg.Color.R, dlg.Color.G, dlg.Color.B));
-            };
-            hex.TextChanged += (s, e) =>
+            }, _log);
+            hex.TextChanged += (s, e) => Safe.Run(() =>
             {
                 if (updating) return;
                 try { ColorConverter.ConvertFromString(hex.Text); } catch (Exception) { return; }
@@ -223,8 +327,8 @@ namespace MusicBeePlugin
                     _settingTheme = false;
                 }
                 Show();
-            };
-            _colorRows.Add(Show);
+            }, _log);
+            _colorRows.Add(() => Safe.Run(Show, _log));
             var row = new StackPanel { Orientation = Orientation.Horizontal };
             row.Children.Add(swatch);
             row.Children.Add(hex);

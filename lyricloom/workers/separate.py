@@ -7,6 +7,36 @@ import torch
 from audio_separator.separator import Separator
 
 from . import emit, read_payload
+from .copies import first_model_dir
+
+
+def _required_files(p: dict) -> list[str]:
+    """Every file audio-separator needs locally, so it never fetches one on its own."""
+    name = str(p["model"]).lower()
+    files = list(dict.fromkeys(p.get("model_files") or [p["model"]]))
+    if "download_checks.json" not in files:
+        files.append("download_checks.json")
+    if name.endswith(".onnx") and "mdx_model_data.json" not in files:
+        files.append("mdx_model_data.json")
+    if name.endswith(".pth") and "vr_model_data.json" not in files:
+        files.append("vr_model_data.json")
+    return files
+
+
+def _missing_files(model_dir: Path, p: dict) -> list[str]:
+    needed = [model_dir / name for name in (p.get("model_files") or [p["model"]])]
+    if not (model_dir / "download_checks.json").is_file():
+        needed.append(model_dir / "download_checks.json")
+    name = str(p["model"]).lower()
+    if name.endswith(".onnx") and not (model_dir / "mdx_model_data.json").is_file():
+        needed.append(model_dir / "mdx_model_data.json")
+    if name.endswith(".pth") and not (model_dir / "vr_model_data.json").is_file():
+        needed.append(model_dir / "vr_model_data.json")
+    if name.endswith(".ckpt"):
+        stems = [path.with_suffix(s) for path in needed for s in (".yaml", ".yml", ".json")]
+        if not any(path.is_file() for path in stems):
+            needed.append(needed[0].with_suffix(".yaml"))
+    return [str(path) for path in needed if not path.is_file()]
 
 
 def main() -> None:
@@ -15,23 +45,12 @@ def main() -> None:
     requested = p.get("device", "auto")
     device = "cuda" if requested in ("auto", "cuda", "rocm") and torch.cuda.is_available() else "cpu"
     out_dir = Path(p["out_dir"])
-    model_dir = Path(p["model_dir"])
+    # Prefer the copy inside the distro when the setup helper made one; /mnt is the fallback.
+    model_dir = first_model_dir(p.get("model_dir_candidates"), _required_files(p),
+                                p.get("model_sizes"), p["model_dir"])
     # Never let audio-separator download on its own: every catalog and custom file must already be
     # in place (the engine's preflight checks it, and `models download` fetched it).
-    needed = [model_dir / name for name in (p.get("model_files") or [p["model"]])]
-    if not (model_dir / "download_checks.json").is_file():
-        needed.append(model_dir / "download_checks.json")
-    missing = [str(path) for path in needed if not path.is_file()]
-    name = str(p["model"]).lower()
-    # Files audio-separator would otherwise fetch on its own when they are absent.
-    if name.endswith(".onnx") and not (model_dir / "mdx_model_data.json").is_file():
-        missing.append(str(model_dir / "mdx_model_data.json"))
-    if name.endswith(".pth") and not (model_dir / "vr_model_data.json").is_file():
-        missing.append(str(model_dir / "vr_model_data.json"))
-    if name.endswith(".ckpt"):
-        stems = [path.with_suffix(s) for path in needed for s in (".yaml", ".yml", ".json")]
-        if not any(path.is_file() for path in stems):
-            missing.append(str(needed[0].with_suffix(".yaml")))
+    missing = _missing_files(model_dir, p)
     if missing:
         raise SystemExit(
             "the separator model is missing: " + ", ".join(missing)

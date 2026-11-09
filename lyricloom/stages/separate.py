@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -71,6 +72,38 @@ def _kept_is_current(audio: Path, kept: Path, spec: models.ModelSpec, overlap: i
     return kept.is_file() and _read_manifest(kept) == _expected_manifest(audio, spec, overlap)
 
 
+def _write_manifest(audio: Path, kept: Path, spec: models.ModelSpec, overlap: int) -> None:
+    manifest = _manifest_path(kept)
+    tmp = manifest.with_name(manifest.name + ".tmp")
+    tmp.write_text(json.dumps(_expected_manifest(audio, spec, overlap), indent=1),
+                   encoding="utf-8")
+    os.replace(tmp, manifest)
+
+
+def _legacy_kept_ok(audio: Path, kept: Path, spec: models.ModelSpec) -> bool:
+    """A stem kept by 2.0 has no manifest.  Reuse it only while the file was not created before
+    the source audio (so an edited/replaced song is separated again) and the separator is still
+    the catalog default; the caller then writes the manifest for next time."""
+    if not kept.is_file() or _manifest_path(kept).exists():
+        return False
+    if not (spec.default and not spec.custom):
+        return False
+    try:
+        return kept.stat().st_mtime >= audio.stat().st_mtime
+    except OSError:
+        return False
+
+
+def _reuse_kept(audio: Path, kept: Path, spec: models.ModelSpec, overlap: int) -> bool:
+    """True when the kept stem may be used; writes a manifest for a legacy stem on first reuse."""
+    if _kept_is_current(audio, kept, spec, overlap):
+        return True
+    if _legacy_kept_ok(audio, kept, spec):
+        _write_manifest(audio, kept, spec, overlap)
+        return True
+    return False
+
+
 def _archive_stale(path: Path) -> Path | None:
     if not path.exists():
         return None
@@ -103,7 +136,7 @@ def keep_vocals(audio: Path, vocals: Path, model: models.ModelSpec | None = None
     overlap = config.SEPARATOR_OVERLAP if overlap is None else overlap
     dst = kept_vocals_path(audio)
     if dst.exists():
-        if _kept_is_current(audio, dst, spec, overlap):
+        if _reuse_kept(audio, dst, spec, overlap):
             return dst
         _archive_stale(dst)
         _archive_stale(_manifest_path(dst))
@@ -113,41 +146,43 @@ def keep_vocals(audio: Path, vocals: Path, model: models.ModelSpec | None = None
     tmp = dst.with_name(dst.name + ".part")
     _copy_bit_exact(vocals, tmp, "FLAC", compression_level=0.0)
     tmp.replace(dst)
-    manifest = _manifest_path(dst)
-    tmp_manifest = manifest.with_name(manifest.name + ".tmp")
-    tmp_manifest.write_text(json.dumps(_expected_manifest(audio, spec, overlap), indent=1),
-                            encoding="utf-8")
-    os.replace(tmp_manifest, manifest)
+    _write_manifest(audio, dst, spec, overlap)
     return dst
 
 
-def _run_separator(audio: Path, work: Path, spec: models.ModelSpec
-                   ) -> tuple[Path, str, str | None]:
+def _run_separator(audio: Path, work: Path, spec: models.ModelSpec | None = None,
+                   cancel: threading.Event | None = None) -> tuple[Path, str, str | None]:
     """Runs the separator: in WSL on the GPU when possible, else on Windows. Returns the stem it
     wrote, the device used and, after a failed WSL run, why it failed."""
+    spec = spec or config.resolve_model("separate")
     model_path = spec.dest(spec.model_file(), config.MODELS)
     payload = {"audio": str(audio), "out_dir": str(work), "model": model_path.name,
                "model_dir": str(model_path.parent), "model_files": [f.filename for f in spec.files],
+               "model_sizes": {f.filename: f.size for f in spec.files},
                "device": config.SEPARATOR_DEVICE, "overlap": config.SEPARATOR_OVERLAP}
     fallback = None
     if config.SEPARATOR_WSL_ENABLED:
-        on_wsl = {**payload, "device": "rocm",
-                  **{k: wsl_path(payload[k]) for k in ("audio", "out_dir")}}
-        if config.WSL_MODELS_DIR:
-            on_wsl["model_dir"] = config.WSL_MODELS_DIR
-        else:
-            on_wsl["model_dir"] = wsl_path(payload["model_dir"])
         try:
+            mnt_model_dir = wsl_path(payload["model_dir"])
+            candidates = [d for d in (config.WSL_MODELS_DIR, mnt_model_dir) if d]
+            on_wsl = {**payload, "device": "rocm",
+                      **{k: wsl_path(payload[k]) for k in ("audio", "out_dir")},
+                      "model_dir": mnt_model_dir, "model_dir_candidates": candidates}
             res = run_worker("lyricloom.workers.separate", on_wsl, python=config.SEPARATOR_WSL_PYTHON,
-                             wsl=config.SEPARATOR_WSL_DISTRO, wsl_env=config.SEPARATOR_WSL_ENV)
+                             wsl=config.SEPARATOR_WSL_DISTRO, wsl_env=config.SEPARATOR_WSL_ENV,
+                             cancel=cancel)
             return windows_path(res["vocals"]), "rocm", None
+        except ValueError as e:
+            # UNC paths (\\server\share) cannot be bridged to /mnt; use the local CPU path.
+            fallback = f"{e}; separating on the CPU instead"
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             fallback = str(e)[-500:]
-    res = run_worker("lyricloom.workers.separate", payload, python=config.SEPARATOR_PYTHON)
+    res = run_worker("lyricloom.workers.separate", payload, python=config.SEPARATOR_PYTHON, cancel=cancel)
     return Path(res["vocals"]), res.get("device", config.SEPARATOR_DEVICE), fallback
 
 
-def separate(audio: Path, work: Path, model: models.ModelSpec | None = None) -> dict:
+def separate(audio: Path, work: Path, model: models.ModelSpec | None = None,
+             cancel: threading.Event | None = None) -> dict:
     """Isolates the vocals of `audio` into work/vocals.wav (and a 16 kHz mono copy), reusing the
     kept vocals only when their manifest matches the audio and the resolved separator model."""
     work.mkdir(parents=True, exist_ok=True)
@@ -156,7 +191,7 @@ def separate(audio: Path, work: Path, model: models.ModelSpec | None = None) -> 
     kept = kept_vocals_path(audio)
     out = {"model": spec.id, "model_id": spec.id,
            "model_fingerprint": models.fingerprint(spec)}
-    if _kept_is_current(audio, kept, spec, config.SEPARATOR_OVERLAP):
+    if _reuse_kept(audio, kept, spec, config.SEPARATOR_OVERLAP):
         _copy_bit_exact(kept, vocals, "WAV")
         out["device"] = "kept"
     else:
@@ -171,7 +206,7 @@ def separate(audio: Path, work: Path, model: models.ModelSpec | None = None) -> 
                                    "clean_s": stats["clean_s"]}
             if stats["ok"]:
                 source = minus
-        produced, out["device"], fallback = _run_separator(source, work, spec)
+        produced, out["device"], fallback = _run_separator(source, work, spec, cancel)
         if fallback:
             out["fallback"] = fallback
         produced.replace(vocals)
