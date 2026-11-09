@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.1.0 (`ENGINE_VERSION = "8"`).
+This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.1.0 (`ENGINE_VERSION = "9"`).
 
 ## The short version
 
@@ -199,9 +199,9 @@ The result is a list of `Line(start_ms, segments, conf)` where each `Segment` ha
 
 - builds `[ti:]`, `[ar:]`, `[re:LyricLoom <app version>]`, `[#source:<name> conf:<track conf>]`, `[#engine:<ENGINE_VERSION>]`, `[#models:...]`, `[#language:<code>]` when known, `[#warning:...]` for an unusable anchor or fallback, and `[#review:<zero-based line indices>]` when needed;
 - writes UTF-8 without BOM, LF line endings, via a temporary file and `os.replace`;
-- renames an existing main `.lrc` to `.lrc.bak`, `.lrc.bak1`, ... before replacing it;
-- writes `.original.lrc` for online sources;
-- for lyrics resolved as Japanese, writes `.japanese.lrc` and `.romaji.lrc`, then writes the main `.lrc` in the chosen script. A Chinese or Korean lyric that merely contains Han characters does not get Japanese variants.
+- copies an existing main `.lrc` to `.lrc.bak`, `.lrc.bak1`, ... before replacing it;
+- writes `.original.lrc` for online sources, sanitizing `[ti:]`/`[ar:]` and keeping a `.bak` copy;
+- for lyrics resolved as Japanese, writes `.japanese.lrc` and `.romaji.lrc` (also with `.bak` copies), then writes the main `.lrc` in the chosen script. A Chinese or Korean lyric that merely contains Han characters does not get Japanese variants.
 
 See [docs/lrc-format.md](lrc-format.md) for the exact contract.
 
@@ -243,7 +243,7 @@ Each JSON cache has a `_version` field. `runner.STAGE_VERSIONS` currently is:
  "transcribe_extra": "3", "transcribe_extra_aai": "3"}
 ```
 
-Bump a stage version only when that stage's output would change. The whole-file `ENGINE_VERSION` (`"8"`) is written to `#engine`; a track is skipped only when the `[re:]` marker is ours, `#engine` matches, and the lyric search was not left empty. This lets an engine change that only affects alignment avoid redoing separation and transcription.
+Bump a stage version only when that stage's output would change. The whole-file `ENGINE_VERSION` (`"9"`) is written to `#engine`; a track is skipped only when the `[re:]` marker is ours, `#engine` matches, and the lyric search was not left empty. This lets an engine change that only affects alignment avoid redoing separation and transcription.
 
 The work cache is not unbounded: `cache.size_report()` reports its size and `cache.prune(max_bytes, keep=...)` deletes the oldest track folders first, never the running track's folder or a folder with a live lock. The command line exposes it as `lyricloom cache status` and `lyricloom cache clean [--max-gb N]`.
 
@@ -317,7 +317,7 @@ Environment variables that affect behavior:
 | `LYRICLOOM_DATA_DIR` | Moves settings, cache, vocals and default models. |
 | `LYRICLOOM_MODELS` | Moves only the models. |
 | `LYRICLOOM_WHISPER_CLI` | Full path to a whisper.cpp `whisper-cli` (same as the `whisper_cli` setting). |
-| `LYRICLOOM_WHISPER_MODEL` | Deprecated: the old filename override. Use `model_choices` / `lyricloom models use`. |
+| `LYRICLOOM_WHISPER_MODEL` | 2.0 compatibility override for the transcribe model: a catalog id, a catalog file name, or another existing `.bin` in the models folder. Prefer `model_choices` / `lyricloom models use`. |
 | `LYRICLOOM_SEPARATOR_DEVICE` | `auto`, `cpu`, `cuda` or `dml` for the separator worker. |
 | `LYRICLOOM_SEPARATOR_OVERLAP` | Separator overlap (default 2). |
 | `LYRICLOOM_CPU_THREADS` | Caps worker thread pools (default: logical CPUs minus two, capped at 16). |

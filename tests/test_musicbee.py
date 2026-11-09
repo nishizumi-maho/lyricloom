@@ -56,6 +56,46 @@ def test_install_plugin_replaces_plugin_files_and_keeps_a_newer_shared_dll(tmp_p
     assert Path("RomajiCore.dll") in result.copied
 
 
+def test_a_new_file_under_romajilyrics_is_installed_even_when_the_target_exists(tmp_path):
+    """FR-A-10: only the shared IpaDic dictionary is copied once; other plugin files are replaced."""
+    source = _source(tmp_path / "bundle")
+    extra = source / "RomajiLyrics" / "Other" / "new.txt"
+    extra.parent.mkdir(parents=True)
+    extra.write_bytes(b"new plugin data")
+    destination = tmp_path / "Plugins"
+    old = destination / "RomajiLyrics" / "Other" / "new.txt"
+    old.parent.mkdir(parents=True)
+    old.write_bytes(b"old data")
+
+    result = musicbee.install_plugin(source, destination, running=lambda: False,
+                                     version_of=lambda path: "")
+
+    assert old.read_bytes() == b"new plugin data"
+    assert Path("RomajiLyrics/Other/new.txt") in result.copied
+
+
+def test_install_plugin_replaces_files_atomically(tmp_path, monkeypatch):
+    """FR-A-10: a failed copy leaves the previous DLL intact and no .part behind."""
+    source = _source(tmp_path / "bundle")
+    destination = tmp_path / "Plugins"
+    destination.mkdir()
+    target = destination / "mb_StarryKaraoke.dll"
+    target.write_bytes(b"old plugin")
+    real_replace = musicbee.os.replace
+
+    def fail_replace(src, dst):
+        if Path(dst) == target:
+            raise OSError("the DLL is locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(musicbee.os, "replace", fail_replace)
+    with pytest.raises(musicbee.MusicBeeError, match="could not copy"):
+        musicbee.install_plugin(source, destination, running=lambda: False,
+                                version_of=lambda path: "")
+    assert target.read_bytes() == b"old plugin"
+    assert not (destination / "mb_StarryKaraoke.dll.part").exists()
+
+
 def test_install_plugin_refuses_while_musicbee_is_running(tmp_path):
     source = _source(tmp_path / "bundle")
     destination = tmp_path / "Plugins"

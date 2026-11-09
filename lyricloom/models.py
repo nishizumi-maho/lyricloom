@@ -405,9 +405,12 @@ def nltk_ready(root: Path | None = None) -> bool:
 def status(spec: ModelSpec, root: Path | None = None, verify: bool = False) -> Status:
     """``ready``, ``missing``, ``corrupt`` or ``unverified``.
 
-    The size is always checked.  The full SHA-256 is computed on first sight (no sidecar) or when
-    ``verify`` is true; otherwise a sidecar with the file's size, mtime and digest is trusted, so
-    start-up does not hash several gigabytes on every run.
+    The size is always checked, so a missing or truncated file is caught without reading it.  A
+    matching size and a matching ``.verified.json`` sidecar (size, mtime and digest) make a file
+    ``ready``.  Without a sidecar the file is ``unverified``: usable for processing, and the Models
+    window offers Verify.  The full SHA-256 is computed only when ``verify`` is true (explicit
+    Verify/Repair) or by a download, so the first status check after a 2.0 upgrade does not hash
+    several gigabytes on the GUI path (FR-A-07).
     """
     root = _models_dir(root)
     if spec.kind == "builtin":
@@ -424,20 +427,23 @@ def status(spec: ModelSpec, root: Path | None = None, verify: bool = False) -> S
         if not file.sha256:
             saw_unverified = True
             continue
-        side = None if verify else _read_sidecar(dest)
+        if verify:
+            try:
+                digest = _hash_file(dest)
+            except OSError:
+                return "unverified"
+            _write_sidecar(dest, st, digest)
+            if digest.lower() != file.sha256:
+                return "corrupt"
+            continue
+        side = _read_sidecar(dest)
         if side and side.get("size") == st.st_size and side.get("mtime_ns") == st.st_mtime_ns:
             digest = str(side.get("sha256") or "")
             if digest and digest != file.sha256:
                 return "corrupt"
             if digest:
                 continue
-        try:
-            digest = _hash_file(dest)
-        except OSError:
-            return "unverified"
-        _write_sidecar(dest, st, digest)
-        if digest.lower() != file.sha256:
-            return "corrupt"
+        saw_unverified = True
     return "unverified" if saw_unverified else "ready"
 
 
@@ -462,6 +468,70 @@ def fingerprint(spec: ModelSpec, root: Path | None = None) -> str:
         except OSError:
             parts.append(f"{file.filename}|{file.sha256}|missing")
     return hashlib.sha1("\x1f".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+# --------------------------------------------------------------------------- 2.0 compatibility
+
+# 2.0 read LYRICLOOM_WHISPER_MODEL as a file name under the models folder and passed it straight to
+# whisper-cli.  2.1 resolves models through the catalog; honouring the variable keeps an upgraded
+# install on the model its legacy caches were made with (FR-A-01).
+_COMPAT_LOGGED: set[str] = set()
+
+
+def whisper_compatibility_model() -> ModelSpec | None:
+    """The 2.0 ``LYRICLOOM_WHISPER_MODEL`` override as a spec, or ``None`` when it is not usable.
+
+    The value may be a catalog model id, a catalog file name present in the models folder, or any
+    other existing ``.bin`` file (an absolute path works too).  A file outside the catalog becomes
+    a custom spec with a pinned size but no digest: it is reported ``unverified`` and hashed only
+    by an explicit Verify or a download, never on the status path.
+    """
+    value = os.environ.get("LYRICLOOM_WHISPER_MODEL", "").strip()
+    if not value:
+        return None
+    catalog_spec = get(value)
+    if catalog_spec is not None and catalog_spec.stage == "transcribe":
+        selected = catalog_spec
+    else:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = _models_dir() / value
+        try:
+            st = path.stat()
+        except OSError:
+            st = None
+        if st is None or path.suffix.lower() != ".bin" or not path.is_file():
+            if value not in _COMPAT_LOGGED:
+                _COMPAT_LOGGED.add(value)
+                log.warning("LYRICLOOM_WHISPER_MODEL=%r is neither a catalog model id nor an "
+                            "existing .bin file in %s; ignoring it", value, _models_dir())
+            return None
+        selected = next(
+            (spec for spec in CATALOG if spec.stage == "transcribe"
+             and spec.files[0].filename.lower() == path.name.lower()
+             and spec.dest(spec.files[0], _models_dir()) == path), None)
+        if selected is None:
+            stem = re.sub(r"[^a-z0-9]+", "-", path.stem.lower()).strip("-") or "model"
+            selected = ModelSpec(
+                id=f"compat-transcribe-{stem}", stage="transcribe",
+                label=f"Whisper model from LYRICLOOM_WHISPER_MODEL ({path.name})",
+                description="The 2.0 LYRICLOOM_WHISPER_MODEL compatibility override.",
+                files=(ModelFile(str(path.resolve()), "", st.st_size, ""),),
+                license="User-provided", custom=True)
+    if value not in _COMPAT_LOGGED:
+        _COMPAT_LOGGED.add(value)
+        log.info("LYRICLOOM_WHISPER_MODEL=%r overrides the transcription model: using %s",
+                 value, selected.id)
+    return selected
+
+
+def legacy_whisper_model() -> ModelSpec | None:
+    """The model a 2.0 install would have transcribed with: the environment override, else
+    ``ggml-large-v3.bin``.  ``None`` means the variable is set but unusable, so no legacy cache can
+    be attributed to a known model."""
+    if os.environ.get("LYRICLOOM_WHISPER_MODEL", "").strip():
+        return whisper_compatibility_model()
+    return get("whisper-large-v3")
 
 
 # --------------------------------------------------------------------------- resolution
@@ -510,10 +580,10 @@ def resolve(stage: str, lang: str | None = None, overrides: dict[str, str] | Non
             choices: dict | None = None, root: Path | None = None) -> ModelSpec:
     """The model a stage uses, with the binding precedence.
 
-    Per-track override > language choice > default choice > catalog default.  An unknown id, a
-    model for another stage, a model that does not suit ``lang`` or a custom file that is missing
-    or corrupt is logged and skipped; resolution then continues with the next level and never
-    raises because of a bad choice.
+    Per-track override > ``LYRICLOOM_WHISPER_MODEL`` (transcribe only, 2.0 compatibility) > language
+    choice > default choice > catalog default.  An unknown id, a model for another stage, a model
+    that does not suit ``lang`` or a custom file that is missing or corrupt is logged and skipped;
+    resolution then continues with the next level and never raises because of a bad choice.
     """
     if stage not in STAGES:
         raise ValueError(f"unknown model stage {stage!r}")
@@ -526,6 +596,10 @@ def resolve(stage: str, lang: str | None = None, overrides: dict[str, str] | Non
         from . import config
         overrides = config.active_models()
     merged = dict(overrides or {})
+    if stage == "transcribe" and stage not in merged:
+        compatibility = whisper_compatibility_model()
+        if compatibility is not None:
+            return compatibility
     custom = {s.id: s for s in custom_specs()}
     tried: set[str] = set()
     while True:
@@ -618,6 +692,10 @@ def download(spec: ModelSpec, progress=None, cancel=None, root: Path | None = No
 
     root = _models_dir(root)
     if status(spec, root=root) == "ready":
+        return [spec.dest(file, root) for file in spec.files]
+    # An explicit download may hash: a file from a 2.0 install has no sidecar but can still be the
+    # right one, and re-downloading several gigabytes to discover that would be wasteful (FR-A-07).
+    if status(spec, root=root, verify=True) == "ready":
         return [spec.dest(file, root) for file in spec.files]
     custom = {p.resolve() for s in custom_specs() for p in s.destinations(root) if p.exists()}
     written: list[Path] = []
