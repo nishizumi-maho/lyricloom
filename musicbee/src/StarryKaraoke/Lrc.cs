@@ -159,7 +159,7 @@ namespace MusicBeePlugin
             if (ms.Count == 0 || ms[0].Index > 0) ms.Insert(0, (0, lineStart));
             ms.Add((text.Length, Math.Max(lineEnd, ms[ms.Count - 1].Ms + 50)));
             for (var k = 0; k + 1 < ms.Count; k++)
-                Spread(tt.CharEndMs, text, ms[k].Index, ms[k + 1].Index, ms[k].Ms, Math.Max(ms[k + 1].Ms, ms[k].Ms + 30));
+                Spread(tt.CharEndMs, text, ms[k].Index, ms[k + 1].Index, ms[k].Ms, Math.Max(ms[k + 1].Ms, ms[k].Ms + 60));
             for (var i = 1; i < tt.CharEndMs.Length; i++)
                 if (tt.CharEndMs[i] < tt.CharEndMs[i - 1]) tt.CharEndMs[i] = tt.CharEndMs[i - 1];
             return tt;

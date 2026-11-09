@@ -19,6 +19,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="StarryKaraoke.Tests" />
     <InternalsVisibleTo Include="Preview" />
+    <InternalsVisibleTo Include="SmoothSeries" />
     <InternalsVisibleTo Include="StarryKaraoke.Recorder" />
   </ItemGroup>
 </Project>

@@ -292,6 +292,9 @@ namespace StarryKaraoke.Recorder
                     if (s.Glow)
                     {
                         var gv = new DrawingVisual();
+                        TextOptions.SetTextHintingMode(gv, TextHintingMode.Animated);
+                        TextOptions.SetTextFormattingMode(gv, TextFormattingMode.Ideal);
+                        TextOptions.SetTextRenderingMode(gv, TextRenderingMode.Grayscale);
                         using (var dc = gv.RenderOpen())
                         {
                             dc.PushTransform(new ScaleTransform((double)gw / w, (double)gh / h));
@@ -306,6 +309,9 @@ namespace StarryKaraoke.Recorder
                     }
 
                     var fv = new DrawingVisual();
+                    TextOptions.SetTextHintingMode(fv, TextHintingMode.Animated);
+                    TextOptions.SetTextFormattingMode(fv, TextFormattingMode.Ideal);
+                    TextOptions.SetTextRenderingMode(fv, TextRenderingMode.Grayscale);
                     using (var dc = fv.RenderOpen())
                     {
                         scene.Render(KaraokeScene.Layer.Sky, dc, size, t);
