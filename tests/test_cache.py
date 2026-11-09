@@ -114,3 +114,22 @@ def test_clear_removes_one_stage_cache(tmp_path, monkeypatch):
     assert cache.clear(audio, "lyrics") == 1
     assert cache.load(audio, "lyrics", "1") is None
     assert cache.load(audio, "separate", "1") == {"b": 2}
+
+
+def test_a_just_created_unreadable_lock_is_not_stolen(tmp_path, monkeypatch):
+    """FR-A-03: the window between O_EXCL and the JSON write must not let a second run unlink a
+    live lock; only an older unreadable lock is treated as stale."""
+    monkeypatch.setattr("lyricloom.config.WORK_ROOT", tmp_path / "work")
+    audio = tmp_path / "a.flac"
+    audio.write_bytes(b"x")
+    work = cache.work_dir(audio)
+    lock = work / cache.LOCK_NAME
+    lock.write_text("", encoding="utf-8")          # the owner is between open() and write()
+    assert cache.acquire(audio) is None
+    assert lock.exists()
+
+    old = time.time() - 60
+    os.utime(lock, (old, old))
+    recovered = cache.acquire(audio)               # a dead owner's unreadable lock is recovered
+    assert recovered is not None
+    recovered.release()

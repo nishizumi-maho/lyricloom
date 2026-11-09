@@ -15,6 +15,7 @@ For `01 - Synthetic Song.flac` in `D:\Music\Artist\Album\`:
 | `01 - Synthetic Song.japanese.lrc` | When the lyric is resolved as Japanese | The Japanese-script version, even if the main `.lrc` is romaji. |
 | `01 - Synthetic Song.romaji.lrc` | When the lyric is resolved as Japanese | The romanized version, even if the main `.lrc` is Japanese. |
 | `01 - Synthetic Song.lrc.bak`, `.bak1`, ... | When an existing main `.lrc` is replaced | Backups of earlier main `.lrc` files. |
+| `<name>.original.lrc.bak`, `<name>.japanese.lrc.bak`, `<name>.romaji.lrc.bak` | When an existing `.original.lrc` or script variant is replaced | Backups of earlier copies of those files. |
 
 The audio file itself is never modified.
 
@@ -54,7 +55,7 @@ Tags are written at the top, in this order when present:
 | `[ar:...]` | `[ar:鈴木このみ]` | Artist from the audio tags. May be empty if the file has no artist tag. |
 | `[re:...]` | `[re:LyricLoom 2.0.0]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
 | `[#source:...]` | `[#source:uta-net conf:0.94]` | Where the lyric came from, followed by the track confidence. Sources include `lrclib`, `netease`, `qq`, `utaten`, `genius`, `websearch`, `transcription` and `manual`. |
-| `[#engine:...]` | `[#engine:8]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
+| `[#engine:...]` | `[#engine:9]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
 | `[#models:...]` | `[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]` | The model each stage used for this song, as `stage=model-id` pairs separated by `;`. Written on every successful run. |
 | `[#language:...]` | `[#language:ja]` | The resolved lyric language when it is known. It controls script variants and language-specific models. |
 | `[#warning:...]` | `[#warning:no usable transcript; word timing unconfirmed]` | Warnings the app shows in the row tooltip. A track with a warning is marked review. |
@@ -141,7 +142,7 @@ followed by either:
 - the source's own line timing, if the source provided synced lyrics (without LyricLoom's word tags), or
 - the plain lyric text, one line per line, if the source was plain text.
 
-`original.lrc` is a reference and recovery file. It is overwritten atomically on each successful run that has an online source; it is not rotated into `.bak` files. It does not contain `[re:]`, `[#engine:]` or `[#review:]`.
+`original.lrc` is a reference and recovery file. It is replaced atomically on each successful run that has an online source, and the previous copy is kept as `original.lrc.bak` (or `.bak1`, `.bak2`, …), like the main `.lrc`, so a hand correction is not lost. It does not contain `[re:]`, `[#engine:]` or `[#review:]`.
 
 ## `.japanese.lrc` and `.romaji.lrc`
 
@@ -165,7 +166,7 @@ Notes:
 
 - Romanization uses MeCab/IPADic readings and pykakasi. Inline furigana such as `運命(さだめ)` is treated as the sung reading.
 - The romaji file inserts spaces between segments for readability; the Japanese file does not.
-- The `.japanese.lrc` and `.romaji.lrc` files are replaced atomically without `.bak` copies. The main `.lrc` still gets a backup when it is replaced, including when a script-preference change rewrites it.
+- The `.japanese.lrc` and `.romaji.lrc` files are replaced atomically and keep a `.bak` copy of the previous version, like the main `.lrc`, including when a script-preference change rewrites them.
 - If an older LyricLoom version wrote a Japanese `.lrc` but not the two variants, changing the script preference creates the missing variants from the existing main file.
 - Redo only moves aside `.japanese.lrc` / `.romaji.lrc` files that carry LyricLoom's `[re:]` marker; a sidecar from another tool is left alone.
 
@@ -190,7 +191,7 @@ To restore a backup:
 3. Rename `.lrc.bak` (or `.bak1`, `.bak2`, ...) to `.lrc`.
 4. Reopen the song.
 
-`.original.lrc`, `.japanese.lrc` and `.romaji.lrc` do not get `.bak` copies. The `.original.lrc` is the source text rather than a previous enhanced version; use it if you need the untouched lyric.
+`.original.lrc`, `.japanese.lrc` and `.romaji.lrc` keep their own `.bak` copies too. The `.original.lrc` is the source text rather than a previous enhanced version; use it if you need the untouched lyric.
 
 ## Compatibility
 

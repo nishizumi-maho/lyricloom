@@ -280,7 +280,9 @@ build. The `LYRICLOOM_WHISPER_CLI` environment variable does the same. Precedenc
 5. `PATH`.
 
 The binary must exist and support the model file. `lyricloom doctor` prints the path in use and
-whether it exists. The old `LYRICLOOM_WHISPER_MODEL` variable is superseded by the model catalog:
+whether it exists. `LYRICLOOM_WHISPER_MODEL` is still honoured as a 2.0 compatibility override: a
+catalog model id, a catalog file name in the models folder, or another existing `.bin` file there
+selects the transcribe model for every track. Prefer the model catalog for new installs:
 
 ```bash
 lyricloom models use transcribe whisper-large-v3-turbo
@@ -311,7 +313,10 @@ transcribe whisper-large-v3 *                    2.9 GB  ready      default (imp
 
 `models verify [id]` recomputes the full SHA-256 (the normal status check trusts a small
 `<file>.verified.json` sidecar with the file's size, mtime and digest, so start-up does not hash
-several gigabytes every time). A state is one of `ready`, `missing`, `corrupt` or `unverified`.
+several gigabytes every time). A file whose pinned size matches but that has no sidecar is
+`unverified`: processing accepts it, and the Models window offers Verify; only an explicit
+Verify/Repair or a download hashes it. A state is one of `ready`, `missing`, `corrupt` or
+`unverified`.
 If a model is corrupt, repair it without touching the others:
 
 ```bash

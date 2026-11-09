@@ -159,6 +159,7 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
                 aligned, sung = candidate, True
         except (WorkerError, ValueError, OSError, TypeError) as e:
             log.warning("singing model failed, using the CTC aligner: %s", str(e)[-300:])
+    used: dict[str, str] = {}
     if aligned is None:
         seg_tokens = [[[to_mms_tokens(reading(s, lang)) for s in seg_texts[i]] for i in range(b.line_start, b.line_end)]
                       for b in bs]
@@ -170,6 +171,7 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
             aligned = align_blocks(vocals16k, bs, seg_tokens, cancel=cancel)
         finally:
             config.set_active_language(previous)
+        used["align"] = align_spec.id   # only CTC actually ran this model (FR-A-04)
 
     lines = []
     for i, (segs_text, segs) in enumerate(zip(seg_texts, aligned)):
@@ -189,7 +191,6 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
     conf = track_conf(lines)
     review = any(l.conf < REVIEW_THRESHOLD for l in lines) or bool(mtl_note)
     notes = [mtl_note] if mtl_note else []
-    used = {"align": align_spec.id}
     if sung and singing_spec is not None:
         used["singing"] = singing_spec.id
     return AlignResult(lines, conf, review, used, notes)
