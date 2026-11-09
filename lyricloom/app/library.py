@@ -8,12 +8,13 @@ from __future__ import annotations
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt
 from PySide6.QtGui import QColor
 
-from .model import TrackRow
+from .model import (TrackRow, current_model_ids, other_model_stages, other_models_text)
 
-FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done"]
+FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done", "Made with other models"]
 STATUS_LABELS = {"cancelled": "Stopped"}
 REVIEW_TINT = QColor(255, 196, 0, 70)
 SORT_ROLE = Qt.UserRole + 1
+OTHER_MODELS_MARKER = "⇄ other"
 
 
 class TrackTableModel(QAbstractTableModel):
@@ -26,6 +27,21 @@ class TrackTableModel(QAbstractTableModel):
         super().__init__(parent)
         self.rows = list(rows or [])
         self._device_text = device_text or (lambda device: device)
+        self._current_models: dict[str, set[str]] | None = None
+
+    def current_models(self) -> dict[str, set[str]]:
+        """What the current choices resolve, cached until the choices change."""
+        if self._current_models is None:
+            self._current_models = current_model_ids()
+        return self._current_models
+
+    def invalidate_models(self) -> None:
+        """Forgets the cached choices so markers and the filter pick up a new choice."""
+        self._current_models = None
+        if self.rows:
+            self.dataChanged.emit(self.index(0, 0),
+                                  self.index(len(self.rows) - 1, self.columnCount() - 1),
+                                  [Qt.DisplayRole, Qt.ToolTipRole, SORT_ROLE])
 
     # ---------- QAbstractTableModel ----------
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -45,8 +61,10 @@ class TrackTableModel(QAbstractTableModel):
         row = self.rows[index.row()]
         column = index.column()
         status = STATUS_LABELS.get(row.status, row.status)
-        notes = ("⚠ warning" if row.notes else
-                 "⚠ fallback" if row.fallback else ("⚠ error" if row.error else ""))
+        other = other_model_stages(row, self.current_models())
+        warning = ("⚠ warning" if row.notes else
+                   "⚠ fallback" if row.fallback else ("⚠ error" if row.error else ""))
+        notes = " · ".join(part for part in (warning, OTHER_MODELS_MARKER if other else "") if part)
         values = (row.artist, row.title, status, row.source,
                   f"{row.conf:.2f}" if row.source else "", notes)
         keys = (row.artist.lower(), row.title.lower(), status.lower(), row.source.lower(),
@@ -69,6 +87,8 @@ class TrackTableModel(QAbstractTableModel):
                 tips.append("Warnings:\n" + "\n".join(row.notes))
             if row.fallback:
                 tips.append("Fallback:\n" + row.fallback)
+            if other:
+                tips.append(other_models_text(row, self.current_models()))
             if row.device:
                 tips.append("Device: " + self._device_text(row.device))
             if row.log_path:
@@ -140,10 +160,19 @@ class TrackFilterProxyModel(QSortFilterProxyModel):
         if model is None:
             return False
         row = model.row_at(source_row)
-        if self._status != "all" and row.status != self._status:
+        other = False
+        if self._status == "made with other models" or self._search:
+            current = (model.current_models() if hasattr(model, "current_models")
+                       else current_model_ids())
+            other = bool(other_model_stages(row, current))
+        if self._status == "made with other models":
+            if not other:
+                return False
+        elif self._status != "all" and row.status != self._status:
             return False
         if not self._search:
             return True
         status = STATUS_LABELS.get(row.status, row.status).lower()
-        haystack = f"{row.artist}\n{row.title}\n{status}\n{row.status}".lower()
+        marker = "made with other models" if other else ""
+        haystack = f"{row.artist}\n{row.title}\n{status}\n{row.status}\n{marker}".lower()
         return self._search in haystack

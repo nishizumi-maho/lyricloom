@@ -131,3 +131,55 @@ def test_repair_deletes_and_downloads_again(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.downloads.download_verified", fake)
     assert models.repair(spec, root=tmp_path) == [dest]
     assert dest.read_bytes() == b"new"
+
+
+def test_clear_removes_only_the_requested_choice():
+    models.use("transcribe", "whisper-medium")
+    models.use("transcribe", "whisper-small", lang="ja")
+    assert models.clear("transcribe", lang="ja") is True
+    assert config.resolve_model("transcribe", "ja").id == "whisper-medium"
+    assert models.clear("transcribe") is True
+    assert config.resolve_model("transcribe").id == "whisper-large-v3"
+    assert models.clear("transcribe") is False
+    assert config.model_choices() == {}
+
+
+def test_remove_only_forgets_a_custom_registration(tmp_path):
+    custom = tmp_path / "my-model.bin"
+    custom.write_bytes(b"custom")
+    spec = models.add("transcribe", str(custom))
+    models.use("transcribe", spec.id)
+    models.use("transcribe", spec.id, lang="ja")
+    assert models.find(spec.id) is not None
+
+    models.remove(spec.id)
+
+    assert models.find(spec.id) is None
+    assert custom.read_bytes() == b"custom"      # the user's file is never deleted
+    assert config.resolve_model("transcribe").id == "whisper-large-v3"
+    assert config.resolve_model("transcribe", "ja").id == "whisper-large-v3"
+    assert all(raw.get("id") != spec.id for raw in config.model_choices().get("custom", []))
+
+
+def test_remove_refuses_a_catalog_model():
+    with pytest.raises(ValueError, match="catalog"):
+        models.remove("whisper-large-v3")
+
+
+def test_download_writes_a_verification_sidecar(tmp_path, monkeypatch):
+    payload = b"verified model bytes"
+    digest = hashlib.sha256(payload).hexdigest()
+    spec = models.ModelSpec(
+        id="sidecar", stage="transcribe", label="x", description="",
+        files=(models.ModelFile("model.bin", "https://example.invalid/model.bin", len(payload),
+                                digest),),
+        license="test")
+
+    def fake(file, target, progress=None, cancel=None):
+        target.write_bytes(payload)
+        return target
+
+    monkeypatch.setattr("lyricloom.downloads.download_verified", fake)
+    assert models.download(spec, root=tmp_path) == [tmp_path / "model.bin"]
+    assert (tmp_path / "model.bin.verified.json").is_file()
+    assert models.status(spec, root=tmp_path) == "ready"
