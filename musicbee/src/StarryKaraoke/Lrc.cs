@@ -83,8 +83,25 @@ namespace MusicBeePlugin
             return line;
         }
 
-        public static bool IsJapanese(string s) => !string.IsNullOrEmpty(s) && s.Any(c =>
+        /// <summary>A character that makes text Japanese: hiragana, katakana or half-width katakana.
+        /// The prolonged sound mark and the middle dot are excluded, as in RomajiCore's kana test.</summary>
+        public static bool IsKana(char c) => (c >= 'ぁ' && c <= 'ゟ') || (c >= 'ァ' && c <= 'ヺ') ||
+                                             (c >= 'ㇰ' && c <= 'ㇿ') || (c >= 'ｦ' && c <= 'ﾟ');
+
+        public static bool HasKana(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (var c in s) if (IsKana(c)) return true;
+            return false;
+        }
+
+        public static bool HasCjk(string s) => !string.IsNullOrEmpty(s) && s.Any(c =>
             (c >= '぀' && c <= 'ヿ') || (c >= '㐀' && c <= '鿿') || (c >= 'ｦ' && c <= 'ﾟ'));
+
+        /// <summary>Japanese only when the text contains kana. Han characters alone are ambiguous:
+        /// they are used by Chinese and Japanese alike, so a Han-only line is left alone unless the
+        /// whole song is known to be Japanese (see <see cref="Timeline.Build"/>).</summary>
+        public static bool IsJapanese(string s) => HasKana(s);
 
         /// <summary>Full-width spaces and punctuation folded to ASCII, runs of spaces collapsed.</summary>
         public static string Tidy(string s) =>
@@ -160,24 +177,27 @@ namespace MusicBeePlugin
 
     internal static class Timeline
     {
-        /// <summary>Turns parsed lines into karaoke lines. romanize converts Japanese text (null: no romaji).</summary>
+        /// <summary>Turns parsed lines into karaoke lines. romanize converts Japanese text (null: no romaji).
+        /// A line is Japanese when it contains kana, or when any line of the song does: a Chinese song
+        /// (Han characters, no kana anywhere) must not get Japanese readings from IPADIC.</summary>
         public static List<KaraokeLine> Build(List<RawLine> raw, double songMs, JapaneseMode mode, Func<string, string> romanize)
         {
             var result = new List<KaraokeLine>();
+            var songIsJapanese = raw.Any(r => Lrc.HasKana(r.Text));
             for (var i = 0; i < raw.Count; i++)
             {
                 var r = raw[i];
                 var next = i + 1 < raw.Count ? raw[i + 1].StartMs : Math.Max(songMs, r.StartMs + 8000);
                 var original = Lrc.Tidy(r.Text);
-                var jp = romanize != null && Lrc.IsJapanese(original);
+                var jp = romanize != null && (Lrc.HasKana(original) || songIsJapanese);
                 var romaji = jp ? Lrc.Tidy(romanize(r.Text)) : null;
                 if (jp && romaji.Length == 0) { jp = false; romaji = null; }   // romaji engine unavailable
 
                 var letters = (romaji ?? original).Count(c => c != ' ');
-                if (!jp && Lrc.IsJapanese(original)) letters = (int)(letters * 2.5);
+                if (!jp && (Lrc.HasKana(original) || songIsJapanese)) letters = (int)(letters * 2.5);
                 var end = Math.Min(next - 100, r.StartMs + Math.Max(1400, letters * 85 + 600));
                 if (!double.IsNaN(r.EndTagMs)) end = Math.Min(next - 30, r.EndTagMs);
-                else if (r.HasWordTimes) end = Math.Min(next - 50, LastWordEnd(r));
+                else if (r.HasWordTimes) end = Math.Min(next - 50, LastWordEnd(r, songIsJapanese));
                 end = Math.Max(end, r.StartMs + 300);
 
                 var line = new KaraokeLine { StartMs = r.StartMs, EndMs = end, NextMs = next };
@@ -198,7 +218,7 @@ namespace MusicBeePlugin
         /// word starts (LYRICS BOCA writes no closing tag), so the last word gets about as long as the line's
         /// other words took, adjusted for its length. Lighting it until the next line would stretch it over
         /// any instrumental in between.</summary>
-        internal static double LastWordEnd(RawLine r)
+        internal static double LastWordEnd(RawLine r, bool songIsJapanese = false)
         {
             var words = r.Pieces.Where(p => !double.IsNaN(p.StartMs) && p.Text.Trim().Length > 0).ToList();
             var last = words[words.Count - 1];
@@ -211,7 +231,7 @@ namespace MusicBeePlugin
             gaps.Sort();
             var typical = gaps.Count > 0 ? gaps[gaps.Count / 2] : 500;
             var letters = Lrc.Tidy(last.Text).Count(c => c != ' ');
-            var byLength = letters * (Lrc.IsJapanese(last.Text) ? 180 : 75);
+            var byLength = letters * ((Lrc.HasKana(last.Text) || songIsJapanese) ? 180 : 75);
             return last.StartMs + Math.Max(250, Math.Min(1500, Math.Max(typical, byLength)));
         }
 
