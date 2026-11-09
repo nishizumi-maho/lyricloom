@@ -258,8 +258,8 @@ class WelcomePage(QWizardPage):
         layout.addWidget(size)
         privacy = QLabel(
             "<b>Your music stays on this computer.</b> Nothing is uploaded unless you turn on "
-            "cloud transcription on the Privacy page and add an AssemblyAI key. The optional "
-            "startup update check is off until you choose it.")
+            "cloud transcription on the Privacy page and add an AssemblyAI key. LyricLoom asks "
+            "GitHub for new releases (on by default; you can turn it off on the Privacy page).")
         privacy.setWordWrap(True)
         layout.addWidget(privacy)
         layout.addStretch(1)
