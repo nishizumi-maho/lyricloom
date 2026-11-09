@@ -3,10 +3,11 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def no_cloud_transcription(tmp_path, monkeypatch):
-    """Tests never reach AssemblyAI: a real key in assemblyai.key would otherwise turn it on.
-    Tests that need it turn it back on with a fake in place of the network call."""
-    monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_ENABLED", False)
+    """Tests never reach AssemblyAI: an isolated settings file keeps cloud transcription off, and
+    a real key in the user's data folder is never read. Tests that need it turn it back on with a
+    fake in place of the network call."""
     monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_KEY_FILE", tmp_path / "test-assemblyai.key")
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
 
 
 @pytest.fixture(autouse=True)

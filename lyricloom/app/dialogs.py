@@ -94,7 +94,7 @@ class SettingsDialog(QDialog):
         behaviour = QGroupBox("Behaviour")
         bform = QFormLayout(behaviour)
         self.check_updates = QCheckBox("Check GitHub Releases for updates on startup")
-        self.check_updates.setChecked(bool(data.get("check_updates", True)))
+        self.check_updates.setChecked(data.get("check_updates") is True)
         bform.addRow(self.check_updates)
         layout.addWidget(behaviour)
 

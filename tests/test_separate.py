@@ -166,6 +166,38 @@ def test_kept_vocals_mirror_the_library(tmp_path, library):
         config.vocals_root() / "テスト歌手" / "2020 - Synthetic Album [Single]" / "01 - Synthetic Song.vocals.flac"
 
 
+def test_unc_path_falls_back_to_the_local_separator(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"vocals": str(tmp_path / "vocals.wav")}
+
+    monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
+    monkeypatch.setattr(sep_mod, "run_worker", fake)
+    produced, device, fallback = sep_mod._run_separator(Path(r"\\server\share\Song.flac"), tmp_path)
+    assert [c["wsl"] for c in calls] == [None]
+    assert produced == tmp_path / "vocals.wav"
+    assert "UNC" in fallback and "CPU" in fallback
+
+
+def test_frozen_windows_without_worker_reports_a_damaged_install(monkeypatch, tmp_path):
+    gui = tmp_path / "LyricLoom.exe"
+    gui.write_bytes(b"")
+    monkeypatch.setattr(config, "IS_FROZEN", True)
+    monkeypatch.setattr(config, "IS_WINDOWS", True)
+    monkeypatch.setattr(sys, "executable", str(gui))
+
+    def no_run(*args, **kwargs):
+        raise AssertionError("a missing worker must not start any process")
+
+    monkeypatch.setattr("lyricloom.workers.subprocess.run", no_run)
+    with pytest.raises(WorkerError) as error:
+        run_worker("lyricloom.workers.separate", {}, cwd=tmp_path)
+    message = str(error.value)
+    assert "LyricLoomWorker.exe" in message and "damaged" in message and "reinstall" in message.lower()
+
+
 def test_vocals_root_is_a_setting(tmp_path):
     config.set_vocals_root(tmp_path / "Elsewhere")
     assert config.vocals_root() == tmp_path / "Elsewhere"

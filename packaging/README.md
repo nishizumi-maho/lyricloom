@@ -204,9 +204,11 @@ To uninstall:
 ~/.local/opt/LyricLoom/install.sh --uninstall
 ```
 
-Uninstalling removes the application, launcher and menu entry. Settings, logs,
-cached vocals and downloaded models under the LyricLoom data directory are
-intentionally preserved.
+Uninstalling removes the application, launcher and menu entry, then asks once
+(default No) whether to also remove LyricLoom's data. `--purge` removes the data
+without asking. Custom `models`, `vocals` or `work` locations from
+`settings.json`, and environment-provided locations, are listed for manual
+removal. The music library is never touched.
 
 ### Source install on Linux
 
@@ -293,9 +295,14 @@ LyricLoom-Setup.exe.sha256
 ```
 
 The versioned installer is uploaded too for users who want to pin a release.
-The updater must verify the SHA256 before running the installer and compare the
-release version with `lyricloom.VERSION` before offering an update. The
-installer is per-user and can run without elevation.
+The updater fails closed: it accepts only an HTTPS asset from this repository's
+own GitHub release (redirects only to GitHub's release asset hosts), requires the
+published SHA-256 (the asset digest, a matching `.sha256` file, or `SHA256SUMS`
+from the same release), verifies it, and refuses to run anything when the
+checksum is missing or wrong. The release workflow publishes with
+`overwrite_files: false`, so an existing release's assets cannot be replaced.
+The updater compares the release version with `lyricloom.VERSION` before
+offering an update. The installer is per-user and can run without elevation.
 
 ## CI
 

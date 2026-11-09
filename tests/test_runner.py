@@ -142,7 +142,7 @@ def _aai(monkeypatch, enabled=True):
         return SUNG
 
     monkeypatch.setattr(runner, "transcribe_assemblyai", fake)
-    monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_ENABLED", enabled)
+    monkeypatch.setattr("lyricloom.config.assemblyai_enabled", lambda: enabled)
     return calls
 
 
@@ -175,9 +175,11 @@ def test_assemblyai_votes_in_transcription_only_songs(lib, monkeypatch):
     voters = {}
     real_rover = runner.rover
     monkeypatch.setattr(runner, "rover", lambda ts, lang: voters.setdefault("n", len(ts)) and real_rover(ts, lang))
-    runner.process(_flac(root / "a.flac"))
+    res = runner.process(_flac(root / "a.flac"))
     assert voters["n"] == 4
     assert [c["name"] for c in calls] == ["assemblyai_vocals"]
+    assert res.cloud is True
+    assert "cloud transcription used: AssemblyAI" in _track_log(root / "a.flac")
 
 
 def test_no_assemblyai_when_disabled(lib, monkeypatch):
@@ -187,6 +189,22 @@ def test_no_assemblyai_when_disabled(lib, monkeypatch):
     monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
     runner.process(_flac(root / "a.flac"))
     assert calls == []
+
+
+def test_allow_cloud_false_never_calls_the_client(lib, monkeypatch):
+    root, _ = lib
+    calls = _aai(monkeypatch, enabled=True)
+    monkeypatch.setattr(runner, "search_all", lambda meta: [])
+    monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
+    res = runner.process(_flac(root / "a.flac"), allow_cloud=False)
+    assert calls == []
+    assert res.cloud is False
+
+
+def _track_log(audio: Path) -> str:
+    from lyricloom import cache
+
+    return (cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
 
 
 def test_hallucination_without_lyrics_or_assemblyai_fails_instead_of_writing_garbage(lib, monkeypatch):

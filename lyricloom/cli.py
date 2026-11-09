@@ -89,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    config.migrate_legacy_settings()
+    if config.migrate_legacy_settings():
+        print(f"migrated LyricsBoca settings and data to {config.APP_DATA}", file=sys.stderr)
     if args.cmd == "models":
         return _models(args)
     if args.cmd == "doctor":
@@ -101,9 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {path} is outside the library {library}", file=sys.stderr)
         print("hint: set the library in the app, or point LYRICLOOM_DATA_DIR at a test profile", file=sys.stderr)
         return 2
-    if args.no_cloud:
-        config.ASSEMBLYAI_ENABLED = False
-    results = runner.process_all(runner.find_audio(path), args.force, args.stage, on_result=_show)
+    results = runner.process_all(runner.find_audio(path), args.force, args.stage, on_result=_show,
+                                 allow_cloud=False if args.no_cloud else None)
     counts = Counter(r.status for r in results)
     print("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     return 0

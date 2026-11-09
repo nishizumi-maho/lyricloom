@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urlparse
 
 import httpx
 
@@ -36,6 +37,18 @@ def check(resp: httpx.Response) -> httpx.Response:
         raise SourceBlocked(f"{resp.request.url.host} answered {resp.status_code}")
     resp.raise_for_status()
     return resp
+
+
+def host_matches(host: str | None, domain: str) -> bool:
+    """Exact host or a real subdomain, so evilgenius.com is not genius.com."""
+    host = (host or "").lower().rstrip(".")
+    domain = domain.lower()
+    return host == domain or host.endswith("." + domain)
+
+
+def is_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and bool(parsed.hostname)
 
 
 _LRC_TS = re.compile(r"\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]")
