@@ -1,8 +1,8 @@
 # LyricLoom packaging and releases
 
-This directory contains the public-release scaffolding for LyricLoom 2.0.0. It
-builds the Windows installer and portable zip, the Linux tarball, and the
-GitHub Actions workflows that attach those files to a release.
+This directory contains the public-release scaffolding for LyricLoom 2.1.0 and the Starry Karaoke
+MusicBee plugin 1.3.0. It builds the Windows installer and portable zip, the Linux tarball, the
+plugin zip, and the GitHub Actions workflows that attach those files to a release.
 
 Nothing in this directory adds models or helper binaries to the repository.
 `tools/bin/` and `models/` remain ignored; `dist/` and `build/` are generated
@@ -12,13 +12,15 @@ locally.
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| Windows | `LyricLoom-Setup-2.0.0.exe` | Inno Setup 6 per-user installer |
+| Windows | `LyricLoom-Setup-2.1.0.exe` | Inno Setup 6 per-user installer |
 | Windows | `LyricLoom-Setup.exe` | stable copy used by the auto-updater |
-| Windows | `LyricLoom-2.0.0-win64.zip` | portable PyInstaller one-folder bundle |
-| Linux | `LyricLoom-2.0.0-linux-x86_64.tar.gz` | bundle + `.desktop` + install script |
+| Windows | `LyricLoom-2.1.0-win64.zip` | portable PyInstaller one-folder bundle |
+| Linux | `LyricLoom-2.1.0-linux-x86_64.tar.gz` | bundle + `.desktop` + install script |
+| MusicBee | `StarryKaraoke-MusicBee-1.3.0.zip` | plugin, recorder, romaji DLLs and dictionary |
 | All | `*.sha256` | one checksum file per artifact |
 
-The release workflow also creates an aggregate `SHA256SUMS` asset.
+The release workflow also creates an aggregate `SHA256SUMS` asset and verifies every checksum before
+publishing.
 
 ## Layout
 
@@ -36,13 +38,17 @@ packaging/
   linux/
     LyricLoom.desktop           desktop-entry template
     install.sh                  per-user Linux installer/uninstaller
+musicbee/
+  build.ps1                     plugin tests + plugin/recorder + release ZIP
+  src/                          StarryKaraoke and StarryKaraoke.Recorder
+  tests/StarryKaraoke.Tests/    .NET test project
 .github/workflows/
-  ci.yml                        tests on windows-latest + ubuntu-latest
+  ci.yml                        Python tests on windows-latest + ubuntu-latest and plugin tests
   release.yml                   tag/dispatch builds and GitHub Release
 scripts/
   setup-dev.ps1                 Windows Python 3.11 dev environment
   setup-dev.sh                  Linux Python 3.11 dev environment
-  build-windows.ps1             whisper.cpp + PyInstaller + zip + installer
+  build-windows.ps1             whisper.cpp + wheel + plugin + PyInstaller + zip + installer
   build-linux.sh                whisper.cpp + PyInstaller + tarball
 ```
 
@@ -52,6 +58,7 @@ scripts/
 
 * Windows 10/11 x64.
 * Python 3.11 x64. The project intentionally requires `>=3.11,<3.12`.
+* .NET 8 SDK for the Starry Karaoke plugin and recorder (they target .NET Framework 4.8).
 * Visual Studio 2022 Build Tools with the **Desktop development with C++**
   workload. The script uses the `Visual Studio 17 2022` CMake generator, so a
   normal Developer Command Prompt is not required.
@@ -101,8 +108,8 @@ Both scripts:
 4. run `pip check`;
 5. expose `imageio-ffmpeg`'s static ffmpeg in the venv when practical.
 
-They deliberately do not download models. Start the app and use the first-run
-model dialog, or use the CLI's `models` command.
+They deliberately do not download models. Start the app and use the setup assistant's **Models** page
+or **Help > Models…**, or use the CLI's `models` command.
 
 ## Building on Windows
 
@@ -132,13 +139,18 @@ What the script does:
    `python -m pip wheel --no-deps . -w build\wsl`. The setup assistant uses
    this wheel to create a WSL GPU environment without a source tree or PyPI
    checkout of LyricLoom.
-3. Runs PyInstaller with `--clean` into `dist/LyricLoom/`. The bundle contains
+3. Builds the Starry Karaoke plugin and recorder by running `musicbee/build.ps1`, then copies the
+   staged `musicbee/dist/StarryKaraoke-MusicBee-<plugin-version>` folder to `dist/MusicBeePlugin`.
+   The installer uses that folder for its optional MusicBee task; the release workflow also uploads
+   the plugin ZIP as a separate asset.
+4. Runs PyInstaller with `--clean` into `dist/LyricLoom/`. The bundle contains
    `LyricLoom.exe`, `LyricLoomWorker.exe`, `_internal/tools/bin/whisper-cli.exe`
-   and the ggml DLLs, and `_internal/wsl/setup-lyricloom-wsl.sh` plus the wheel.
-4. Zips the whole one-folder bundle as
-   `dist/LyricLoom-2.0.0-win64.zip`.
-5. Compiles `packaging/windows/LyricLoom.iss` into
-   `dist/LyricLoom-Setup-2.0.0.exe`, copies it to the stable name
+   and the ggml DLLs, `_internal/wsl/setup-lyricloom-wsl.sh` plus the wheel, and the bundled plugin
+   under `_internal/musicbee/`.
+5. Zips the whole one-folder bundle as
+   `dist/LyricLoom-2.1.0-win64.zip`.
+6. Compiles `packaging/windows/LyricLoom.iss` into
+   `dist/LyricLoom-Setup-2.1.0.exe`, copies it to the stable name
    `dist/LyricLoom-Setup.exe`, and writes SHA256 files.
 
 The Windows installer:
@@ -147,15 +159,25 @@ The Windows installer:
   request elevation;
 * creates a Start Menu shortcut and an optional desktop shortcut (unchecked by
   default);
+* offers the optional **Install the Starry Karaoke plugin for MusicBee** task when
+  MusicBee is detected; the task is checked by default and installs into
+  `%APPDATA%\MusicBee\Plugins`;
+* keeps previous task choices on an upgrade and accepts `/SKIPPLUGIN=1` from a
+  silent update, so MusicBee is never closed by the updater;
+* writes `HKCU\Software\LyricLoom\InstallPath` and `Executable` for the plugin;
 * registers an uninstaller in Apps & Features;
 * does **not** create file associations;
 * does **not** include models. They are downloaded at runtime to
   `%LOCALAPPDATA%\LyricLoom\models`.
 
-CI runners generally do not have the Vulkan SDK installed, so release builds
-from GitHub Actions use the CPU whisper.cpp variant. A maintainer with the
-Vulkan SDK can produce a Vulkan build locally with the same script; both
-variants satisfy the app's whisper.cpp contract.
+The uninstaller removes the program folder, shortcuts, registry key and the plugin files it installed.
+It asks once (default No) whether to delete LyricLoom's own data and lists custom or environment-based
+locations for manual removal. It never deletes the music library or `.lrc` files, and it leaves the
+MusicBee files shared with other plugins.
+
+CI runners generally do not have the Vulkan SDK installed, so the release workflow uses the pinned
+prebuilt CPU whisper.cpp v1.9.2 archive (`-SkipWhisper`). A maintainer with the Vulkan SDK can build a
+Vulkan variant locally with the same script. No official Vulkan whisper.cpp asset is published.
 
 ## Building on Linux
 
@@ -178,14 +200,14 @@ Outputs:
 
 ```text
 dist/LyricLoom/
-dist/LyricLoom-2.0.0-linux-x86_64.tar.gz
-dist/LyricLoom-2.0.0-linux-x86_64.tar.gz.sha256
+dist/LyricLoom-2.1.0-linux-x86_64.tar.gz
+dist/LyricLoom-2.1.0-linux-x86_64.tar.gz.sha256
 ```
 
 The tarball contains:
 
 ```text
-LyricLoom-2.0.0-linux-x86_64/
+LyricLoom-2.1.0-linux-x86_64/
   LyricLoom/             PyInstaller one-folder bundle
   install.sh             per-user installer
   LyricLoom.desktop      desktop-entry template
@@ -194,8 +216,8 @@ LyricLoom-2.0.0-linux-x86_64/
 ### Installing the Linux tarball
 
 ```bash
-tar -xzf LyricLoom-2.0.0-linux-x86_64.tar.gz
-cd LyricLoom-2.0.0-linux-x86_64
+tar -xzf LyricLoom-2.1.0-linux-x86_64.tar.gz
+cd LyricLoom-2.1.0-linux-x86_64
 ./install.sh
 ```
 
@@ -235,7 +257,8 @@ For a source install, the app looks for `whisper-cli` in
 `<repo>/tools/bin/`, then on `PATH`. Build it with `scripts/build-linux.sh`
 (or copy a compatible binary into `tools/bin/`). A system ffmpeg is optional
 because `imageio-ffmpeg` is bundled; the GUI needs a working Qt/OpenGL desktop
-session. The MTL worker downloads its small NLTK corpora on first use.
+session. NLTK data is a pinned model entry, downloaded by the app; the worker
+never fetches it on its own.
 
 ## Model data is not packaged
 
@@ -244,47 +267,55 @@ downloads them at runtime:
 
 | Model | Approximate size |
 | --- | --- |
-| whisper.cpp large-v3 | ~3.1 GB |
+| whisper.cpp large-v3 | ~2.9 GB |
 | audio-separator Mel-Band RoFormer | ~0.9 GB |
 | MMS forced alignment | ~1.2 GB |
 | LyricsAlignment-MTL checkpoint | ~66 MB |
+| NLTK data for the singing model | ~22 MB |
+
+The suggested defaults total about 5.4 GB. Alternative Whisper sizes and separator models are in the
+catalog; see [docs/models.md](../docs/models.md).
 
 Default Windows location: `%LOCALAPPDATA%\LyricLoom\models`.
 Default Linux location: `${XDG_DATA_HOME:-~/.local/share}/lyricloom/models`.
 `LYRICLOOM_DATA_DIR` and `LYRICLOOM_MODELS` override these locations.
 
-The first-run model dialog handles the large downloads. The application also
-downloads `cmudict`, `averaged_perceptron_tagger` and `punkt` for `g2p_en` when
-the MTL path is used for the first time.
+The setup assistant's **Models** page and the Models window handle the downloads. Every file is
+verified against its pinned size and SHA-256 before use.
 
 ## Release process
 
 The app version lives in three places that must be bumped together:
 
 1. `lyricloom/__init__.py` (`VERSION`);
-2. `pyproject.toml` (`project.version`, currently `2.0.0`);
+2. `pyproject.toml` (`project.version`, currently `2.1.0`);
 3. `packaging/windows/version_info.txt` (file/product version strings).
 
-`packaging/windows/LyricLoom.iss` has a `2.0.0` fallback only; the build script
+The plugin version lives in `musicbee/src/StarryKaraoke/StarryKaraoke.csproj` (`<Version>`, currently
+`1.3.0`). `tests/test_versions.py` fails when the app version sources disagree, and the release
+workflow reads the plugin version from the project file.
+
+`packaging/windows/LyricLoom.iss` has a `2.1.0` fallback only; the build script
 passes the real version with `/DMyAppVersion=...`.
 
 Then:
 
-1. Run `python -m pytest -m "not gpu"` on Windows and Linux.
+1. Run `python -m pytest -m "not gpu"` on Windows and Linux, and the .NET plugin tests.
 2. Commit the version bump.
 3. Create and push a tag that exactly matches the version:
 
    ```bash
-   git tag v2.0.0
-   git push origin v2.0.0
+   git tag v2.1.0
+   git push origin v2.1.0
    ```
 
 4. The **Release** workflow validates that the tag equals `lyricloom.VERSION`,
-   builds on `windows-latest` and `ubuntu-22.04`, verifies the checksums and
-   publishes a GitHub Release with:
-   * `LyricLoom-Setup.exe` and `LyricLoom-Setup-2.0.0.exe`;
-   * `LyricLoom-2.0.0-win64.zip`;
-   * `LyricLoom-2.0.0-linux-x86_64.tar.gz`;
+   builds the Windows installer/portable ZIP, the Linux tarball and the plugin ZIP, verifies the
+   checksums and publishes a GitHub Release with:
+   * `LyricLoom-Setup.exe` and `LyricLoom-Setup-2.1.0.exe`;
+   * `LyricLoom-2.1.0-win64.zip`;
+   * `LyricLoom-2.1.0-linux-x86_64.tar.gz`;
+   * `StarryKaraoke-MusicBee-1.3.0.zip`;
    * per-file `.sha256` files and `SHA256SUMS`.
 5. Manual runs are also possible from **Actions -> Release -> Run workflow**.
    A manual run uses the current `lyricloom.VERSION` and creates or updates the
@@ -292,8 +323,8 @@ Then:
 
 ### Auto-update contract
 
-The updater should fetch the latest release metadata from GitHub Releases and
-prefer the stable asset name:
+The updater fetches the latest release metadata from GitHub Releases and
+prefers the stable asset name:
 
 ```text
 LyricLoom-Setup.exe
@@ -319,19 +350,20 @@ manual dispatch:
 * pip caching keyed by `pyproject.toml`;
 * CPU-only torch/torchaudio from the PyTorch CPU index;
 * Linux Qt/X11, sound and ffmpeg runtime packages;
-* `pytest -m "not gpu"` with `QT_QPA_PLATFORM=offscreen`.
+* `pytest -m "not gpu"` with `QT_QPA_PLATFORM=offscreen`;
+* a separate Windows job runs the Starry Karaoke tests and builds the recorder.
 
 `.github/workflows/release.yml` runs on tags matching `v*` and on manual
-dispatch. It builds both platforms, validates the tag against
-`lyricloom.VERSION`, verifies every uploaded checksum, and publishes with
+dispatch. It builds the Windows installer/portable ZIP, the Linux tarball and the plugin ZIP, validates
+the tag against `lyricloom.VERSION`, verifies every uploaded checksum, and publishes with
 `softprops/action-gh-release`.
 
-## Validation performed while adding this scaffolding
+## Validation
 
-The files were checked with Python compilation and YAML parsing. A full
-installer build was not run in this workspace because it needs a Windows
-Visual Studio/Vulkan toolchain, Inno Setup, Inno's compiler and several GB of
-downloads. The workflows run those steps on GitHub-hosted runners.
+The release workflow is the authoritative full build. It runs the Python and .NET tests, builds every
+artifact on GitHub-hosted runners and verifies the checksums before publishing. A local full build
+needs a Windows Visual Studio/Vulkan toolchain, Inno Setup and several GB of downloads; use the
+workflow or run `scripts/build-windows.ps1` on a prepared machine.
 
 ## Known assumptions and limitations
 
