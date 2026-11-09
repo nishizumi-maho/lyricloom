@@ -1,4 +1,6 @@
 import hashlib
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -71,10 +73,10 @@ def test_run_worker_in_wsl_builds_the_command(monkeypatch):
     seen = {}
 
     def fake_run(argv, **kw):
-        seen["argv"], seen["input"] = argv, kw["input"]
+        seen["argv"], seen["input"] = argv, kw["input_bytes"]
         return subprocess.CompletedProcess(argv, 0, (RESULT_MARK + '{"ok": 1}\n').encode(), b"")
 
-    monkeypatch.setattr("lyricloom.workers.subprocess.run", fake_run)
+    monkeypatch.setattr("lyricloom.workers.run_process", fake_run)
     res = run_worker("some.module", {"a": 1}, python="/opt/lyricloom/venv/bin/python", cwd=Path(r"C:\Music\LyricLoom"),
                      wsl="Ubuntu", wsl_env={"HSA_ENABLE_DXG_DETECTION": "1"})
     argv = seen["argv"]
@@ -100,7 +102,8 @@ def test_run_worker_frozen_never_relaunches_the_gui(monkeypatch, tmp_path):
 
     monkeypatch.setattr(config, "IS_FROZEN", True)
     monkeypatch.setattr(sys, "executable", str(gui))
-    monkeypatch.setattr("lyricloom.workers.subprocess.run", fake_run)
+    monkeypatch.setattr("lyricloom.workers.run_process",
+                        lambda argv, **kw: fake_run(argv, **kw))
     for python in (str(gui), None):
         assert run_worker("lyricloom.workers.separate", {}, python=python, cwd=tmp_path) == {"ok": 1}
         assert seen["argv"] == [str(worker), "separate"]
@@ -145,6 +148,23 @@ def test_separate_runs_in_wsl_with_translated_paths(tmp_path, library, monkeypat
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the WSL path bridge is Windows-only")
+def test_wsl_separation_prefers_the_model_copy_inside_the_distro(tmp_path, library, monkeypatch):
+    calls = []
+    monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
+    monkeypatch.setattr(config, "WSL_MODELS_DIR", "/opt/lyricloom/models/separator")
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    audio = library / "Test Artist" / "Test Album" / "01 - Synthetic Song.flac"
+    _wav(audio)
+    sep_mod.separate(audio, tmp_path / "work")
+    payload = calls[0]["payload"]
+    assert payload["model_dir_candidates"][0] == "/opt/lyricloom/models/separator"
+    assert payload["model_dir_candidates"][-1].startswith("/mnt/")
+    assert payload["model_dir"] == payload["model_dir_candidates"][-1]
+    spec = config.resolve_model("separate")
+    assert payload["model_sizes"][spec.filename] == spec.size
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the WSL path bridge is Windows-only")
 def test_separate_falls_back_to_cpu_when_wsl_fails(tmp_path, library, monkeypatch):
     calls = []
     monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
@@ -170,6 +190,38 @@ def test_kept_vocals_paths_do_not_collide_outside_the_library(tmp_path, library)
     one = tmp_path / "Drive A" / "Artist" / "Album" / "01 - Song.flac"
     two = tmp_path / "Drive B" / "Artist" / "Album" / "01 - Song.flac"
     assert sep_mod.kept_vocals_path(one) != sep_mod.kept_vocals_path(two)
+
+
+def test_unc_path_falls_back_to_the_local_separator(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"vocals": str(tmp_path / "vocals.wav")}
+
+    monkeypatch.setattr(config, "SEPARATOR_WSL_ENABLED", True)
+    monkeypatch.setattr(sep_mod, "run_worker", fake)
+    produced, device, fallback = sep_mod._run_separator(Path(r"\\server\share\Song.flac"), tmp_path)
+    assert [c["wsl"] for c in calls] == [None]
+    assert produced == tmp_path / "vocals.wav"
+    assert "UNC" in fallback and "CPU" in fallback
+
+
+def test_frozen_windows_without_worker_reports_a_damaged_install(monkeypatch, tmp_path):
+    gui = tmp_path / "LyricLoom.exe"
+    gui.write_bytes(b"")
+    monkeypatch.setattr(config, "IS_FROZEN", True)
+    monkeypatch.setattr(config, "IS_WINDOWS", True)
+    monkeypatch.setattr(sys, "executable", str(gui))
+
+    def no_run(*args, **kwargs):
+        raise AssertionError("a missing worker must not start any process")
+
+    monkeypatch.setattr("lyricloom.workers.subprocess.run", no_run)
+    with pytest.raises(WorkerError) as error:
+        run_worker("lyricloom.workers.separate", {}, cwd=tmp_path)
+    message = str(error.value)
+    assert "LyricLoomWorker.exe" in message and "damaged" in message and "reinstall" in message.lower()
 
 
 def test_vocals_root_is_a_setting(tmp_path):
@@ -212,6 +264,57 @@ def test_separate_reuses_kept_vocals_without_separating(tmp_path, library, monke
     assert out["device"] == "kept"
     assert np.array_equal(sf.read(out["vocals"], dtype="int32")[0], samples)
     assert sf.info(out["vocals"]).subtype == "PCM_24"
+
+
+def _legacy_kept_stem(tmp_path, library):
+    """A stem as 2.0 left it: the FLAC exists, but there is no JSON manifest beside it."""
+    audio = library / "A" / "B" / "01 - C.flac"
+    _wav(audio)
+    stem = tmp_path / "stem.wav"
+    samples = _wav(stem, "PCM_24")
+    kept = sep_mod.keep_vocals(audio, stem)
+    sep_mod._manifest_path(kept).unlink()
+    return audio, kept, samples
+
+
+def test_legacy_kept_stem_is_reused_and_gets_a_manifest(tmp_path, library, monkeypatch):
+    audio, kept, samples = _legacy_kept_stem(tmp_path, library)
+    later = audio.stat().st_mtime + 5
+    os.utime(kept, (later, later))
+
+    def no_worker(*a, **kw):
+        raise AssertionError("a current legacy stem must not be separated again")
+
+    monkeypatch.setattr(sep_mod, "run_worker", no_worker)
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert out["device"] == "kept"
+    assert np.array_equal(sf.read(out["vocals"], dtype="int32")[0], samples)
+    manifest = sep_mod._manifest_path(kept)
+    assert manifest.is_file()
+    assert json.loads(manifest.read_text(encoding="utf-8"))["model"] == "separator-mel-band-roformer"
+
+
+def test_legacy_kept_stem_older_than_the_audio_is_not_reused(tmp_path, library, monkeypatch):
+    audio, kept, _ = _legacy_kept_stem(tmp_path, library)
+    earlier = audio.stat().st_mtime - 5
+    os.utime(kept, (earlier, earlier))
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert calls and out["device"] != "kept"
+
+
+def test_legacy_kept_stem_is_not_reused_for_a_non_default_separator(tmp_path, library, monkeypatch):
+    audio, kept, _ = _legacy_kept_stem(tmp_path, library)
+    later = audio.stat().st_mtime + 5
+    os.utime(kept, (later, later))
+    from lyricloom import models
+
+    models.use("separate", "separator-bs-roformer-vocals")
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert calls and out["device"] != "kept"
 
 
 def test_stale_kept_stem_is_not_reused(tmp_path, library, monkeypatch):

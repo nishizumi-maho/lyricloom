@@ -9,10 +9,14 @@ def test_forget_sync_deletes_only_what_lyrics_boca_wrote(tmp_path):
     (tmp_path / "song.romaji.lrc").write_text("x", encoding="utf-8")
     (tmp_path / "song.original.lrc").write_text("[00:01.00]a\n", encoding="utf-8")
 
-    removed = runner.forget_sync(audio)
+    moved = runner.forget_sync(audio)
 
-    assert {p.name for p in removed} == {"song.lrc", "song.japanese.lrc", "song.romaji.lrc"}
+    assert {p.name for p in moved} == {"song.lrc", "song.japanese.lrc", "song.romaji.lrc"}
+    assert not (tmp_path / "song.lrc").exists()
+    assert all(backup.exists() for backup in moved.values())
     assert (tmp_path / "song.original.lrc").exists()
+    runner.restore_sync(moved)
+    assert (tmp_path / "song.lrc").read_text(encoding="utf-8").startswith("[re:LyricLoom")
 
 
 def test_forget_sync_keeps_lrc_from_elsewhere(tmp_path):
@@ -20,5 +24,5 @@ def test_forget_sync_keeps_lrc_from_elsewhere(tmp_path):
     audio.write_bytes(b"")
     lrc = tmp_path / "song.lrc"
     lrc.write_text("[re:Acervo]\n[00:01.00]a\n", encoding="utf-8")
-    assert runner.forget_sync(audio) == []
+    assert runner.forget_sync(audio) == {}
     assert lrc.exists()

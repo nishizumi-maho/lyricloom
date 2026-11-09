@@ -8,7 +8,7 @@ import httpx
 
 from ...model import TrackMeta
 from . import genius, utaten
-from .base import RawResult, check
+from .base import RawResult, check, host_matches, is_https_url
 
 name = "websearch"
 _RESULT = re.compile(r'class="result__a" href="([^"]+)"')
@@ -19,9 +19,21 @@ def parse_results(html_text: str) -> list[str]:
     for href in _RESULT.findall(html_text):
         href = href.replace("&amp;", "&")
         target = parse_qs(urlparse(href).query).get("uddg", [href])[0]
-        if target.startswith("http"):
+        if is_https_url(target):
             urls.append(target)
     return list(dict.fromkeys(urls))
+
+
+def allowed_page(url: str) -> bool:
+    """True for an https page on an exact allowlisted host that an extractor can read."""
+    if not is_https_url(url):
+        return False
+    parsed = urlparse(url)
+    if host_matches(parsed.hostname, "genius.com"):
+        return parsed.path.endswith("-lyrics")
+    if host_matches(parsed.hostname, "utaten.com"):
+        return "/lyric/" in parsed.path
+    return False
 
 
 def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
@@ -29,14 +41,16 @@ def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
     r = check(client.get("https://html.duckduckgo.com/html/", params={"q": f"{meta.artist} {meta.title} {word}"}))
     out = []
     for url in parse_results(r.text)[:8]:
-        host = urlparse(url).netloc
-        if host.endswith("genius.com") and url.endswith("-lyrics"):
+        if not allowed_page(url):
+            continue
+        parsed = urlparse(url)
+        if host_matches(parsed.hostname, "genius.com"):
             page = check(client.get(url)).text
             text = genius.parse_page(page)
             artist, title = genius.parse_page_title(page)   # the page's own song, not ours
             if text:
                 out.append(RawResult(title, artist, None, text, None, url))
-        elif host.endswith("utaten.com") and "/lyric/" in url:
+        else:
             title, artist, text = utaten.parse_page(check(client.get(url)).text)
             if text:
                 out.append(RawResult(title, artist, None, text, None, url))

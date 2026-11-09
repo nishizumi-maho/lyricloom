@@ -3,6 +3,7 @@
 #
 # Prerequisites:
 #   * Python 3.11 x64 and .venv from scripts/setup-dev.ps1
+#   * .NET SDK 8.0 (builds the Starry Karaoke MusicBee plugin)
 #   * Visual Studio 2022 Build Tools with "Desktop development with C++"
 #   * Inno Setup 6 (unless -SkipInstaller is used)
 #   * Optional Vulkan SDK (detected automatically; otherwise whisper.cpp is CPU)
@@ -13,6 +14,7 @@
 # Outputs under dist\:
 #   LyricLoom\                       PyInstaller one-folder bundle
 #   LyricLoom-<version>-win64.zip    portable build
+#   MusicBeePlugin\                  Starry Karaoke files installed by the installer
 #   LyricLoom-Setup-<version>.exe    installer
 #   LyricLoom-Setup.exe              stable name for the auto-updater
 #   *.sha256                         checksums
@@ -245,6 +247,28 @@ if ($sevenZip) {
     Compress-Archive -Path $appDir -DestinationPath $zipPath -CompressionLevel Optimal -Force
 }
 Write-Sha256 $zipPath
+
+# --------------------------------------------------------------------------- MusicBee plugin
+$pluginProject = Join-Path $root 'musicbee\src\StarryKaraoke\StarryKaraoke.csproj'
+[xml]$pluginXml = Get-Content -LiteralPath $pluginProject -Raw
+$pluginVersionNode = $pluginXml.SelectSingleNode('//PropertyGroup/Version')
+if (-not $pluginVersionNode -or -not $pluginVersionNode.InnerText.Trim()) {
+    throw "Could not read <Version> from $pluginProject."
+}
+$pluginVersion = $pluginVersionNode.InnerText.Trim()
+
+Write-Host "Building the Starry Karaoke MusicBee plugin $pluginVersion..."
+& (Join-Path $root 'musicbee\build.ps1')
+$pluginStage = Join-Path $root "musicbee\dist\StarryKaraoke-MusicBee-$pluginVersion"
+if (-not (Test-Path -PathType Leaf (Join-Path $pluginStage 'mb_StarryKaraoke.dll'))) {
+    throw "The MusicBee plugin stage folder was not produced at $pluginStage."
+}
+$pluginDir = Join-Path $dist 'MusicBeePlugin'
+if (Test-Path $pluginDir) { Remove-Item $pluginDir -Recurse -Force }
+Copy-Item -LiteralPath $pluginStage -Destination $pluginDir -Recurse
+if (-not (Test-Path -PathType Leaf (Join-Path $pluginDir 'mb_StarryKaraoke.dll'))) {
+    throw "The MusicBee plugin stage was not copied to $pluginDir."
+}
 
 # --------------------------------------------------------------------------- installer
 if (-not $SkipInstaller) {

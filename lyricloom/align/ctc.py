@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from pathlib import Path
 
-from .. import config, models
+from .. import config
 from ..model import Segment
 from ..workers import WorkerError, run_worker, wsl_path
 from .anchors import Block
@@ -23,8 +24,8 @@ def _segments(blocks: list[Block], res: dict) -> list[list[Segment | None]]:
     return out
 
 
-def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[list[str]]]
-                 ) -> list[list[Segment | None]]:
+def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[list[str]]],
+                 cancel: threading.Event | None = None) -> list[list[Segment | None]]:
     """seg_tokens[k][l] = MMS token strings of each segment of line l in block k.
     Returns, per lyric line in order, one Segment (absolute ms) or None per segment.
     Runs on the GPU through ROCm in WSL when it is available, else on the CPU."""
@@ -36,15 +37,21 @@ def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[lis
     model_path = spec.dest(spec.model_file(), config.MODELS)
     payload = {"wav": str(vocals16k), "device": config.ALIGN_DEVICE, "blocks": [
         {"start_ms": b.start_ms, "end_ms": b.end_ms, "lines": lines} for b, lines in zip(blocks, seg_tokens)],
-        "model_path": str(model_path), "torch_home": str(torch_home)}
+        "model_path": str(model_path), "model_size": spec.size, "torch_home": str(torch_home)}
     if config.ALIGN_WSL_ENABLED:
-        on_wsl = {**payload, "device": "cuda", "wav": wsl_path(payload["wav"]),
-                  "model_path": wsl_path(payload["model_path"]),
-                  "torch_home": str(config.ALIGN_WSL_ENV.get("TORCH_HOME", torch_home))}
         try:
+            wsl_torch_home = str(config.ALIGN_WSL_ENV.get("TORCH_HOME") or torch_home)
+            mnt_model = wsl_path(payload["model_path"])
+            candidates = [f"{wsl_torch_home.rstrip('/')}/hub/checkpoints/{model_path.name}",
+                          mnt_model]
+            on_wsl = {**payload, "device": "cuda", "wav": wsl_path(payload["wav"]),
+                      "model_path": mnt_model, "model_candidates": candidates,
+                      "torch_home": wsl_torch_home}
             res = run_worker("lyricloom.workers.align_ctc", on_wsl, python=config.ALIGN_WSL_PYTHON,
-                             wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.ALIGN_WSL_ENV)
+                             wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.ALIGN_WSL_ENV, cancel=cancel)
             return _segments(blocks, res)
+        except ValueError as e:
+            log.warning("UNC path cannot be bridged to WSL (%s); aligning on the CPU instead", e)
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             log.warning("alignment in WSL failed, aligning on the CPU instead: %s", str(e)[-300:])
-    return _segments(blocks, run_worker("lyricloom.workers.align_ctc", payload))
+    return _segments(blocks, run_worker("lyricloom.workers.align_ctc", payload, cancel=cancel))

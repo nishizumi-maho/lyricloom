@@ -79,7 +79,7 @@ Use the launcher every time. If you move the folder, move `LyricLoomData` with i
    - **Japanese: 日本語** keeps the Japanese text in the main file.
    - **Japanese: romaji** puts the romaji version in the main file.
    - Both `<song>.japanese.lrc` and `<song>.romaji.lrc` are always written for Japanese songs, so you can change this later without reprocessing.
-5. Optional: click **AssemblyAI key…** only if you want cloud transcription. Leave it empty to keep everything local. See [Privacy](../docs/privacy.md).
+5. Optional: click **AssemblyAI key…** to store a key. Cloud transcription stays off by default: a stored key alone never uploads audio, and the separate cloud-transcription option must also be turned on. Leave everything off to keep the app fully local. See [Privacy](../docs/privacy.md).
 
 ### Models on first run
 
@@ -152,7 +152,7 @@ LyricLoom writes everything to `%LOCALAPPDATA%\LyricLoom` unless you override it
 | Work cache | `%LOCALAPPDATA%\LyricLoom\work` | Per-track JSON caches, 16 kHz vocal copies and `log.txt`. Safe to delete when the app is closed. |
 | Kept vocals | `%LOCALAPPDATA%\LyricLoom\vocals` | Lossless FLAC vocal stems, outside the music library. Safe to delete; they are recreated. |
 | Scan cache | `%LOCALAPPDATA%\LyricLoom\scan-*.json` | One small file per scanned library. Safe to delete. |
-| AssemblyAI key | `%LOCALAPPDATA%\LyricLoom\assemblyai.key` | Plain text; only present if you added a key. |
+| AssemblyAI key | `%LOCALAPPDATA%\LyricLoom\assemblyai.key` | Encrypted with Windows DPAPI for your user; only present if you added a key. |
 | whisper-cli fallback | `%LOCALAPPDATA%\LyricLoom\bin` | Used only if no bundled or `PATH` copy is found. |
 | Lyrics | Next to each audio file | `<song>.lrc`, `<song>.original.lrc`, and for Japanese songs the two script variants. |
 
@@ -182,7 +182,7 @@ The environment variable must be set in the environment that starts LyricLoom. S
 
 ## Update LyricLoom
 
-LyricLoom checks GitHub Releases for a newer version on startup (you can turn this off in **Settings**). When an update is available, **Help > Check for updates** shows the release notes and can download the installer, verify its SHA-256 checksum, and start it. The installer is interactive; nothing is installed silently.
+Automatic update checks are off until you turn them on in **Settings**. **Help > Check for updates** always works as a one-off check. When an update is available, the app shows the release notes and can download the installer from this project's GitHub release, verify its published SHA-256 checksum, and start it. The updater refuses to run an installer when the release has no checksum, when the checksum does not match, or when the download URL is not this project's release. The installer is interactive; nothing is installed silently.
 
 You can also update manually:
 
@@ -202,7 +202,9 @@ A new engine version may cause songs to be reprocessed. This is expected: the `.
 1. Close LyricLoom.
 2. Open **Settings > Apps > Installed apps** (or **Add or remove programs**).
 3. Find **LyricLoom**, choose **Uninstall**, and follow the prompt.
-4. The uninstaller removes the program folder and shortcuts. It deliberately leaves settings, models, caches, kept vocals and the AssemblyAI key in `%LOCALAPPDATA%\LyricLoom`.
+4. The uninstaller removes the program folder and shortcuts, then asks once whether to also delete LyricLoom's own data folders: settings and logs, work cache, kept vocals, models and the AssemblyAI key. **No** is the default. If you answer yes, only LyricLoom's default data folders are deleted; custom `models`, `vocals` or `work` locations from `settings.json`, and environment-provided locations, are listed for you to remove by hand.
+
+Your music library and the `.lrc` files next to your music are never deleted by the uninstaller.
 
 The default program folder is:
 

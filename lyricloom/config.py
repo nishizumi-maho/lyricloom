@@ -92,6 +92,17 @@ def set_setting(key: str, value) -> None:
     _save_setting(key, value)
 
 
+def _flag(value) -> bool:
+    """A JSON boolean setting, tolerating 0/1 and common string spellings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def library_root() -> Path:
     """The library chosen in the app (shared with the command line), else LIBRARY_ROOT."""
     chosen = _settings().get("library")
@@ -136,23 +147,67 @@ def set_japanese_script(script: str) -> None:
 
 
 def migrate_legacy_settings() -> bool:
-    """Copies settings from the pre-rename LyricsBoca data directory once. Returns True when a
-    migration happened, so the caller can tell the user where the new data lives."""
+    """Migrates settings and the data folders from the pre-rename LyricsBoca directory once.
+
+    Returns True when something was migrated, so the caller can tell the user where the new data
+    lives. A portable or test profile (``LYRICLOOM_DATA_DIR`` / ``LYRICLOOM_MODELS``) is never
+    migrated, because it explicitly manages its own files."""
+    if os.environ.get("LYRICLOOM_DATA_DIR") or os.environ.get("LYRICLOOM_MODELS"):
+        return False
     if SETTINGS_FILE != APP_DATA / "settings.json":
         return False   # tests and portable profiles manage their own settings
-    if SETTINGS_FILE.exists():
-        return False
     if not IS_WINDOWS:
         return False
-    old = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LyricsBoca" / "settings.json"
-    if not old.is_file():
+    old = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LyricsBoca"
+    if not old.is_dir():
         return False
-    try:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old, SETTINGS_FILE)
-        return True
-    except OSError:
-        return False
+    APP_DATA.mkdir(parents=True, exist_ok=True)
+    changed = False
+    moved: set[str] = set()
+    old_settings = old / "settings.json"
+    if not SETTINGS_FILE.exists() and old_settings.is_file():
+        try:
+            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(old_settings, SETTINGS_FILE)
+            changed = True
+        except OSError:
+            return False
+    # Move rather than copy: models alone can be several gigabytes and both folders are normally
+    # on the same drive. An existing destination is never overwritten.
+    for name in ("models", "vocals", "work"):
+        source, destination = old / name, APP_DATA / name
+        if source.is_dir() and not destination.exists():
+            try:
+                shutil.move(str(source), str(destination))
+                moved.add(name)
+                changed = True
+            except OSError:
+                pass
+    old_key, new_key = old / "assemblyai.key", APP_DATA / "assemblyai.key"
+    if old_key.is_file() and not new_key.exists():
+        try:
+            shutil.move(str(old_key), str(new_key))
+            changed = True
+        except OSError:
+            pass
+    if changed and moved and SETTINGS_FILE.exists():
+        # The copied settings still name the old folders; point the moved ones at the new location.
+        updates: dict[str, str] = {}
+        data = _settings()
+        for key in ("vocals", "work", "models"):
+            value = data.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                relative = Path(value).expanduser().relative_to(old)
+            except ValueError:
+                continue
+            if not relative.parts or relative.parts[0] not in moved:
+                continue
+            updates[key] = str(APP_DATA / relative)
+        if updates:
+            update_settings(updates)
+    return changed
 
 
 # --------------------------------------------------------------------------- models and tools
@@ -370,19 +425,148 @@ MTL_WSL_ENV = dict(ALIGN_WSL_ENV)
 
 # --------------------------------------------------------------------------- optional cloud
 
-# Optional AssemblyAI transcription (cloud). Off unless the user pastes a key; the key never lives
-# in the repository.
+# Optional AssemblyAI transcription (cloud). A key alone does not turn it on: cloud transcription
+# is an explicit setting (`assemblyai_enabled`, default false) and every run can also refuse it
+# through `runner.process(..., allow_cloud=...)`. The key never lives in the repository.
 ASSEMBLYAI_KEY_FILE = APP_DATA / "assemblyai.key"
-ASSEMBLYAI_ENABLED = ASSEMBLYAI_KEY_FILE.exists() or bool(os.environ.get("ASSEMBLYAI_API_KEY"))
+_DPAPI_MAGIC = b"DPAPI1\n"
+
+
+def assemblyai_enabled() -> bool:
+    """Whether the user turned cloud transcription on in Settings (default: off)."""
+    return _flag(_settings().get("assemblyai_enabled", False))
+
+
+def set_assemblyai_enabled(value: bool) -> None:
+    """Stores the cloud-transcription choice. The key is stored separately."""
+    _save_setting("assemblyai_enabled", bool(value))
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """CryptProtectData/CryptUnprotectData for the current Windows user, through ctypes."""
+    if not IS_WINDOWS:
+        raise OSError("Windows DPAPI is not available on this platform")
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    def blob(value: bytes):
+        buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+        return DataBlob(len(value), buffer), buffer
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    source, keepalive = blob(data)   # noqa: F841 - keepalive owns the source buffer
+    result = DataBlob()
+    if protect:
+        function = crypt32.CryptProtectData
+        function.argtypes = [ctypes.POINTER(DataBlob), wintypes.LPCWSTR, ctypes.POINTER(DataBlob),
+                             ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(DataBlob)]
+        args = (ctypes.byref(source), "LyricLoom AssemblyAI key", None, None, None, 0x1,
+                ctypes.byref(result))
+    else:
+        function = crypt32.CryptUnprotectData
+        function.argtypes = [ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.POINTER(DataBlob),
+                             ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(DataBlob)]
+        args = (ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result))
+    function.restype = wintypes.BOOL
+    if not function(*args):
+        code = ctypes.get_last_error()
+        raise OSError(code, "CryptProtectData failed" if protect else "CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(result.pbData, result.cbData)
+    finally:
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(ctypes.cast(result.pbData, ctypes.c_void_p))
+
+
+def _write_key_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if IS_WINDOWS:
+        try:
+            protected = _dpapi(text.encode("utf-8"), protect=True)
+        except OSError as exc:
+            raise RuntimeError(f"could not encrypt the AssemblyAI key for this Windows user: {exc}") from exc
+        path.write_bytes(_DPAPI_MAGIC + protected)
+        return
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as file:
+        file.write(text)
+    os.chmod(path, 0o600)
+
+
+def _read_key_text(path: Path) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"could not read the AssemblyAI key file: {exc}") from exc
+    if raw.startswith(_DPAPI_MAGIC):
+        if not IS_WINDOWS:
+            raise RuntimeError("the AssemblyAI key was encrypted with Windows DPAPI and cannot be read "
+                               "on this platform; add the key again")
+        try:
+            return _dpapi(raw[len(_DPAPI_MAGIC):], protect=False).decode("utf-8").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise RuntimeError("the AssemblyAI key could not be decrypted for this Windows user; "
+                               "add the key again") from exc
+    text = raw.decode("utf-8", "replace").strip()
+    if text:
+        _write_key_text(path, text)   # migrate a plain-text key on first read
+    return text
+
+
+def read_assemblyai_key() -> str:
+    """The AssemblyAI key from the environment or the data file, decrypted/migrated as needed."""
+    path = ASSEMBLYAI_KEY_FILE
+    environment_key = os.environ.get("ASSEMBLYAI_API_KEY", "").strip()
+    file_key = ""
+    if path.is_file():
+        try:
+            file_key = _read_key_text(path)   # also migrates a plain-text file on first read
+        except Exception:
+            if not environment_key:
+                raise
+    if environment_key:
+        return environment_key
+    if file_key and not IS_WINDOWS:
+        try:
+            if os.stat(path).st_mode & 0o077:
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return file_key
+
+
+def has_assemblyai_key() -> bool:
+    """Whether a key is configured, without decrypting or exposing it."""
+    return bool(os.environ.get("ASSEMBLYAI_API_KEY", "").strip()) or ASSEMBLYAI_KEY_FILE.is_file()
+
+
+def redact_assemblyai_key(text: str) -> str:
+    """Removes a configured key from text that is about to be logged or shown to the user."""
+    try:
+        key = read_assemblyai_key()
+    except Exception:  # noqa: BLE001 - a broken key file must not break logging
+        return text
+    return text.replace(key, "***") if key else text
 
 
 def set_assemblyai_key(key: str) -> None:
-    """Stores (or, when empty, removes) the AssemblyAI key."""
-    global ASSEMBLYAI_ENABLED
+    """Stores (or, when empty, removes) the AssemblyAI key.
+
+    Having a key does **not** enable cloud transcription; `assemblyai_enabled` is a separate
+    setting, so an environment-provided key can never be mistaken for consent."""
     key = key.strip()
     if key:
-        ASSEMBLYAI_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ASSEMBLYAI_KEY_FILE.write_text(key, encoding="utf-8")
-    elif ASSEMBLYAI_KEY_FILE.exists():
-        ASSEMBLYAI_KEY_FILE.unlink()
-    ASSEMBLYAI_ENABLED = bool(key) or bool(os.environ.get("ASSEMBLYAI_API_KEY"))
+        _write_key_text(ASSEMBLYAI_KEY_FILE, key)
+    else:
+        ASSEMBLYAI_KEY_FILE.unlink(missing_ok=True)

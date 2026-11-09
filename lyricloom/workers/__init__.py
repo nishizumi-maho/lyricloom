@@ -5,8 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 from .. import config
@@ -25,6 +29,12 @@ def _worker_argv(module: str) -> list[str]:
         worker = Path(sys.executable).with_name(f"LyricLoomWorker{suffix}")
         if worker.is_file():
             return [str(worker), module.rsplit(".", 1)[-1]]
+        if config.IS_WINDOWS:
+            raise WorkerError(
+                module,
+                "LyricLoomWorker.exe is missing from this installation. The installation is damaged; "
+                "reinstall LyricLoom from the official installer, or restore LyricLoomWorker.exe from "
+                "antivirus quarantine.")
         return [sys.executable, "--worker", module.rsplit(".", 1)[-1]]
     return [sys.executable, "-m", module]
 
@@ -59,6 +69,84 @@ class WorkerError(RuntimeError):
         self.stderr_tail = stderr_tail
 
 
+class WorkerCancelled(RuntimeError):
+    """The user stopped the queue while this worker (or a tool it started) was running."""
+
+    def __init__(self, detail: str = "cancelled by the user"):
+        super().__init__(detail)
+
+
+def check_cancelled(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise WorkerCancelled()
+
+
+def _process_flags() -> int:
+    if not config.IS_WINDOWS:
+        return 0
+    # CREATE_NO_WINDOW keeps console workers quiet; CREATE_NEW_PROCESS_GROUP gives the whole job a
+    # group that taskkill /T can find, including wsl.exe and any children it started.
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kills the process and every child it started. Never raises into the caller."""
+    if config.IS_WINDOWS:
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True,
+                           timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def run_process(argv: list[str], *, input_bytes: bytes = b"", timeout_s: int | None = None,
+                env: dict | None = None, cwd: Path | str | None = None,
+                cancel: threading.Event | None = None) -> subprocess.CompletedProcess:
+    """Runs one subprocess while staying cancelable.
+
+    ``subprocess.run`` blocks until the child exits, so a Stop in the GUI cannot reach a stage that
+    is busy for an hour. This polls instead, and on cancel kills the whole process tree (taskkill
+    /T on Windows, the process group on POSIX). stdout/stderr go to temporary files so a chatty
+    worker cannot fill a pipe and deadlock the poll loop."""
+    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        if input_bytes:
+            stdin.write(input_bytes)
+            stdin.seek(0)
+        kwargs = {}
+        if not config.IS_WINDOWS:
+            kwargs["start_new_session"] = True
+        proc = subprocess.Popen(
+            argv, stdin=stdin, stdout=stdout, stderr=stderr, env=env,
+            cwd=str(cwd) if cwd is not None else None, creationflags=_process_flags(), **kwargs)
+        started = time.monotonic()
+        while True:
+            code = proc.poll()
+            if code is not None:
+                break
+            if cancel is not None and cancel.is_set():
+                _kill_tree(proc)
+                raise WorkerCancelled()
+            if timeout_s is not None and time.monotonic() - started > timeout_s:
+                _kill_tree(proc)
+                raise subprocess.TimeoutExpired(argv, timeout_s)
+            time.sleep(0.05)
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(argv, code, stdout.read(), stderr.read())
+
+
 def wsl_path(path: Path | str) -> str:
     r"""WSL's view of a Windows path: F:\X\a.flac -> /mnt/f/X/a.flac."""
     s = str(path).replace("\\", "/")
@@ -75,9 +163,12 @@ def windows_path(path: str) -> Path:
 
 
 def run_worker(module: str, payload: dict, python: str | None = None, timeout_s: int = 3600,
-               cwd: Path | None = None, wsl: str | None = None, wsl_env: dict | None = None) -> dict:
+               cwd: Path | None = None, wsl: str | None = None, wsl_env: dict | None = None,
+               cancel: threading.Event | None = None) -> dict:
     """`wsl` names a WSL distro to run the worker in, with `python` being that distro's
-    interpreter and `wsl_env` extra variables for it; paths in the payload are the caller's job."""
+    interpreter and `wsl_env` extra variables for it; paths in the payload are the caller's job.
+    `cancel` stops the process tree when it is set."""
+    check_cancelled(cancel)
     threads = {"OMP_NUM_THREADS": str(config.CPU_THREADS), "MKL_NUM_THREADS": str(config.CPU_THREADS)}
     cwd = cwd or (config.APP_DATA if config.IS_FROZEN else config.PROJECT_ROOT)
     cwd = Path(cwd)
@@ -104,11 +195,8 @@ def run_worker(module: str, payload: dict, python: str | None = None, timeout_s:
                # Caps torch/numpy/onnxruntime thread pools in the worker (see config.CPU_THREADS).
                **threads}
         argv = _worker_argv(module) if _is_this_interpreter(python) else [python, "-m", module]
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if config.IS_WINDOWS else 0
-    proc = subprocess.run(
-        argv, input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        capture_output=True, timeout=timeout_s, env=env, cwd=str(cwd), creationflags=flags,
-    )
+    proc = run_process(argv, input_bytes=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                       timeout_s=timeout_s, env=env, cwd=cwd, cancel=cancel)
     stderr = proc.stderr.decode("utf-8", "replace")
     if proc.returncode != 0:
         raise WorkerError(module, stderr[-2000:])

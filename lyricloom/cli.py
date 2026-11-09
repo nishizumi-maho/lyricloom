@@ -89,6 +89,24 @@ def _verify(args) -> int:
     return 1 if bad else 0
 
 
+def _repair(args) -> int:
+    what = list(getattr(args, "what", []) or [])
+    if len(what) != 1:
+        print("usage: lyricloom models repair <id>", file=sys.stderr)
+        return 2
+    spec = models.find(what[0])
+    if spec is None:
+        print(f"unknown model {what[0]!r}; use `lyricloom models list`", file=sys.stderr)
+        return 2
+    try:
+        runtime.repair(spec)
+    except Exception as exc:  # noqa: BLE001 - report the download failure to the user
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{spec.id:34} {models.status(spec)}")
+    return 0
+
+
 def _use(args) -> int:
     what = list(getattr(args, "what", []) or [])
     if len(what) != 2:
@@ -137,6 +155,8 @@ def _models(args) -> int:
         return _download(args)
     if action == "verify":
         return _verify(args)
+    if action == "repair":
+        return _repair(args)
     if action in ("use", "add"):
         return _use(args) if action == "use" else _add(args)
     return 2
@@ -179,8 +199,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stage", choices=runner.STAGES, help="recompute this stage and the ones after it")
     p.add_argument("--no-cloud", action="store_true", help="never send audio to AssemblyAI")
 
-    m = sub.add_parser("models", help="list, choose, verify or download the optional models")
-    m.add_argument("action", choices=["list", "status", "download", "verify", "use", "add"])
+    m = sub.add_parser("models", help="list, choose, verify, repair or download the optional models")
+    m.add_argument("action",
+                   choices=["list", "status", "download", "verify", "repair", "use", "add"])
     m.add_argument("what", nargs="*", default=[],
                    help="model id(s), <stage> <id>, <stage> <path|name>, or an old download name")
     m.add_argument("--lang", help="with `use`: write a per-language choice")
@@ -191,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    config.migrate_legacy_settings()
+    if config.migrate_legacy_settings():
+        print(f"migrated LyricsBoca settings and data to {config.APP_DATA}", file=sys.stderr)
     if args.cmd == "models":
         return _models(args)
     if args.cmd == "doctor":
@@ -203,9 +225,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {path} is outside the library {library}", file=sys.stderr)
         print("hint: set the library in the app, or point LYRICLOOM_DATA_DIR at a test profile", file=sys.stderr)
         return 2
-    if args.no_cloud:
-        config.ASSEMBLYAI_ENABLED = False
-    results = runner.process_all(runner.find_audio(path), args.force, args.stage, on_result=_show)
+    results = runner.process_all(runner.find_audio(path), args.force, args.stage, on_result=_show,
+                                 allow_cloud=False if args.no_cloud else None)
     counts = Counter(r.status for r in results)
     print("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     return 0
