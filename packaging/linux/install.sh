@@ -57,10 +57,27 @@ validate_app_dir() {
 }
 
 json_value() {
-    # Reads a string value from settings.json without requiring Python.
+    # Reads a top-level string setting. A real JSON parser is used when available; the sed
+    # fallback at least does not stop at an escaped quote inside the value.
     local file="$1" key="$2"
     [[ -f "$file" ]] || return 0
-    sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$file" "$key" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as file:
+        settings = json.load(file)
+except (OSError, UnicodeError, ValueError):
+    raise SystemExit(0)
+value = settings.get(sys.argv[2]) if isinstance(settings, dict) else None
+if isinstance(value, str):
+    sys.stdout.write(value)
+PY
+        return 0
+    fi
+    sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\(\(\\.\|[^"\\]\)*\)".*/\1/p' "$file" | head -n 1
 }
 
 normalize_dir() {
@@ -146,6 +163,19 @@ custom_inside_data() {
     return 1
 }
 
+contains_music_outside_caches() {
+    # The Windows uninstaller's ContainsMusicOutsideCaches: any music file in the data folder
+    # except inside work/vocals/models means deleting the folder could delete the user's music.
+    local dir="$1"
+    [[ -d "$dir" ]] || return 1
+    find "$dir" -mindepth 1 \
+        -type d \( -iname 'work' -o -iname 'vocals' -o -iname 'models' \) -prune -o \
+        -type f \( -iname '*.mp3' -o -iname '*.flac' -o -iname '*.m4a' -o -iname '*.aac' \
+            -o -iname '*.ogg' -o -iname '*.opus' -o -iname '*.wav' -o -iname '*.aiff' \
+            -o -iname '*.aif' -o -iname '*.ape' -o -iname '*.wma' \) \
+        -print -quit 2>/dev/null | grep -q .
+}
+
 purge_data() {
     if [[ -n "${LYRICLOOM_DATA_DIR:-}" ]]; then
         echo "Left ${LYRICLOOM_DATA_DIR} in place: LYRICLOOM_DATA_DIR is environment-provided."
@@ -162,6 +192,12 @@ purge_data() {
     if custom_inside_data; then
         echo "A configured models, vocals or work folder is inside $DATA_DIR but is not a"
         echo "LyricLoom default location. Refusing to delete the data folder; remove it by hand."
+        return
+    fi
+    if contains_music_outside_caches "$DATA_DIR"; then
+        echo "LyricLoom found music files inside $DATA_DIR outside its work, vocals and models folders."
+        echo "Refusing to delete the data folder, because doing so could delete your music."
+        echo "Remove the LyricLoom data files by hand if you want to."
         return
     fi
     if [[ -d "$DATA_DIR" ]]; then

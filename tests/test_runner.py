@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -333,6 +335,40 @@ def test_transcript_drops_whisper_credit_hallucinations():
 def test_transcript_lines_have_a_max_length():
     tr = Transcript("pt", [Word("la", i * 300, i * 300 + 300, 0.9) for i in range(30)])
     assert max(len(l.split()) for l in runner._transcript_candidate(tr).text.splitlines()) <= 10
+
+
+def test_find_audio_prunes_a_directory_that_is_a_link_or_junction(tmp_path, monkeypatch):
+    root = tmp_path / "library"
+    album = root / "album"
+    album.mkdir(parents=True)
+    song = album / "song.flac"
+    song.write_bytes(b"x")
+    loop = album / "loop"
+    loop.mkdir()
+    (loop / "copied.flac").write_bytes(b"x")
+    real = runner._is_link_or_junction
+    monkeypatch.setattr(runner, "_is_link_or_junction",
+                        lambda path: Path(path).name == "loop" or real(path))
+    assert runner.find_audio(root) == [song]
+
+
+def test_find_audio_does_not_descend_into_a_windows_junction(tmp_path):
+    if os.name != "nt":
+        pytest.skip("junctions are Windows-only")
+    root = tmp_path / "library"
+    album = root / "album"
+    album.mkdir(parents=True)
+    song = album / "song.flac"
+    song.write_bytes(b"x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "copied.flac").write_bytes(b"x")
+    junction = root / "linked"
+    created = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(elsewhere)],
+                             capture_output=True, text=True)
+    if created.returncode != 0:
+        pytest.skip(f"could not create a junction: {created.stderr or created.stdout}")
+    assert runner.find_audio(root) == [song]
 
 
 def test_runner_failed_track_does_not_stop_folder(lib):
