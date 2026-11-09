@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,13 +95,17 @@ def _checksum_from_text(text: str, filename: str) -> str:
     return parts[0].lower() if parts else ""
 
 
-def download(info: UpdateInfo, progress: Progress | None = None) -> Path:
-    """Download the installer into the temp folder and verify its checksum when one is published."""
+def download(info: UpdateInfo, progress: Progress | None = None,
+             cancel: threading.Event | None = None) -> Path:
+    """Download the installer into the temp folder and verify its checksum when one is published.
+    `cancel` stops between chunks (the caller deletes the partial file)."""
     dest = Path(tempfile.gettempdir()) / info.asset_name
     tmp = dest.with_name(dest.name + ".part")
     expected = info.asset_sha256.lower()
     if not expected and info.checksum_url:
         expected = _checksum_from_text(_request(info.checksum_url).raise_for_status().text, info.asset_name)
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError("the update download was cancelled")
     with httpx.stream("GET", info.asset_url, headers={"User-Agent": USER_AGENT},
                       follow_redirects=True, timeout=60) as r:
         r.raise_for_status()
@@ -108,6 +113,10 @@ def download(info: UpdateInfo, progress: Progress | None = None) -> Path:
         done = 0
         with tmp.open("wb") as f:
             for chunk in r.iter_bytes(1 << 20):
+                if cancel is not None and cancel.is_set():
+                    f.close()
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError("the update download was cancelled")
                 f.write(chunk)
                 done += len(chunk)
                 if progress:

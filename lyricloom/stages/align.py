@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,7 +40,7 @@ def lyric_lang(meta: TrackMeta, transcript: Transcript) -> str:
 
 
 def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript, vocals16k: Path,
-          vocals: Path | None = None) -> AlignResult:
+          vocals: Path | None = None, cancel: threading.Event | None = None) -> AlignResult:
     """vocals (full rate) enables the singing model for English songs; without it every song uses CTC."""
     lang = lyric_lang(meta, transcript)
     texts = [l.strip() for l in chosen.text.splitlines() if l.strip()]
@@ -52,13 +53,13 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
     aligned, sung = None, False
     if lang == "en" and vocals is not None and config.MTL_ENABLED:
         try:
-            aligned, sung = align_lines_mtl(vocals, seg_texts), True
+            aligned, sung = align_lines_mtl(vocals, seg_texts, cancel=cancel), True
         except (WorkerError, ValueError, OSError) as e:
             log.warning("singing model failed, using the CTC aligner: %s", str(e)[-300:])
     if aligned is None:
         seg_tokens = [[[to_mms_tokens(reading(s, lang)) for s in seg_texts[i]] for i in range(b.line_start, b.line_end)]
                       for b in bs]
-        aligned = align_blocks(vocals16k, bs, seg_tokens)
+        aligned = align_blocks(vocals16k, bs, seg_tokens, cancel=cancel)
 
     lines = []
     for i, (segs_text, segs) in enumerate(zip(seg_texts, aligned)):
