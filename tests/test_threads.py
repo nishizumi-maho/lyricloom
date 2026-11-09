@@ -35,3 +35,11 @@ def test_workers_get_thread_limit_env():
 
 def test_thread_limit_is_a_sane_fraction_of_the_cpu():
     assert 1 <= config.CPU_THREADS <= max(1, (os.cpu_count() or 4))
+
+
+def test_default_thread_limit_is_cpu_minus_two_capped_at_sixteen(monkeypatch):
+    if os.environ.get("LYRICLOOM_CPU_THREADS"):
+        import pytest
+
+        pytest.skip("an explicit override is set")
+    assert config.CPU_THREADS == max(1, min(16, (os.cpu_count() or 4) - 2))

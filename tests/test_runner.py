@@ -438,3 +438,119 @@ def test_a_missing_model_fails_the_track_before_the_stage_runs(tmp_path, monkeyp
     assert "separator-mel-band-roformer" in res.error
     assert "lyricloom models download" in res.error
     assert called == []
+
+
+def test_an_empty_lyric_search_is_not_cached_and_the_next_run_retries(lib, monkeypatch):
+    """R1-08: a first run offline must not pin the track to Whisper text forever."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    calls = []
+
+    def search(meta):
+        calls.append(meta.title)
+        return [] if len(calls) == 1 else [Candidate("letras", "eu vou", score=0.9)]
+
+    monkeypatch.setattr(runner, "search_all", search)
+    first = runner.process(audio)
+    assert first.status == "review" and first.source == "transcription"
+    assert not (runner.cache.work_dir(audio) / "lyrics.json").exists()
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert doc.meta["#lyrics"] == "search-empty"
+
+    second = runner.process(audio)      # the #lyrics tag makes _already_done retry
+    assert second.source == "letras" and second.status == "done"
+    assert len(calls) == 2
+
+
+def test_research_lyrics_reruns_the_search(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    monkeypatch.setattr(runner, "search_all", lambda meta: [])
+    runner.process(audio)
+    seen = []
+    monkeypatch.setattr(runner, "search_all",
+                        lambda meta: seen.append(meta.title) or [Candidate("letras", "eu vou", score=0.9)])
+    heavy = []
+    real_separate, real_transcribe = runner.separate, runner.transcribe
+    monkeypatch.setattr(runner, "separate", lambda *a, **k: heavy.append("separate") or real_separate(*a, **k))
+    monkeypatch.setattr(runner, "transcribe", lambda *a, **k: heavy.append("transcribe") or real_transcribe(*a, **k))
+    result = runner.research_lyrics(audio)
+    assert seen and result.source == "letras"
+    assert heavy == []   # searching again reuses the separation and transcription caches
+
+
+def test_a_hallucinated_transcript_forces_review_and_is_reported(lib, monkeypatch):
+    """R1-09: a hallucinated anchor must surface in TrackResult.notes and in the .lrc."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    monkeypatch.setattr(runner, "transcribe", lambda *a, **k: CREDITS)
+    monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
+    res = runner.process(audio)
+    assert res.status == "review"
+    assert res.notes and "hallucinated" in res.notes[0]
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert "hallucinated" in doc.meta["#warning"]
+    assert doc.meta["#review"] == "0"   # every line of the only line is marked for review
+
+
+def test_a_second_process_is_skipped_while_the_track_lock_is_held(lib):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    lock = runner.cache.acquire(audio)
+    assert lock is not None
+    try:
+        res = runner.process(audio)
+        assert res.status == "skipped" and "already being processed" in res.error
+    finally:
+        lock.release()
+    assert runner.process(audio).status == "done"
+
+
+def test_find_audio_skips_kept_vocals_and_work_cache(tmp_path, monkeypatch):
+    library = tmp_path / "Library"
+    monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", library)
+    monkeypatch.setattr("lyricloom.config.DEFAULT_VOCALS", library / "Vocals")
+    monkeypatch.setattr("lyricloom.config.WORK_ROOT", library / "Work")
+    song = library / "Artist" / "Album" / "song.flac"
+    song.parent.mkdir(parents=True)
+    song.write_bytes(b"")
+    (song.parent / "song.vocals.flac").write_bytes(b"")
+    (library / "Vocals" / "x.flac").parent.mkdir(parents=True)
+    (library / "Vocals" / "x.flac").write_bytes(b"")
+    (library / "Work" / "y.flac").parent.mkdir(parents=True)
+    (library / "Work" / "y.flac").write_bytes(b"")
+    assert runner.find_audio(library) == [song]
+
+
+def test_a_failed_keep_vocals_step_is_only_logged(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+
+    def boom(*args, **kwargs):
+        raise OSError("the vocals cache is read-only")
+
+    monkeypatch.setattr(runner, "keep_vocals", boom)
+    assert runner.process(audio).status == "done"
+
+
+def test_cli_exit_code_is_one_when_every_track_failed(lib):
+    root, _ = lib
+    (root / "bad.flac").parent.mkdir(parents=True, exist_ok=True)
+    (root / "bad.flac").write_bytes(b"not audio")
+    assert cli.main(["process", str(root)]) == 1
+
+
+def test_process_language_override_is_logged_and_used(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    seen = {}
+
+    def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
+        seen["lang"] = lang
+        return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
+
+    monkeypatch.setattr(runner, "transcribe", fake_transcribe)
+    res = runner.process(audio, lang="zh")
+    assert res.status == "done" and seen["lang"] == "zh"
+    assert "language override: zh" in (runner.cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
+    assert parse_lrc((root / "a.lrc").read_text(encoding="utf-8")).meta["#language"] == "zh"

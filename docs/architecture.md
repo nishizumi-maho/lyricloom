@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.0.0 (`ENGINE_VERSION = "7"`).
+This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.1.0 (`ENGINE_VERSION = "8"`).
 
 ## The short version
 
@@ -26,9 +26,9 @@ Every stage except `probe` has its own JSON cache. `write` also reads cached res
 
 | Path | Responsibility |
 |---|---|
-| `lyricloom/cli.py` | `lyricloom` command: `process`, `models`, `doctor`. |
-| `lyricloom/runner.py` | Orchestrates the six stages, caching, skip/force behavior, per-track errors. |
-| `lyricloom/probe.py` | Reads tags with mutagen; determines probable language. |
+| `lyricloom/cli.py` | `lyricloom` command: `process`, `models`, `cache`, `doctor`. |
+| `lyricloom/runner.py` | Orchestrates the six stages, caching, per-track lock, skip/force behavior, per-track errors and warnings. |
+| `lyricloom/probe.py` | Reads tags with mutagen; determines probable language (kana only, plus an explicit tag). |
 | `lyricloom/lyrics/` | Source adapters, cleaning, metadata scoring, candidate choice. |
 | `lyricloom/stages/separate.py` | Vocal separation, instrumental subtraction, kept-vocals handling. |
 | `lyricloom/stages/transcribe.py` | whisper.cpp invocation and hallucination checks. |
@@ -57,11 +57,13 @@ The engine has no Qt imports. The GUI imports the engine, not the other way arou
 - title (falls back to the file stem)
 - album
 - duration
-- probable language: `ja` when the artist or title contains kana/kanji, otherwise `other`
+- probable language: `ja` only when the artist or title contains kana; Han characters alone are
+  not treated as Japanese. A `language`/`lang` tag (or an explicit app/CLI override) wins over the
+  heuristic, so Chinese, Korean and other languages are declared rather than guessed.
 
 `TrackMeta` is not cached; it is cheap to read and changes when tags change.
 
-The language is refined in `stages/align.lyric_lang` after transcription: Japanese tags or a Japanese transcript win; otherwise a transcript language of `pt` or `en` is used; everything else is `other`.
+The language is refined in `stages/align.lyric_lang` after transcription: Japanese tags or a Japanese transcript win; an explicit language survives; otherwise a transcript language of `pt` or `en` is used; everything else is `other`.
 
 ## Stage 2: lyrics
 
@@ -85,19 +87,29 @@ Each adapter returns `RawResult` objects: title, artist, duration, text, optiona
 `clean_lyrics` removes credit lines and site boilerplate. `score_meta` combines:
 
 ```text
-0.4 * title similarity
-0.3 * artist similarity
-0.2 * duration similarity
-0.1 * source weight
+title 0.4 * similarity
+artist 0.3 * similarity   (only when the track has an artist tag)
+duration 0.2 * similarity
+source 0.1 * weight
 ```
 
-The candidate list is sorted by that metadata score, but the final choice happens after transcription, in `lyrics/score.choose`:
+The weights are renormalized over the fields that are present, so a missing artist tag cannot
+make an otherwise perfect title/duration match unreachable. The candidate list is sorted by that
+metadata score, but the final choice happens after transcription, in `lyrics/score.choose`:
 
 - If a transcript exists, the candidate's text must be phonetically similar to what was heard (`MIN_TRANSCRIPT_MATCH = 0.60`). The final score is `0.5 * metadata + 0.5 * heard`.
+- A transcript whose romanized form is empty or too short (for example Korean, Chinese or Cyrillic
+  when no romanizer is installed) is treated as *no usable transcript*, never as a perfect match.
 - If no usable transcript exists, only a very strong metadata match is trusted (`MIN_META_WITHOUT_TRANSCRIPT = 0.85`).
 - The winner must still reach `MIN_ACCEPT = 0.55`.
 
-A source's ready-made word timing (for example NetEase YRC) is stored on the candidate as `synced: list[Line]`. It is not trusted blindly; the align stage compares it with the audio.
+A source's ready-made word or line timing (for example NetEase YRC or LRCLIB's synced LRC) is
+stored on the candidate as `synced: list[Line]`. It is not trusted blindly; the align stage compares
+it with the audio.
+
+A zero-candidate lyric search is **not cached**: the runner logs that the search ran, keeps the
+track reviewable, and retries on the next normal run. `runner.research_lyrics(audio)` (the app's
+"Search again" path) forces the search and the stages after it.
 
 If no candidate is accepted, the transcript becomes the lyric (`source = "transcription"`). That track is marked for review and no `.original.lrc` is written.
 
@@ -110,16 +122,18 @@ If no candidate is accepted, the transcript becomes the lyric (`source = "transc
    - same title plus an instrumental/off-vocal/inst/karaoke marker;
    - duration within 3 seconds of the song;
    - not the song itself.
-3. If an instrumental is found, `stages/instrumental.py` aligns it to the mix with a short least-squares filter (delay, gain, slight EQ), block by block, and writes `mix - instrumental` only when the cancellation is convincing (at least 3 seconds that cancel by 25 dB or more).
+3. If an instrumental is found, `stages/instrumental.py` aligns it to the mix with a short least-squares filter (delay, gain, slight EQ), block by block in float32 and streamed in chunks, and writes `mix - instrumental` only when the cancellation is convincing (at least 3 seconds that cancel by 25 dB or more). A failed subtraction is logged and the full mix is separated instead.
 4. Run the separator on the chosen source (full mix or subtracted mix):
    - in WSL/ROCm when `SEPARATOR_WSL_ENABLED`;
    - otherwise on Windows/Linux with the current Python.
-5. Write `vocals.wav`, then a mono 16 kHz `vocals16k.wav`.
+5. Write `vocals.wav`, then a mono 16 kHz `vocals16k.wav`; both reads and the resample are streamed. A container libsndfile cannot read (M4A/AAC and others) is decoded through `imageio-ffmpeg`.
 6. Keep a lossless FLAC copy outside the library.
 
 The separator worker uses `audio-separator` with `vocals_mel_band_roformer.ckpt`, batch size 1, segment size 256, overlap from `LYRICLOOM_SEPARATOR_OVERLAP` (default 2), and device `auto`/`cuda`/`cpu`/`dml`.
 
-If the WSL attempt fails, the exception tail is stored as `fallback`, the Windows/Linux worker runs on the CPU, and the track result records both the device and the fallback reason.
+If the WSL attempt fails, the exception tail is stored as `fallback`, the Windows/Linux worker runs on the CPU, and the track result records both the device and the fallback reason. If the WSL worker succeeded but reports `device="cpu"`, the result says `cpu` with a "WSL had no usable GPU" fallback reason; it is never labelled ROCm.
+
+Keeping the vocal stem and the instrumental subtraction are optional work: an unreadable instrumental, a failed subtraction or a read-only vocals cache is logged (`instrumental.error` / `kept_error`) and the separation result is still used.
 
 ## Stage 4: transcribe
 
@@ -136,11 +150,18 @@ It parses the JSON word tokens into `Word(text, start_ms, end_ms, prob)`.
 
 `looks_hallucinated` flags output that is not a plausible transcript:
 
-- fewer than 15 words per minute;
+- fewer than 15 words per minute of **sung** time (word spans with long silent gaps removed), not
+  of the whole audio file;
 - at least 30% credit/subtitle markers;
 - at least 30 words with five or fewer distinct normalized tokens (repetition).
 
-Hallucinated output is not used as anchors or as the lyric text.
+Hallucinated output is not used as anchors or as the lyric text. When no usable anchor remains
+(hallucinated, empty or unavailable transcript), the runner still writes the best result it can but
+marks it `review`, lists every line in `[#review:...]`, writes `[#warning:...]`, and returns the
+warning in `TrackResult.notes` for the app row.
+
+whisper-cli runs with a timeout of ten times the audio duration plus ten minutes; a timeout kills
+the process tree and fails the track with an actionable message instead of hanging forever.
 
 For tracks with no usable official lyric, `_extra_passes` runs two more transcriptions:
 
@@ -156,14 +177,16 @@ Optional AssemblyAI is called only when the `assemblyai_enabled` setting is on, 
 `stages/align.py` is the core:
 
 1. **Text preparation.** `split_line` splits Japanese with MeCab/IPADic (keeping inline furigana with its kanji) or Latin text into words with their trailing spaces. `reading` produces the romanized form used for matching.
-2. **Anchors.** `align/anchors.find_anchors` aligns the lyric's romanized characters against the Whisper transcript's romanized words with Needleman–Wunsch. A lyric line becomes an anchor when at least 70% of its characters match. Anchors carry the Whisper start/end of the matched words.
+2. **Anchors.** `align/anchors.find_anchors` aligns the lyric's romanized characters against the Whisper transcript's romanized words with Needleman–Wunsch. A lyric line becomes an anchor when at least 70% of its characters match. Anchors carry the Whisper start/end of the matched words. A script the text layer cannot romanize (Han, Hangul, Cyrillic, Thai, ...) skips word alignment: the stage writes line-level timing, marks the track `review` and returns a note naming the script. It never runs a whole-song CTC attempt that silently returns no words.
 3. **Blocks.** `blocks` turns anchors into short regions with 500 ms margins. Lines between anchors stay in the same block; unanchored intro/outro lines get their own block. Blocks prevent one alignment error from drifting across the song.
 4. **Backend.**
    - **English + full-rate vocals + MTL available:** `align/mtl.align_lines_mtl` runs LyricsAlignment-MTL. This is the preferred English path.
    - **Everything else, or MTL failure:** `align/ctc.align_blocks` runs torchaudio MMS_FA CTC alignment per block.
-   - MTL failure is caught and logged; processing falls back to CTC.
+   - MTL failure is caught and logged; processing falls back to CTC. MTL timing is also sanity-checked
+     against its block, word order and nearby anchors; a failed check falls back to CTC, adds a
+     warning note and marks the track review.
 5. **Per-word results.** CTC returns a start, end and score per segment. MTL returns start/end; punctuation segments have no acoustic word and stay `None`.
-6. **Ready-made timing.** `merge_presync` compares each line with a source's synced line by normalized text and character offsets. If the mean difference is at most 150 ms and every segment can be retimed, the source timing replaces ours and the line confidence rises to at least 0.9. Otherwise our timing is kept.
+6. **Ready-made timing.** `merge_presync` compares each line with a source's synced line by normalized text and character offsets. Word-level presync is applied when the mean difference is at most 150 ms. A plain LRC source with only a line timestamp moves the line start when it agrees with ours; word starts from CTC/MTL are kept. Otherwise our timing is kept.
 7. **Refine.** `align/refine.py` enforces strictly increasing starts, no overlaps, no times past the track end, and collapses any line that is only partly aligned into a single line-timed text segment.
 8. **Trim.** `align/trim.py` finds where the isolated vocal actually goes quiet after the last word (20 ms RMS frames, 300 ms of quiet at 16 dB below the line's voiced level, minimum 150 ms) and moves the last end back. This stops a word from staying lit through an instrumental break.
 9. **Confidence.** `line_conf` is `0.6 * mean(CTC score) + 0.4 * anchor score`; MTL lines use the anchor score (or 0.55 when Whisper did not hear the line). `track_conf` is duration-weighted. `REVIEW_THRESHOLD = 0.6`.
@@ -174,11 +197,11 @@ The result is a list of `Line(start_ms, segments, conf)` where each `Segment` ha
 
 `stages/write.py`:
 
-- builds `[ti:]`, `[ar:]`, `[re:LyricLoom <app version>]`, `[#source:<name> conf:<track conf>]`, `[#engine:<ENGINE_VERSION>]`, and `[#review:<zero-based line indices>]` when needed;
+- builds `[ti:]`, `[ar:]`, `[re:LyricLoom <app version>]`, `[#source:<name> conf:<track conf>]`, `[#engine:<ENGINE_VERSION>]`, `[#models:...]`, `[#language:<code>]` when known, `[#warning:...]` for an unusable anchor or fallback, and `[#review:<zero-based line indices>]` when needed;
 - writes UTF-8 without BOM, LF line endings, via a temporary file and `os.replace`;
 - renames an existing main `.lrc` to `.lrc.bak`, `.lrc.bak1`, ... before replacing it;
 - writes `.original.lrc` for online sources;
-- for Japanese lyrics, writes `.japanese.lrc` and `.romaji.lrc`, then writes the main `.lrc` in the chosen script.
+- for lyrics resolved as Japanese, writes `.japanese.lrc` and `.romaji.lrc`, then writes the main `.lrc` in the chosen script. A Chinese or Korean lyric that merely contains Han characters does not get Japanese variants.
 
 See [docs/lrc-format.md](lrc-format.md) for the exact contract.
 
@@ -209,16 +232,20 @@ with SHA-1 and takes the first 16 hex characters:
 └── log.txt
 ```
 
-Not every file exists for every track. `lyrics.json` contains candidates; `separate.json` contains model/device/fallback and paths; `transcribe.json` contains the transcript; the extra files are for fallback/voting passes.
+Not every file exists for every track. `lyrics.json` contains candidates; `separate.json` contains model/device/fallback and paths; `transcribe.json` contains the transcript; the extra files are for fallback/voting passes. A zero-candidate lyric search is not written at all. A truncated or non-object JSON file is renamed `*.corrupt` and recomputed, so `force` and a normal run both recover it.
+
+Each track also has a `lock` file while a run is using its work directory. It stores the process id; a second app/CLI run skips the track with "already being processed" instead of writing the same files. A lock whose process is gone is treated as stale and removed.
 
 Each JSON cache has a `_version` field. `runner.STAGE_VERSIONS` currently is:
 
 ```python
-{"lyrics": "4", "separate": "4", "transcribe": "3",
+{"lyrics": "5", "separate": "5", "transcribe": "3",
  "transcribe_extra": "3", "transcribe_extra_aai": "3"}
 ```
 
-Bump a stage version only when that stage's output would change. The whole-file `ENGINE_VERSION` (`"7"`) is written to `#engine`; a track is skipped only when the `[re:]` marker is ours and `#engine` matches. This lets an engine change that only affects alignment avoid redoing separation and transcription.
+Bump a stage version only when that stage's output would change. The whole-file `ENGINE_VERSION` (`"8"`) is written to `#engine`; a track is skipped only when the `[re:]` marker is ours, `#engine` matches, and the lyric search was not left empty. This lets an engine change that only affects alignment avoid redoing separation and transcription.
+
+The work cache is not unbounded: `cache.size_report()` reports its size and `cache.prune(max_bytes, keep=...)` deletes the oldest track folders first, never the running track's folder or a folder with a live lock. The command line exposes it as `lyricloom cache status` and `lyricloom cache clean [--max-gb N]`.
 
 The kept vocal stems live outside the work cache:
 
@@ -293,7 +320,7 @@ Environment variables that affect behavior:
 | `LYRICLOOM_WHISPER_MODEL` | Deprecated: the old filename override. Use `model_choices` / `lyricloom models use`. |
 | `LYRICLOOM_SEPARATOR_DEVICE` | `auto`, `cpu`, `cuda` or `dml` for the separator worker. |
 | `LYRICLOOM_SEPARATOR_OVERLAP` | Separator overlap (default 2). |
-| `LYRICLOOM_CPU_THREADS` | Caps worker thread pools (default one quarter of logical CPUs). |
+| `LYRICLOOM_CPU_THREADS` | Caps worker thread pools (default: logical CPUs minus two, capped at 16). |
 | `LYRICLOOM_ALIGN_DEVICE` | `auto`/`cpu`/`cuda` for CTC alignment. |
 | `ASSEMBLYAI_API_KEY` | Enables optional cloud transcription. |
 
@@ -350,10 +377,12 @@ Downloads must use a `.part` file and verify a checksum when the upstream publis
 
 - A folder run is serial. One track's exception is caught in `runner.process`, logged with a traceback, and returned as `TrackResult(status="failed")`; the queue continues.
 - The GUI's Stop sets a flag; it takes effect after the current track.
-- A stage cache miss recomputes only that stage (and later stages if `--stage` was used).
-- A missing WSL runtime is a fallback, not a fatal error.
+- A stage cache miss recomputes only that stage (and later stages if `--stage` was used). A corrupt cache is discarded and recomputed.
+- A missing WSL runtime is a fallback, not a fatal error. A WSL separation that used the CPU reports `cpu` with the reason.
 - A failed AssemblyAI call is logged and ignored; it never fails the track on its own.
-- A failed MTL run falls back to CTC; a failed CTC block returns `None` segments and the line falls back to line timing.
+- A failed MTL run or a failed MTL sanity check falls back to CTC. Unsupported scripts fall back to line timing with a `review` note instead of silently returning no words.
+- Optional instrumental subtraction and keeping vocals are logged and never abort the track.
+- `lyricloom process` exits 0 when every track is done/review/skipped, 1 when any track failed, and 2 on a usage error.
 
 ## Tests and development
 

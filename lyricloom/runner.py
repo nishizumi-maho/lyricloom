@@ -3,6 +3,7 @@ cache per stage, and a folder of tracks without letting one failure stop the res
 from __future__ import annotations
 
 import os
+import re
 import stat
 import threading
 import time
@@ -21,7 +22,7 @@ from .lrc import parse_lrc
 from .lyrics.score import choose
 from .lyrics.search import search_all
 from .model import Candidate, Line, LrcDoc, Segment, Transcript, Word
-from .probe import probe
+from .probe import normalize_lang, probe
 from .stages.align import align, lyric_lang
 from .stages.separate import keep_vocals, separate, to_mono16k
 from .stages.assemblyai import transcribe_assemblyai
@@ -46,6 +47,7 @@ class TrackResult:
     fallback: str = ""  # why the WSL/ROCm separation failed, when it ran on the CPU instead
     models: dict[str, str] = field(default_factory=dict)  # stage -> model id used for this track
     cloud: bool = False  # the isolated vocal was uploaded to AssemblyAI for this track
+    notes: list[str] = field(default_factory=list)  # warnings the app can show (R1-09)
 
 
 def _lines_from_json(data) -> list[Line] | None:
@@ -104,7 +106,7 @@ def _transcript_candidate(tr: Transcript, lang: str | None = None) -> Candidate:
 
 def _assemblyai(audio: Path, work: Path, sep: dict, lang: str, whisper: Transcript, prompt: str) -> Transcript | None:
     """AssemblyAI on the isolated vocals; None (logged) if the service fails, so the run carries on."""
-    code = lang if lang in ("ja", "pt", "en") else (whisper.lang or "en")
+    code = lang if lang not in ("", "other") else (whisper.lang or "en")
     try:
         return transcribe_assemblyai(Path(sep["vocals16k"]), work, code, prompt, name="assemblyai_vocals")
     except Exception as e:  # noqa: BLE001 - optional cloud source: never fatal on its own
@@ -119,7 +121,7 @@ def _extra_passes(audio: Path, work: Path, sep: dict, first: Transcript, lang: s
     another temperature), fused word by word with the first."""
     mix16k = work / "mix16k.wav"
     to_mono16k(audio, mix16k)
-    whisper_lang = lang if lang == "ja" else None
+    whisper_lang = lang if lang not in ("", "other") else None
     previous = config.active_language()
     config.set_active_language(lang)   # per-language model choice for the extra passes
     try:
@@ -143,20 +145,28 @@ def _separate(audio: Path, work: Path, cancel: threading.Event | None = None) ->
 REDO_SUFFIX = ".redo-backup"
 
 
+def _is_our_lrc(path: Path) -> bool:
+    try:
+        meta = parse_lrc(path.read_text(encoding="utf-8", errors="replace")).meta
+    except OSError:
+        return False
+    return is_ours(meta.get("re"))
+
+
 def forget_sync(audio: Path) -> dict[Path, Path]:
     """Moves the word timing LyricLoom wrote for a song out of the way so it can be done again: the
-    .lrc (only when LyricLoom wrote it) and the .japanese.lrc / .romaji.lrc copies. The official
-    lyric (.original.lrc) and .lrc files from anywhere else are kept. Returns original -> backup so
-    the caller can restore them when the new run fails or is cancelled."""
+    .lrc (only when LyricLoom wrote it) and the .japanese.lrc / .romaji.lrc copies (each only when
+    LyricLoom wrote it). The official lyric (.original.lrc) and .lrc files from anywhere else are
+    kept. Returns original -> backup so the caller can restore them when the new run fails or is
+    cancelled."""
     from .stages.write import japanese_path, romaji_path
     moved: dict[Path, Path] = {}
     lrc = audio.with_suffix(".lrc")
     originals = []
-    if lrc.exists():
-        meta = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace")).meta
-        if is_ours(meta.get("re")):
-            originals.append(lrc)
-    originals += [p for p in (japanese_path(audio), romaji_path(audio)) if p.exists()]
+    if lrc.exists() and _is_our_lrc(lrc):
+        originals.append(lrc)
+    originals += [p for p in (japanese_path(audio), romaji_path(audio))
+                  if p.exists() and _is_our_lrc(p)]
     try:
         for original in originals:
             backup = original.with_name(original.name + REDO_SUFFIX)
@@ -186,13 +196,14 @@ def _already_done(audio: Path) -> bool:
     if not lrc.exists():
         return False
     meta = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace")).meta
-    return is_ours(meta.get("re")) and meta.get("#engine") == ENGINE_VERSION
+    return (is_ours(meta.get("re")) and meta.get("#engine") == ENGINE_VERSION
+            and meta.get("#lyrics") != "search-empty")   # retry a failed/empty lyric search (R1-08)
 
 
 # Each cached stage has its own version: bump one only when that stage's output would change, so
 # an engine change does not redo the expensive ones (separation, transcription) for the library.
 # Started at "3", the engine version the existing caches were written with, so they stay valid.
-STAGE_VERSIONS = {"lyrics": "4", "separate": "4", "transcribe": "3",
+STAGE_VERSIONS = {"lyrics": "5", "separate": "4", "transcribe": "3",
                   "transcribe_extra": "3", "transcribe_extra_aai": "3"}
 
 
@@ -225,20 +236,35 @@ def _model_inputs(stage: str, spec: model_catalog.ModelSpec, **params) -> dict:
     return {stage: model_catalog.fingerprint(spec), **params}
 
 
+def _tag_safe(value: str) -> str:
+    return re.sub(r"[\]\r\n;]+", " ", str(value)).strip()
+
+
 def _write(audio: Path, meta, chosen: Candidate, result,
-           used_models: dict[str, str] | None = None, cloud: bool = False) -> str:
+           used_models: dict[str, str] | None = None, cloud: bool = False,
+           notes: list[str] | None = None, force_review: bool = False,
+           lang: str | None = None, lyrics_empty: bool = False) -> str:
     """Writes the .lrc; returns the status. Low-confidence lines are listed in [#review:...]."""
+    notes = [n for n in (notes or []) if n]
     tags = {"ti": meta.title, "ar": meta.artist, "re": tag(VERSION),
             "#source": f"{chosen.source} conf:{result.track_conf:.2f}", "#engine": ENGINE_VERSION}
+    if lang:
+        tags["#language"] = _tag_safe(lang)
     if used_models:
         tags["#models"] = model_catalog.tag_value(used_models)
+    if notes:
+        tags["#warning"] = "; ".join(_tag_safe(n) for n in notes)
+    if lyrics_empty:
+        tags["#lyrics"] = "search-empty"
     low = [str(i) for i, l in enumerate(result.lines) if l.conf < REVIEW_THRESHOLD]
+    if force_review:   # an unusable anchor makes every line a review line, whatever CTC scored
+        low = [str(i) for i in range(len(result.lines))]
     if low:
         tags["#review"] = ",".join(low)
-    write_lyrics(audio, LrcDoc(tags, result.lines))
+    write_lyrics(audio, LrcDoc(tags, result.lines), lang=lang)
     if chosen.source not in ("transcription", "manual"):   # only a lyric found online is "official"
         write_original(audio, {"ti": meta.title, "ar": meta.artist, "#source": chosen.source}, chosen)
-    status = "review" if chosen.source == "transcription" or result.review else "done"
+    status = "review" if chosen.source == "transcription" or result.review or force_review else "done"
     _log(audio, f"{status} source={chosen.source} conf={result.track_conf:.2f} "
                 f"cloud={'yes' if cloud else 'no'} url={chosen.url}")
     return status
@@ -248,12 +274,16 @@ def realign(audio: Path, text: str, source: str = "manual",
             cancel: threading.Event | None = None) -> TrackResult:
     """Aligns lyrics given by hand (e.g. pasted in the app) and writes the .lrc. Reuses the cached
     separation and transcription; the track must have been processed once."""
+    lock = None
     try:
         check_cancelled(cancel)
+        lock = cache.acquire(audio)
+        if lock is None:
+            return TrackResult(audio, "skipped", error="already being processed by another LyricLoom run")
         meta = probe(audio)
         work = cache.work_dir(audio)
         prompt = f"{meta.artist} - {meta.title}"
-        whisper_lang = meta.lang if meta.lang == "ja" else None
+        whisper_lang = meta.lang if meta.lang not in ("", "other") else None
         sep_spec = config.resolve_model("separate", meta.lang)
         tr_spec = config.resolve_model("transcribe", meta.lang)
         sep_inputs = _model_inputs("separator", sep_spec, overlap=config.SEPARATOR_OVERLAP,
@@ -267,18 +297,25 @@ def realign(audio: Path, text: str, source: str = "manual",
         if sep is None or tr is None:
             raise RuntimeError("process the track once before realigning it")
         whisper = _transcript_from_json(tr)
-        anchor = Transcript(whisper.lang, []) if looks_hallucinated(whisper, meta.duration_s) else whisper
+        hallucinated = looks_hallucinated(whisper, meta.duration_s)
+        notes: list[str] = []
+        if hallucinated:
+            notes.append("Whisper's transcript looked hallucinated; realigned text has no usable "
+                         "anchor and is marked for review")
+        anchor = Transcript(whisper.lang, []) if hallucinated else whisper
         chosen = Candidate(source, text.strip())
         lang = lyric_lang(meta, whisper)
         config.set_active_language(lang)
         align_spec = config.resolve_model("align", lang)
         model_catalog.ensure_ready([align_spec])
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
+        notes.extend(result.notes)
         used = {"transcribe": tr_spec.id, "separate": sep_spec.id, **result.models_used}
-        status = _write(audio, meta, chosen, result, used_models=used)
+        status = _write(audio, meta, chosen, result, used_models=used, notes=notes,
+                        force_review=bool(notes), lang=lang)
         return TrackResult(audio, status, source, result.track_conf,
                            device=sep.get("device", ""), fallback=sep.get("fallback", ""),
-                           models=used)
+                           models=used, notes=notes)
     except WorkerCancelled:
         _log(audio, "cancelled by the user")
         return TrackResult(audio, "cancelled", error="Stopped by the user")
@@ -289,22 +326,38 @@ def realign(audio: Path, text: str, source: str = "manual",
         _log(audio, "realign failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"))
     finally:
+        if lock is not None:
+            lock.release()
         config.clear_active_models()
         config.clear_active_language()
+
+
+def research_lyrics(audio: Path, cancel: threading.Event | None = None,
+                    allow_cloud: bool | None = None) -> TrackResult:
+    """Searches the lyric sources again and redoes the stages that depend on the choice.
+
+    This is the app's "Search again" path: a first run made offline must not pin the track to
+    Whisper text forever (R1-08). Only the lyric search, the alignment and the write are redone:
+    separation and transcription do not depend on the lyrics, so their caches are reused."""
+    cache.clear(audio, "lyrics")
+    return process(audio, only_stage="align", cancel=cancel, allow_cloud=allow_cloud)
 
 
 def process(audio: Path, force: bool = False, only_stage: str | None = None,
             on_stage: Callable[[str], None] | None = None,
             models: dict[str, str] | None = None,
-            cancel: threading.Event | None = None, allow_cloud: bool | None = None) -> TrackResult:
+            cancel: threading.Event | None = None, allow_cloud: bool | None = None,
+            lang: str | None = None) -> TrackResult:
     """Runs one track.
 
     ``models`` is a per-song override ``{stage: model_id}`` (for that run only); it is written to
-    the track log and to the .lrc ``[#models:...]`` tag.  ``cancel`` stops the running stage (its
-    worker process tree is killed) and returns a ``cancelled`` result. ``allow_cloud`` is the
-    per-run consent for the optional AssemblyAI upload. ``None`` uses the saved
-    ``assemblyai_enabled`` setting; ``False`` never uploads, even when the setting is on. A track
-    result records whether audio actually left the machine (`TrackResult.cloud`)."""
+    the track log and to the .lrc ``[#models:...]`` tag.  ``lang`` is an explicit per-song language
+    code from a language tag or the app/CLI; it overrides the tag heuristic and is logged (R1-03).
+    ``cancel`` stops the running stage (its worker process tree is killed) and returns a
+    ``cancelled`` result. ``allow_cloud`` is the per-run consent for the optional AssemblyAI
+    upload. ``None`` uses the saved ``assemblyai_enabled`` setting; ``False`` never uploads, even
+    when the setting is on. A track result records whether audio actually left the machine
+    (`TrackResult.cloud`)."""
     stage = on_stage or (lambda name: None)
     if only_stage is not None and only_stage not in STAGES:
         raise ValueError(f"unknown stage {only_stage}")
@@ -314,15 +367,25 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
     config.set_active_models(models)
     cloud_allowed = config.assemblyai_enabled() and (allow_cloud is not False)
     uploaded = False
+    notes: list[str] = []
+    override = normalize_lang(lang)
 
     def checkpoint() -> None:
         check_cancelled(cancel)
 
+    lock = None
     try:
         checkpoint()
-        if not (force or only_stage) and _already_done(audio):
+        lock = cache.acquire(audio)
+        if lock is None:
+            return TrackResult(audio, "skipped",
+                               error="already being processed by another LyricLoom run; skipped")
+        if not (force or only_stage or override) and _already_done(audio):
             return TrackResult(audio, "skipped")
         meta = probe(audio)
+        if override:
+            meta.lang = override
+            _log(audio, f"language override: {meta.lang}")
         config.set_active_language(meta.lang)
         if models:
             unknown = sorted(set(models) - set(model_catalog.STAGES))
@@ -332,8 +395,19 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         if models:
             _log(audio, "model overrides for this run: " + model_catalog.tag_value(models))
         stage("lyrics")
-        cands = _cands_from_json(_cached(audio, "lyrics", fresh, lambda: {
-            "candidates": [asdict(c) for c in search_all(meta)]}))
+        # A zero-candidate search is never cached: the next run (or "Search again") must retry it
+        # instead of pinning the track to Whisper text forever (R1-08).
+        lyrics_data = None if "lyrics" in fresh else cache.load(
+            audio, "lyrics", STAGE_VERSIONS["lyrics"])
+        if lyrics_data is None:
+            _log(audio, "lyrics search started")
+            found = search_all(meta)
+            _log(audio, f"lyrics search ran: {len(found)} candidate(s)")
+            lyrics_data = {"candidates": [asdict(c) for c in found], "searched_at": time.time()}
+            if found:
+                cache.save(audio, "lyrics", STAGE_VERSIONS["lyrics"], lyrics_data)
+        cands = _cands_from_json(lyrics_data)
+        lyrics_empty = not cands
         checkpoint()
         stage("separate")
         sep_spec = config.resolve_model("separate", meta.lang)
@@ -343,10 +417,14 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
                       inputs=sep_inputs, required=[sep_spec])
         device = sep.get("device", "")
         checkpoint()
-        keep_vocals(audio, Path(sep["vocals"]), model=sep_spec)   # also for tracks separated before vocals were kept
+        try:
+            # Also for tracks separated before vocals were kept.
+            keep_vocals(audio, Path(sep["vocals"]), model=sep_spec)
+        except Exception as e:  # noqa: BLE001 - keeping a copy is optional work (R1-24)
+            _log(audio, f"could not keep the vocals: {type(e).__name__}: {e}")
         stage("transcribe")
         prompt = f"{meta.artist} - {meta.title}"
-        whisper_lang = meta.lang if meta.lang == "ja" else None
+        whisper_lang = meta.lang if meta.lang not in ("", "other") else None
         tr_spec = config.resolve_model("transcribe", meta.lang)
         tr_inputs = _model_inputs("transcribe", tr_spec, separator=sep_inputs["separator"],
                                   lang=whisper_lang, prompt=prompt)
@@ -383,6 +461,13 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         anchor = whisper
         if hallucinated or lang == "ja":
             anchor = assemblyai() or (Transcript(whisper.lang, []) if hallucinated else whisper)
+        if not anchor.words:
+            note = ("Whisper's transcript looked hallucinated; no usable anchor was available, so the "
+                    "word timing is unconfirmed and the track is marked for review" if hallucinated else
+                    "no usable transcript was available; the word timing has no anchors and is marked "
+                    "for review")
+            notes.append(note)
+            _log(audio, note)
 
         chosen = choose(cands, anchor.text, lang)
         checkpoint()
@@ -409,24 +494,30 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         align_spec = config.resolve_model("align", lang)
         model_catalog.ensure_ready([align_spec])
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
+        notes.extend(result.notes)
         checkpoint()
         used = {"transcribe": transcription_spec.id, "separate": sep_spec.id, **result.models_used}
         stage("write")
-        status = _write(audio, meta, chosen, result, used_models=used, cloud=uploaded)
+        status = _write(audio, meta, chosen, result, used_models=used, cloud=uploaded,
+                        notes=notes, force_review=bool(notes), lang=lang,
+                        lyrics_empty=lyrics_empty)
         _log(audio, "models used: " + model_catalog.tag_value(used))
         return TrackResult(audio, status, chosen.source, result.track_conf, device=device,
-                           fallback=sep.get("fallback", ""), models=used, cloud=uploaded)
+                           fallback=sep.get("fallback", ""), models=used, cloud=uploaded,
+                           notes=notes)
     except WorkerCancelled:
         _log(audio, "cancelled by the user")
-        return TrackResult(audio, "cancelled", error="Stopped by the user", cloud=uploaded)
+        return TrackResult(audio, "cancelled", error="Stopped by the user", cloud=uploaded, notes=notes)
     except model_catalog.MissingModels as e:
         _log(audio, f"missing models: {e}")
-        return TrackResult(audio, "failed", error=str(e), cloud=uploaded)
+        return TrackResult(audio, "failed", error=str(e), cloud=uploaded, notes=notes)
     except Exception as e:  # noqa: BLE001 - one broken track must not stop a folder run
         _log(audio, "failed\n" + traceback.format_exc())
         return TrackResult(audio, "failed", error=config.redact_assemblyai_key(f"{type(e).__name__}: {e}"),
-                           cloud=uploaded)
+                           cloud=uploaded, notes=notes)
     finally:
+        if lock is not None:
+            lock.release()
         config.clear_active_models()
         config.clear_active_language()
 
@@ -455,19 +546,46 @@ def _is_link_or_junction(path: str) -> bool:
         return False
 
 
+def _excluded_cache_roots() -> list[Path]:
+    roots = []
+    for value in (config.vocals_root(), config.WORK_ROOT):
+        try:
+            roots.append(Path(value).resolve())
+        except OSError:
+            continue
+    return roots
+
+
+def _under(path: Path, roots: list[Path]) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return any(resolved == root or root in resolved.parents for root in roots)
+
+
 def find_audio(root: Path) -> list[Path]:
+    """Every supported audio file under ``root``.
+
+    Kept vocal stems and the work cache are skipped even when the user points one of those
+    folders inside the library, so a scan never treats cache files as songs (R1-22)."""
     if root.is_file():
-        return [root]
+        return [] if root.name.lower().endswith(".vocals.flac") else [root]
+    excluded = _excluded_cache_roots()
+    if _under(root, excluded):
+        return []
     # os.walk avoids one stat per directory entry that Path.rglob performs; on a large external
     # library that difference is minutes, not seconds.
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         # A junction can point back to an ancestor (backup and sync tools create such cycles);
         # os.walk only skips symlinks, so prune every link and reparse-point directory itself.
+        # The kept-vocals and work folders are pruned too when they sit inside the library.
         dirnames[:] = [name for name in dirnames
-                       if not _is_link_or_junction(os.path.join(dirpath, name))]
+                       if not _is_link_or_junction(os.path.join(dirpath, name))
+                       and not _under(Path(dirpath) / name, excluded)]
         for name in filenames:
-            if Path(name).suffix.lower() in AUDIO_EXT:
+            if Path(name).suffix.lower() in AUDIO_EXT and not name.lower().endswith(".vocals.flac"):
                 found.append(Path(dirpath) / name)
     return sorted(found)
 
