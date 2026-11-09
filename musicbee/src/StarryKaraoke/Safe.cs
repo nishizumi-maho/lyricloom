@@ -36,10 +36,36 @@ namespace MusicBeePlugin
             if (dispatcher == null) return false;
             dispatcher.UnhandledException += (s, e) =>
             {
+                // FR-C-08: MusicBee's UI dispatcher is shared by every WPF plugin in the process.
+                // Only exceptions thrown by this plugin's own types are ours to handle; another
+                // plugin's crash must reach MusicBee and that plugin's own handler.
+                if (!HandleDispatcherException(e.Exception, log, userMessage)) return;
                 e.Handled = true;
-                log?.Invoke(e.Exception);
-                userMessage?.Invoke("Starry Karaoke recovered from an unexpected error. See mb_StarryKaraoke.log for details.");
             };
+            return true;
+        }
+
+        /// <summary>True when the exception or one of its inner exceptions was thrown by a type in
+        /// this assembly. The stack trace names the declaring type, so it identifies the plugin
+        /// without depending on the caller's dispatcher or window.</summary>
+        public static bool IsFromPlugin(Exception exception)
+        {
+            for (var e = exception; e != null; e = e.InnerException)
+            {
+                var stack = e.StackTrace;
+                if (!string.IsNullOrEmpty(stack) &&
+                    stack.IndexOf("MusicBeePlugin.", StringComparison.Ordinal) >= 0) return true;
+            }
+            return false;
+        }
+
+        /// <summary>Handles a dispatcher exception only when it belongs to this plugin. Returns false
+        /// and does nothing for other plugins' exceptions.</summary>
+        public static bool HandleDispatcherException(Exception exception, Action<Exception> log, Action<string> userMessage)
+        {
+            if (!IsFromPlugin(exception)) return false;
+            log?.Invoke(exception);
+            userMessage?.Invoke("Starry Karaoke recovered from an unexpected error. See mb_StarryKaraoke.log for details.");
             return true;
         }
     }
