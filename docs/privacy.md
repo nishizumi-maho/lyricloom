@@ -11,7 +11,7 @@ This page lists every network connection the application can make, what is sent,
 | Does LyricLoom collect usage data? | No. |
 | Does it upload my music? | Not by default. Only the optional AssemblyAI path uploads the isolated vocal stem, and only when cloud transcription is enabled and allowed for that run. |
 | Does it need an account? | No. |
-| Does it phone home for updates? | Not until you turn on the startup check. **Help > Check for updates** is a one-off request you start yourself. |
+| Does it phone home for updates? | Yes by default: one request to `api.github.com` shortly after start-up and then every 24 hours, carrying only LyricLoom's version. You can turn it off in Settings. **Help > Check for updates** is a one-off request you start yourself. |
 | Where is my data? | In `%LOCALAPPDATA%\LyricLoom` on Windows and `~/.local/share/lyricloom` on Linux, plus the `.lrc` files next to your music. |
 | Can I use it offline? | Yes, once the models and `whisper-cli` are installed, with the caveats below. |
 
@@ -61,22 +61,44 @@ The optional **WSL environment setup** also downloads packages, and only when yo
 
 ### GitHub and updates
 
-The automatic update check is **opt-in**. Until you save `check_updates` as `true` in Settings, LyricLoom makes no update request at startup.
-
-When it is enabled, or when you choose **Help > Check for updates**, LyricLoom sends one request to:
+The automatic update check is **on by default**. About four seconds after the window opens, and
+then every 24 hours while the app runs, LyricLoom sends one request to:
 
 - `https://api.github.com/repos/nishizumi-maho/lyricloom/releases/latest`
 
-The request contains a `User-Agent: LyricLoom/<version>` header and asks only for public release metadata. It does not contain your library, your machine name or an identifier.
+The request contains a `User-Agent: LyricLoom/<version>` header and asks only for public release
+metadata. It does not contain your library, your machine name, an identifier or any other personal
+data. The request itself necessarily reveals your IP address to GitHub, as any web request does.
 
-If you then choose to download an update, LyricLoom fetches the installer from this project's own GitHub release:
+When a newer release exists, the `update_install` setting decides what happens:
+
+- **`auto` (default):** LyricLoom downloads the installer in the background, verifies it, and shows
+  a notice. The update is installed silently when LyricLoom closes, or when you choose **Restart
+  now**.
+- **`ask`:** the notice appears first; nothing is downloaded until you choose **Install now**.
+- **`notify`:** only the notice and the link to the release page; nothing is downloaded.
+
+If you download an update, LyricLoom fetches the installer from this project's own GitHub release:
 
 - `https://github.com/nishizumi-maho/lyricloom/releases/download/<tag>/<installer>`, which may redirect to GitHub's asset hosts `objects.githubusercontent.com`, `release-assets.githubusercontent.com` or `github-releases.githubusercontent.com`;
 - the matching `.sha256` file (or `SHA256SUMS`) from the same release.
 
-The updater verifies the SHA-256 before running anything and refuses to download or run an installer when the checksum is missing or wrong, when the URL is not this project's release, or when a redirect leaves GitHub's release asset hosts. A downloaded file that was not verified by the running app is never executed. The installer is not code-signed, so the SHA-256 from the release is the integrity check.
+The updater verifies the SHA-256 before running anything and refuses to download or run an installer
+when the checksum is missing or wrong, when the URL is not this project's release, or when a redirect
+leaves GitHub's release asset hosts. A downloaded file that was not verified by the running app is
+never executed, and files left in the temporary update folder by an earlier run are deleted on
+start-up. The installer is not code-signed, so the SHA-256 from the release is the integrity check.
 
-**Turn it off:** leave `check_updates` unset or set it to `false`. The manual **Help > Check for updates** action still works when you use it. Visiting the Releases page in a browser is an ordinary browser request.
+A silent update never closes MusicBee. When MusicBee is running, the installer is told not to close
+applications and the optional Starry Karaoke plugin task is skipped; the next LyricLoom start explains
+that the plugin was not updated and how to update it.
+
+On Linux there is no installer. The notice links to the release page and, when the release publishes
+one, to the Linux tarball. Nothing is downloaded or run automatically.
+
+**Turn it off:** clear **Check GitHub Releases for updates** in **Settings**, or save
+`check_updates` as `false` in `settings.json`. The manual **Help > Check for updates** action still
+works when you use it. Visiting the Releases page in a browser is an ordinary browser request.
 
 The Starry Karaoke MusicBee plugin is shipped from the same repository; it has no update check of its own.
 
@@ -160,11 +182,15 @@ Everything LyricLoom writes lives in the per-user data directory, except the `.l
 
 `LYRICLOOM_DATA_DIR` moves all of this. `LYRICLOOM_MODELS` moves only the models.
 
+Update downloads are written to the system temporary folder (`%TEMP%\LyricLoom-update` on Windows,
+the platform temporary folder elsewhere). Files there are deleted when LyricLoom starts; only a file
+that the running app downloaded and verified itself can be launched.
+
 ### What is stored
 
 | Data | Why | Sensitive? |
 |---|---|---|
-| `settings.json` | Library path, vocals/work paths, Japanese script, update-check choice, cloud choice, optional WSL settings. | Contains local folder paths. |
+| `settings.json` | Library path, vocals/work paths, Japanese script, update-check and install-mode choices, skipped version, cloud choice, optional WSL settings. | Contains local folder paths. |
 | `scan-*.json` | Cached artist/title/status per track, so startup is instant. | Contains your library metadata. |
 | `work/<hash>/*.json` | Per-stage cache: lyric candidates, separation info, transcript, alignment. | Contains fetched lyrics and transcript text. |
 | `work/<hash>/vocals.wav`, `vocals16k.wav` | Player and aligner input. | Audio from your songs. |
@@ -189,6 +215,7 @@ There is no global rolling log. `lyricloom doctor` prints the paths and environm
 - **Kept vocals** can be deleted at any time. They are recreated by separating again.
 - **Models** can be deleted at any time. See [docs/models.md](models.md#deleting-models).
 - **AssemblyAI key** can be removed in the app or by deleting `assemblyai.key`.
+- **Downloaded update installers** can be deleted at any time; they are also removed on the next LyricLoom start.
 - **All LyricLoom data** can be removed by deleting `%LOCALAPPDATA%\LyricLoom` or `~/.local/share/lyricloom`.
 
 The installers can delete LyricLoom's own data for you:

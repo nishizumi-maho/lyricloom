@@ -1,15 +1,16 @@
 """GitHub Releases update check and installer download.
 
-The automatic check is opt-in: when no ``check_updates`` choice has been saved, no request is
-made. Only public release metadata and the installer (with its published SHA-256) are fetched
-from this project's own GitHub release. There is no signer pin, because the installer is not
-code-signed; instead the updater fails closed when a checksum is missing or wrong, follows
-redirects only to GitHub's release asset hosts, and refuses to run a file from anywhere else.
-Nothing about the user or the library is uploaded.
+Automatic checks are on by default: the app asks once after start-up and then every 24 hours,
+unless the user saved ``check_updates`` as false. Only public release metadata and the installer
+(with its published SHA-256) are fetched from this project's own GitHub release. There is no
+signer pin, because the installer is not code-signed; instead the updater fails closed when a
+checksum is missing or wrong, follows redirects only to GitHub's release asset hosts, and refuses
+to run a file from anywhere else. Nothing about the user or the library is uploaded.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import subprocess
@@ -27,11 +28,19 @@ import httpx
 
 from . import VERSION, config
 
+LOG = logging.getLogger(__name__)
+
 REPO = "nishizumi-maho/lyricloom"
 API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
 STABLE_ASSET = "LyricLoom-Setup.exe"
 USER_AGENT = f"LyricLoom/{VERSION} (+https://github.com/{REPO})"
+CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+CHECK_INTERVAL_MS = CHECK_INTERVAL_SECONDS * 1000
+INSTALL_MODES = ("auto", "ask", "notify")
+DEFAULT_INSTALL_MODE = "auto"
+SKIPPED_VERSION_SETTING = "skipped_update_version"
+PLUGIN_SKIP_NOTICE_SETTING = "plugin_update_notice_pending"
 
 UPDATE_DIR = Path(tempfile.gettempdir()) / "LyricLoom-update"
 _API_HOST = "api.github.com"
@@ -60,6 +69,8 @@ class UpdateInfo:
     asset_size: int
     asset_sha256: str
     checksum_url: str = ""
+    tarball_name: str = ""
+    tarball_url: str = ""
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -150,7 +161,10 @@ def _sha256_file(path: Path) -> str:
 
 
 def check_choice() -> bool | None:
-    """The saved update-check choice: True/False once the user chose, None when not chosen yet."""
+    """The saved update-check choice: True/False once the user chose, None when never chosen.
+
+    An absent choice means the automatic check is on; only an explicit false turns it off.
+    """
     data = config.all_settings()
     if "check_updates" not in data:
         return None
@@ -164,9 +178,139 @@ def check_choice() -> bool | None:
     return None
 
 
+def check_enabled() -> bool:
+    """True unless the user explicitly saved ``check_updates`` as false."""
+    return check_choice() is not False
+
+
 def should_check_on_startup() -> bool:
-    """The startup path may contact GitHub only after the user explicitly opted in."""
-    return check_choice() is True and os.environ.get("QT_QPA_PLATFORM") != "offscreen"
+    """Whether the app may contact GitHub automatically (start-up and the 24-hour timer).
+
+    The offscreen guard keeps GUI tests from making a real request; it is not a user setting.
+    """
+    return check_enabled() and os.environ.get("QT_QPA_PLATFORM") != "offscreen"
+
+
+def should_check_automatically() -> bool:
+    """Whether an automatic check (start-up or periodic) is allowed right now."""
+    return should_check_on_startup()
+
+
+def install_mode() -> str:
+    """How a found update is offered: ``auto`` (default), ``ask`` or ``notify``."""
+    value = config.setting("update_install", DEFAULT_INSTALL_MODE)
+    return value if value in INSTALL_MODES else DEFAULT_INSTALL_MODE
+
+
+def installer_available() -> bool:
+    """True only for a packaged Windows build; source checkouts and Linux have no installer."""
+    return sys.platform == "win32" and bool(config.IS_FROZEN)
+
+
+def skipped_version() -> str:
+    """The version the user asked not to be offered again, if any."""
+    value = config.setting(SKIPPED_VERSION_SETTING, "")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def is_skipped(version: str) -> bool:
+    """True when ``version`` is the skipped release (a newer release is offered again)."""
+    skipped = skipped_version()
+    return bool(skipped) and _version_tuple(version) <= _version_tuple(skipped)
+
+
+def skip_version(version: str) -> None:
+    """Remember a release the user does not want to be offered again."""
+    config.set_setting(SKIPPED_VERSION_SETTING, str(version))
+
+
+def take_plugin_skip_notice() -> bool:
+    """True once after a silent update skipped the MusicBee plugin because MusicBee was open."""
+    if not config.setting(PLUGIN_SKIP_NOTICE_SETTING, False):
+        return False
+    try:
+        config.set_setting(PLUGIN_SKIP_NOTICE_SETTING, False)
+    except OSError as exc:
+        LOG.warning("could not clear the MusicBee plugin notice: %s", exc)
+    return True
+
+
+def cleanup_stale_downloads() -> None:
+    """Remove installer files in UPDATE_DIR that this process did not download and verify.
+
+    A file left by an earlier run (or planted there) is never trusted, so it is deleted before
+    the new process starts a download. Only direct regular files and symlinks are removed; this
+    never recurses and never follows a symlink.
+    """
+    try:
+        if UPDATE_DIR.is_symlink() or not UPDATE_DIR.is_dir():
+            return
+        entries = list(UPDATE_DIR.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        LOG.warning("could not read the update folder %s: %s", UPDATE_DIR, exc)
+        return
+    for entry in entries:
+        try:
+            if not entry.is_symlink() and entry.is_dir():
+                continue
+            if not entry.is_symlink() and entry.resolve() in _VERIFIED:
+                continue
+            entry.unlink()
+        except OSError as exc:
+            LOG.warning("could not remove the stale update file %s: %s", entry, exc)
+
+
+def release_page_url(info: UpdateInfo) -> str:
+    """The release page to open, restricted to this project's GitHub release URLs."""
+    return info.page_url if _is_release_url(info.page_url) else RELEASES_PAGE
+
+
+def open_release_page(info: UpdateInfo) -> None:
+    """Open the release page in the user's browser. Only called from an explicit click."""
+    webbrowser.open(release_page_url(info))
+
+
+def open_tarball_page(info: UpdateInfo) -> bool:
+    """Open the Linux tarball download for ``info``; False when it has no valid asset URL."""
+    if info.tarball_url and _is_asset_url(info.tarball_url):
+        webbrowser.open(info.tarball_url)
+        return True
+    return False
+
+
+def musicbee_running() -> bool:
+    """Whether MusicBee is running, so a silent install must not ask Restart Manager to close it.
+
+    A failed process query is treated as "possibly running": skipping the plugin is safer than
+    letting Restart Manager close the user's MusicBee.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq MusicBee.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        LOG.warning("could not check whether MusicBee is running: %s", exc)
+        return True
+    return "musicbee.exe" in result.stdout.lower()
+
+
+def _tarball_asset(assets: dict) -> tuple[str, str]:
+    """The Linux tarball name and URL from this release, when they are a valid release asset."""
+    for name, asset in assets.items():
+        if not (str(name).startswith("LyricLoom-") and str(name).endswith("-linux-x86_64.tar.gz")):
+            continue
+        try:
+            safe_name = _safe_asset_name(name)
+        except RuntimeError:
+            return "", ""
+        url = str(asset.get("browser_download_url") or "")
+        return (safe_name, url) if _is_asset_url(url) else ("", "")
+    return "", ""
 
 
 def check() -> UpdateInfo | None:
@@ -178,10 +322,23 @@ def check() -> UpdateInfo | None:
     if not version or not is_newer(version):
         return None
     assets = {a.get("name", ""): a for a in release.get("assets", []) if isinstance(a, dict)}
+    tarball_name, tarball_url = _tarball_asset(assets)
     asset = assets.get(STABLE_ASSET) or next(
         (a for name, a in assets.items()
          if name.startswith("LyricLoom-Setup-") and name.lower().endswith(".exe")), None)
+    page = str(release.get("html_url") or "")
+    common = dict(
+        version=version,
+        tag=tag,
+        page_url=page if _is_release_url(page) else RELEASES_PAGE,
+        notes=str(release.get("body") or ""),
+        tarball_name=tarball_name,
+        tarball_url=tarball_url,
+    )
     if asset is None:
+        if sys.platform != "win32" and tarball_url:
+            # Linux has no installer: the notice links to the release page and this tarball.
+            return UpdateInfo(asset_name="", asset_url="", asset_size=0, asset_sha256="", **common)
         return None
     asset_name = _safe_asset_name(asset.get("name", ""))
     asset_url = str(asset.get("browser_download_url") or "")
@@ -193,19 +350,15 @@ def check() -> UpdateInfo | None:
     if checksum_url and not _is_asset_url(checksum_url):
         raise RuntimeError("the GitHub release points at a checksum outside its own release assets; "
                            "refusing to offer the update")
-    page = str(release.get("html_url") or "")
     digest = str(asset.get("digest") or "")
     sha = digest.split(":", 1)[1] if digest.lower().startswith("sha256:") else ""
     return UpdateInfo(
-        version=version,
-        tag=tag,
-        page_url=page if _is_release_url(page) else RELEASES_PAGE,
-        notes=str(release.get("body") or ""),
         asset_name=asset_name,
         asset_url=asset_url,
         asset_size=int(asset.get("size") or 0),
         asset_sha256=sha,
         checksum_url=checksum_url,
+        **common,
     )
 
 
@@ -277,14 +430,47 @@ def download(info: UpdateInfo, progress: Progress | None = None,
     return destination
 
 
-def launch_installer(path: Path) -> None:
-    """Start the verified installer. On non-Windows, open the release page instead."""
+def _remember_plugin_skip() -> None:
+    """Remember that the next start must explain why the MusicBee plugin was not updated."""
+    try:
+        config.set_setting(PLUGIN_SKIP_NOTICE_SETTING, True)
+    except OSError as exc:
+        LOG.warning("could not remember the skipped MusicBee plugin update: %s", exc)
+
+
+def launch_installer(path: Path, *, silent: bool, relaunch: bool, skip_plugin: bool) -> None:
+    """Start the verified installer, silently or interactively.
+
+    ``silent`` uses Inno Setup's quiet switches plus ``/RELAUNCH=1`` when LyricLoom should start
+    again and ``/SKIPPLUGIN=1`` when the optional MusicBee plugin must not be touched. A silent
+    install never closes MusicBee: ``/NOCLOSEAPPLICATIONS`` is added when it is running, the
+    plugin task is skipped, and the next start shows a notice. On non-Windows there is no
+    installer, so an explicit download link is the only action (and silent mode is refused).
+    """
     path = Path(path)
     expected = _VERIFIED.get(path.resolve())
     if expected is None or not path.is_file() or _sha256_file(path) != expected:
         raise RuntimeError("refusing to run an installer that LyricLoom did not download and verify "
                            "from its own GitHub release")
     if sys.platform == "win32" and path.suffix.lower() == ".exe":
-        subprocess.Popen([str(path), "/CLOSEAPPLICATIONS", "/NORESTART"], close_fds=True)
+        musicbee_open = False
+        if silent:
+            argv = [str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"]
+            if musicbee_running():
+                musicbee_open = True
+                skip_plugin = True
+                argv.append("/NOCLOSEAPPLICATIONS")
+            if relaunch:
+                argv.append("/RELAUNCH=1")
+            if skip_plugin:
+                argv.append("/SKIPPLUGIN=1")
+        else:
+            argv = [str(path), "/CLOSEAPPLICATIONS", "/NORESTART"]
+        subprocess.Popen(argv, close_fds=True)
+        if musicbee_open:
+            _remember_plugin_skip()
         return
+    if silent:
+        raise RuntimeError("this build has no Windows installer; download the new version from the "
+                           "release page")
     webbrowser.open(RELEASES_PAGE)
