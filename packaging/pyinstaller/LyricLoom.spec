@@ -172,6 +172,32 @@ if whisper_cli is None:
 for path in whisper_files:
     datas.append((str(path), "tools/bin"))
 
+# --------------------------------------------------------------------------- setup engine assets
+# A frozen build sets up WSL itself: the script and a wheel of this exact version are bundled under
+# _internal/wsl/.  scripts/build-windows.ps1 builds the wheel with
+#   python -m pip wheel --no-deps . -w build\wsl
+# before PyInstaller runs.  A source checkout builds nothing.
+WSL_DIR = ROOT / "packaging" / "wsl"
+WSL_BUILD = ROOT / "build" / "wsl"
+WSL_SCRIPT = WSL_DIR / "setup-lyricloom-wsl.sh"
+if not WSL_SCRIPT.is_file():
+    raise SystemExit(f"the WSL setup script is missing: {WSL_SCRIPT}")
+datas.append((str(WSL_SCRIPT), "wsl"))
+wsl_wheels = sorted(WSL_BUILD.glob("lyricloom-*.whl"))
+if wsl_wheels:
+    datas.append((str(wsl_wheels[-1]), "wsl"))
+elif IS_WINDOWS:
+    raise SystemExit(
+        "build/wsl/ has no LyricLoom wheel.\n"
+        "Build it first with: python -m pip wheel --no-deps . -w build\\wsl"
+    )
+# The probe is sent to WSL interpreters on stdin, so it must exist as a source file too.
+PROBE_SCRIPT = ROOT / "lyricloom" / "workers" / "probe_gpu.py"
+if not PROBE_SCRIPT.is_file():
+    raise SystemExit(f"the WSL GPU probe is missing: {PROBE_SCRIPT}")
+datas.append((str(PROBE_SCRIPT), "lyricloom/workers"))
+hiddenimports += ["lyricloom.setup"]
+
 # --------------------------------------------------------------------------- Analysis and executables
 entry_script = ROOT / "packaging" / "pyinstaller" / "entry.py"
 icon = str(ICON_FILE) if ICON_FILE.is_file() else None
