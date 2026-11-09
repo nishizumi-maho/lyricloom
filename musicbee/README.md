@@ -4,17 +4,25 @@ A karaoke window for MusicBee with a starry night sky. The current line lights u
 gold, with a soft edge and a glow. Japanese lyrics can be shown as romaji.
 
 Version 1.3.0. The plugin targets .NET Framework 4.8 (included in Windows 10 and 11) and runs inside
-MusicBee; it does not need admin rights.
+MusicBee; it does not need admin rights. It is MIT-licensed and ships from the same repository as
+LyricLoom, under `musicbee/`.
 
 ## Install
 
 Close MusicBee first.
 
 **With the LyricLoom installer (Windows).** The LyricLoom setup has an optional task **Install the
-Starry Karaoke plugin for MusicBee**. It appears when MusicBee is installed, is checked by default,
+Starry Karaoke plugin for MusicBee**. It appears and is checked by default when MusicBee is installed,
 and copies the plugin into `%APPDATA%\MusicBee\Plugins`.
 
-**With the release zip.** Download the zip, extract it, and copy its **contents** into:
+**With the LyricLoom setup assistant.** Open **Help > Setup assistant… > MusicBee** and click
+**Install Starry Karaoke** or **Update Starry Karaoke**. The page also has **Check again** and shows
+whether MusicBee was found and which plugin version is installed. The assistant refuses while
+MusicBee is running.
+
+**With the release zip.** Download `StarryKaraoke-MusicBee-1.3.0.zip` from the LyricLoom
+[Releases page](https://github.com/nishizumi-maho/lyricloom/releases), extract it, and copy its
+**contents** into:
 
 - `%APPDATA%\MusicBee\Plugins` for an installed MusicBee, or
 - `<MusicBee folder>\Plugins` for the portable version.
@@ -59,8 +67,8 @@ values. **Defaults** resets everything except the window's position, size and mo
 
 **Window**
 
-- **Open automatically:** *Off*, *When the song has word-timed lyrics*, or *When it has any synced
-  lyrics*.
+- **Open automatically:** *Off*, *When the song has word-timed lyrics* (the default, also for
+  settings upgraded from 1.2), or *When it has any synced lyrics*.
 - **On an unsupported song:** keep the window open, hide it, or close it.
 - **Bring the window to the front when it opens automatically** (off by default, so a song starting
   in MusicBee never interrupts another application).
@@ -202,8 +210,12 @@ within 10 seconds does not launch a second copy.
 The plugin itself makes **no network request**: it does not upload the song, check for updates,
 collect telemetry or contact LyricLoom's servers. Only the local executable is started, and the
 LyricLoom download page is opened in the browser only after the user says yes to that question.
-LyricLoom's own network use (for example, cloud transcription if the user enables it) is described in
-LyricLoom's documentation.
+LyricLoom's own network use (for example, the default update check or cloud transcription if the
+user enables it) is described in LyricLoom's documentation.
+
+A silent LyricLoom update never closes MusicBee. When MusicBee is running, that update skips the
+plugin files and the next LyricLoom start explains how to update the plugin from the setup assistant
+or the release ZIP.
 
 ## Video recording
 
@@ -260,8 +272,16 @@ folder by hand if you prefer.
 
 ## Build
 
-`.\build.ps1` runs the tests, builds the plugin and writes
-`dist\MusicBee-StarryKaraoke-<version>.zip`. It needs the .NET SDK and builds for .NET Framework 4.8.
+`.\build.ps1` runs the tests, builds the plugin and recorder and writes
+`dist\StarryKaraoke-MusicBee-<version>.zip`, which is the release asset. It needs the **.NET 8 SDK**
+and builds for .NET Framework 4.8.
+
+From the repository root the same checks are:
+
+```powershell
+dotnet test musicbee\tests\StarryKaraoke.Tests -c Release -nologo
+dotnet build musicbee\src\StarryKaraoke.Recorder\StarryKaraoke.Recorder.csproj -c Release -nologo
+```
 
 ## License
 
