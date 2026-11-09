@@ -147,7 +147,7 @@ For tracks with no usable official lyric, `_extra_passes` runs two more transcri
 
 `align/consensus.rover` fuses the passes word by word against the first pass. The first pass supplies the word skeleton and times; repeated refrains are reconciled separately with `refrain_consensus`.
 
-Optional AssemblyAI is called only when `ASSEMBLYAI_ENABLED` (key file or env var) and the runner needs it. Its transcript is cached as `assemblyai_vocals.json` and can be reused without a second upload.
+Optional AssemblyAI is called only when the `assemblyai_enabled` setting is on, a key is configured, and the run allows cloud use (`allow_cloud`); the runner needs it. Its transcript is cached as `assemblyai_vocals.json` and can be reused without a second upload.
 
 ## Stage 5: align
 

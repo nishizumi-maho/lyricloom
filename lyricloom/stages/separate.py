@@ -62,16 +62,19 @@ def _run_separator(audio: Path, work: Path) -> tuple[Path, str, str | None]:
                "overlap": config.SEPARATOR_OVERLAP}
     fallback = None
     if config.SEPARATOR_WSL_ENABLED:
-        on_wsl = {**payload, "device": "rocm",
-                  **{k: wsl_path(payload[k]) for k in ("audio", "out_dir")}}
-        if config.WSL_MODELS_DIR:
-            on_wsl["model_dir"] = config.WSL_MODELS_DIR
-        else:
-            on_wsl["model_dir"] = wsl_path(payload["model_dir"])
         try:
+            on_wsl = {**payload, "device": "rocm",
+                      **{k: wsl_path(payload[k]) for k in ("audio", "out_dir")}}
+            if config.WSL_MODELS_DIR:
+                on_wsl["model_dir"] = config.WSL_MODELS_DIR
+            else:
+                on_wsl["model_dir"] = wsl_path(payload["model_dir"])
             res = run_worker("lyricloom.workers.separate", on_wsl, python=config.SEPARATOR_WSL_PYTHON,
                              wsl=config.SEPARATOR_WSL_DISTRO, wsl_env=config.SEPARATOR_WSL_ENV)
             return windows_path(res["vocals"]), "rocm", None
+        except ValueError as e:
+            # UNC paths (\\server\share) cannot be bridged to /mnt; use the local CPU path.
+            fallback = f"{e}; separating on the CPU instead"
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             fallback = str(e)[-500:]
     res = run_worker("lyricloom.workers.separate", payload, python=config.SEPARATOR_PYTHON)

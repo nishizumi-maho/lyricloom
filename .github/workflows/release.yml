@@ -313,7 +313,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: release-assets/*
           fail_on_unmatched_files: true
-          overwrite_files: true
+          overwrite_files: false
           generate_release_notes: true
           prerelease: ${{ contains(needs.validate.outputs.version, '-') }}
 

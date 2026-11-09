@@ -57,7 +57,7 @@ Uninstall:
 ~/.local/opt/LyricLoom/install.sh --uninstall
 ```
 
-Uninstalling removes the app, launcher and menu entry. Settings, logs, cached vocals and downloaded models under the LyricLoom data directory are intentionally preserved.
+Uninstalling removes the app, launcher and menu entry, then asks once (default **No**) whether to also remove LyricLoom's data folders: settings and logs, work cache, kept vocals, models and the AssemblyAI key. Use `--purge` to remove that data without asking. The music library and the `.lrc` files next to your music are never deleted. Custom `models`, `vocals` or `work` locations from `settings.json`, and environment-provided locations, are listed for you to remove by hand.
 
 The release binary targets the glibc of its build runner. On an older distribution, use the source install instead.
 

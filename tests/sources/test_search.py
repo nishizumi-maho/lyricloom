@@ -1,7 +1,10 @@
 from pathlib import Path
+from urllib.parse import quote
+
+import httpx
 
 from lyricloom.lyrics import search
-from lyricloom.lyrics.sources import lrclib, websearch
+from lyricloom.lyrics.sources import genius, lrclib, websearch
 from lyricloom.lyrics.sources.base import RawResult, SourceBlocked
 from lyricloom.model import TrackMeta
 
@@ -63,3 +66,77 @@ def test_websearch_result_urls():
     urls = websearch.parse_results((FX / "websearch" / "ddg.html").read_text(encoding="utf-8"))
     assert urls and all(u.startswith("http") for u in urls)
     assert any("letras.mus.br" in u for u in urls)
+
+
+def _ddg(*urls: str) -> str:
+    links = "".join(
+        f'<a class="result__a" href="//duckduckgo.com/l/?uddg={quote(url, safe="")}&amp;rut=test">x</a>'
+        for url in urls)
+    return f"<html><body>{links}</body></html>"
+
+
+def test_websearch_drops_http_and_lookalike_hosts():
+    html = _ddg(
+        "http://genius.com/Test-singer-song-lyrics",
+        "https://evilgenius.com/Test-singer-song-lyrics",
+        "https://genius.com.evil.example/Test-singer-song-lyrics",
+        "https://genius.com/Test-singer-song-lyrics",
+        "https://evilutaten.com/lyric/hw00000001/",
+        "https://utaten.com/lyric/hw00000001/",
+    )
+    urls = websearch.parse_results(html)
+    allowed = [url for url in urls if websearch.allowed_page(url)]
+    assert allowed == ["https://genius.com/Test-singer-song-lyrics",
+                       "https://utaten.com/lyric/hw00000001/"]
+    assert not any(url.startswith("http://") for url in urls)
+
+
+def test_websearch_fetches_only_allowlisted_pages(monkeypatch):
+    fetched = []
+    page = (FX / "genius" / "page.html").read_text(encoding="utf-8")
+
+    def fake_get(url, **kwargs):
+        fetched.append(url)
+        if url.startswith("https://html.duckduckgo.com/"):
+            text = _ddg(
+                "https://evilgenius.com/Test-singer-song-lyrics",
+                "https://genius.com/Test-singer-synthetic-song-lyrics",
+            )
+        else:
+            text = page
+        return httpx.Response(200, text=text, request=httpx.Request("GET", url))
+
+    class Client:
+        get = staticmethod(fake_get)
+
+    out = websearch.search(META, Client())
+    assert fetched == ["https://html.duckduckgo.com/html/",
+                       "https://genius.com/Test-singer-synthetic-song-lyrics"]
+    assert [r.url for r in out] == ["https://genius.com/Test-singer-synthetic-song-lyrics"]
+
+
+def test_genius_search_never_fetches_a_lookalike_or_http_url():
+    fetched = []
+    page = (FX / "genius" / "page.html").read_text(encoding="utf-8")
+    results = {"response": {"sections": [{"type": "song", "hits": [
+        {"result": {"title": "T", "url": "https://genius.com.evil.example/song-lyrics",
+                    "primary_artist": {"name": "A"}}},
+        {"result": {"title": "T", "url": "http://genius.com/song-lyrics",
+                    "primary_artist": {"name": "A"}}},
+        {"result": {"title": "Synthetic Song", "url": "https://genius.com/Test-singer-synthetic-song-lyrics",
+                    "primary_artist": {"name": "Test Singer"}}},
+    ]}]}}
+
+    def fake_get(url, **kwargs):
+        fetched.append(url)
+        if "api/search" in url:
+            return httpx.Response(200, json=results, request=httpx.Request("GET", url))
+        return httpx.Response(200, text=page, request=httpx.Request("GET", url))
+
+    class Client:
+        get = staticmethod(fake_get)
+
+    out = genius.search(META, Client())
+    assert fetched == ["https://genius.com/api/search/multi",
+                       "https://genius.com/Test-singer-synthetic-song-lyrics"]
+    assert [r.url for r in out] == ["https://genius.com/Test-singer-synthetic-song-lyrics"]

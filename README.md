@@ -82,7 +82,7 @@ The MusicBee option uses the separate [Starry Karaoke](https://github.com/nishiz
 - Batch runs continue when one track fails; the error is shown in the table and written to that track's log.
 - Built-in **Karaoke** window: a full-screen starry player with word-by-word highlighting, previous/next line context, seek, volume and "Vocals only". Keyboard: Space, arrows, F11, Esc.
 - Main-window player and word editor: play-line, nudge ±10/50 ms, add/delete/insert words and lines, merge, paste-and-realign, save.
-- Optional AssemblyAI transcription for difficult tracks or Japanese songs, only when you add a key.
+- Optional AssemblyAI transcription for difficult tracks or Japanese songs, only when you turn on cloud transcription and add a key.
 
 ### Platforms and hardware
 
@@ -112,7 +112,7 @@ You do not need Python, CUDA or a separate Whisper installation for the normal W
 2. Click **Library…** and choose the folder that contains your music. Subfolders are included.
 3. The first-run model dialog lists the missing models and downloads them to `%LOCALAPPDATA%\LyricLoom\models`. The download is about 5.3 GB, so keep the app open on a normal connection. You can skip a model and fetch it later from the same dialog. See [docs/models.md](docs/models.md).
 4. Choose the Japanese script you want in the main `.lrc`: **Japanese: 日本語** or **Japanese: romaji**. Both script variants are always kept as separate files.
-5. Optional: click **AssemblyAI key…** only if you want cloud transcription. Leave it empty to keep everything local.
+5. Optional: click **AssemblyAI key…** to store a key. Cloud transcription stays off by default: a stored key alone never uploads audio, and the separate cloud-transcription option must also be turned on. Leave everything off to keep the app fully local. See [Privacy](docs/privacy.md).
 
 ### 3. Process songs
 
@@ -242,7 +242,7 @@ LyricLoom has **no telemetry, no analytics and no account system**.
 - Searching for lyrics sends the artist and title (and sometimes album/duration) to public lyrics providers over HTTPS.
 - Model downloads contact GitHub, Hugging Face, PyTorch's model host, NLTK and the audio-separator model registry.
 - Audio is processed locally by Whisper, the separator and the aligners.
-- **Optional:** if you add an AssemblyAI API key, LyricLoom uploads the isolated vocal track to AssemblyAI when it uses cloud transcription (for example Japanese songs, or tracks where local transcription is unusable). Remove the key to disable it; the CLI also accepts `--no-cloud`.
+- **Optional:** cloud transcription is off by default. It runs only when you turn on the separate cloud-transcription setting, keep an AssemblyAI API key, and allow cloud use for the run; any of those being off keeps the audio local. When it runs, LyricLoom uploads only the isolated vocal track (for example for Japanese songs, or tracks where local transcription is unusable). Remove the key or turn the setting off to disable it; the CLI also accepts `--no-cloud`.
 - Settings, logs, caches and models stay in your per-user data folder.
 
 Read **[docs/privacy.md](docs/privacy.md)** for the exact hosts, data and local paths. The short version is in **[PRIVACY.md](PRIVACY.md)**.
