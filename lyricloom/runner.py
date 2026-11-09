@@ -3,6 +3,7 @@ cache per stage, and a folder of tracks without letting one failure stop the res
 from __future__ import annotations
 
 import os
+import stat
 import threading
 import time
 import traceback
@@ -438,13 +439,33 @@ def _log(audio: Path, msg: str) -> None:
         pass
 
 
+def _is_link_or_junction(path: str) -> bool:
+    """True for a symlink or a Windows junction (Python before 3.12 only knows the former)."""
+    try:
+        isjunction = getattr(os.path, "isjunction", None)
+        if isjunction is not None and isjunction(path):
+            return True
+        if os.path.islink(path):
+            return True
+        if os.name != "nt":
+            return False
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except OSError:
+        return False
+
+
 def find_audio(root: Path) -> list[Path]:
     if root.is_file():
         return [root]
     # os.walk avoids one stat per directory entry that Path.rglob performs; on a large external
     # library that difference is minutes, not seconds.
     found: list[Path] = []
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        # A junction can point back to an ancestor (backup and sync tools create such cycles);
+        # os.walk only skips symlinks, so prune every link and reparse-point directory itself.
+        dirnames[:] = [name for name in dirnames
+                       if not _is_link_or_junction(os.path.join(dirpath, name))]
         for name in filenames:
             if Path(name).suffix.lower() in AUDIO_EXT:
                 found.append(Path(dirpath) / name)

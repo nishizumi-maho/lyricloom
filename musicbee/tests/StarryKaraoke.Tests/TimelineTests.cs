@@ -19,6 +19,16 @@ namespace StarryKaraoke.Tests
         }
 
         [Fact]
+        public void Oversized_numbers_are_skipped_without_failing_the_file()
+        {
+            var lrc = "[99999999999:59.99]broken\n[offset:999999999999]\n[00:01.00]still here\n";
+            var lines = Lrc.Parse(lrc);
+            Assert.Single(lines);
+            Assert.Equal(1000, lines[0].StartMs);
+            Assert.Equal("still here", lines[0].Text);
+        }
+
+        [Fact]
         public void Offset_moves_lines_earlier()
         {
             var lines = Lrc.Parse("[offset:500]\n[00:02.00]<00:02.00>a <00:03.00>b\n");

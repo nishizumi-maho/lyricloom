@@ -246,15 +246,17 @@ def download(info: UpdateInfo, progress: Progress | None = None,
     if cancel is not None and cancel.is_set():
         raise RuntimeError("the update download was cancelled")
     UPDATE_DIR.mkdir(parents=True, exist_ok=True)
+    if UPDATE_DIR.is_symlink() or not UPDATE_DIR.is_dir():
+        raise RuntimeError("refusing to download the update: the update folder is not a real directory")
     destination = UPDATE_DIR / name
-    temporary = destination.with_name(destination.name + ".part")
-    temporary.unlink(missing_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=destination.name + ".", suffix=".part", dir=UPDATE_DIR)
+    temporary = Path(temporary_name)
     done = 0
     try:
-        with _stream(info.asset_url, allowed=_is_asset_redirect,
-                     headers={"User-Agent": USER_AGENT}) as response:
-            total = int(response.headers.get("content-length", 0)) or info.asset_size
-            with temporary.open("wb") as file:
+        with os.fdopen(fd, "wb") as file:
+            with _stream(info.asset_url, allowed=_is_asset_redirect,
+                         headers={"User-Agent": USER_AGENT}) as response:
+                total = int(response.headers.get("content-length", 0)) or info.asset_size
                 for chunk in response.iter_bytes(1 << 20):
                     if cancel is not None and cancel.is_set():
                         raise RuntimeError("the update download was cancelled")

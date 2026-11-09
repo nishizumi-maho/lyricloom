@@ -8,7 +8,7 @@ import httpx
 
 from ...model import TrackMeta
 from . import genius, utaten
-from .base import RawResult, check, host_matches, is_https_url
+from .base import RawResult, check, get_allowed, host_matches, is_https_url
 
 name = "websearch"
 _RESULT = re.compile(r'class="result__a" href="([^"]+)"')
@@ -45,13 +45,13 @@ def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
             continue
         parsed = urlparse(url)
         if host_matches(parsed.hostname, "genius.com"):
-            page = check(client.get(url)).text
+            page = get_allowed(client, url, allowed_page).text
             text = genius.parse_page(page)
             artist, title = genius.parse_page_title(page)   # the page's own song, not ours
             if text:
                 out.append(RawResult(title, artist, None, text, None, url))
         else:
-            title, artist, text = utaten.parse_page(check(client.get(url)).text)
+            title, artist, text = utaten.parse_page(get_allowed(client, url, allowed_page).text)
             if text:
                 out.append(RawResult(title, artist, None, text, None, url))
     return out
