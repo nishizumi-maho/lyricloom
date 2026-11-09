@@ -45,12 +45,20 @@ def map_words(seg_texts: list[list[str]], words: list[list]) -> list[list[Segmen
 def align_lines_mtl(vocals: Path, seg_texts: list[list[str]],
                     cancel: threading.Event | None = None) -> list[list[Segment | None]]:
     lines = [" ".join(k for k in map(word_key, line) if k) for line in seg_texts]
+    spec = config.resolve_model("singing", "en")
+    checkpoint = spec.dest(spec.model_file(), config.MODELS)
     payload = {"wav": str(vocals), "lines": lines, "repo": str(config.MTL_REPO),
-               "checkpoint_dir": str(config.MTL_CHECKPOINT.parent.parent)}
+               "checkpoint_dir": str(checkpoint.parent.parent),
+               "checkpoint_size": spec.size,
+               "nltk_dir": str(config.MODELS / "nltk")}
     if config.MTL_WSL_ENABLED:
         try:
+            mnt_checkpoint_dir = wsl_path(payload["checkpoint_dir"])
+            candidates = [d for d in (config.MTL_WSL_CHECKPOINT, mnt_checkpoint_dir) if d]
             on_wsl = {**payload, "cuda": True, "wav": wsl_path(payload["wav"]),
-                      "repo": config.MTL_WSL_REPO, "checkpoint_dir": config.MTL_WSL_CHECKPOINT}
+                      "repo": config.MTL_WSL_REPO, "checkpoint_dir": mnt_checkpoint_dir,
+                      "checkpoint_dirs": candidates,
+                      "nltk_dir": wsl_path(payload["nltk_dir"])}
             res = run_worker("lyricloom.workers.align_mtl", on_wsl, python=config.ALIGN_WSL_PYTHON,
                              wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.MTL_WSL_ENV, cancel=cancel)
             return map_words(seg_texts, res["words"])

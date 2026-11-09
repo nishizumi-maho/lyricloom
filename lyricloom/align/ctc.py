@@ -29,12 +29,24 @@ def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[lis
     """seg_tokens[k][l] = MMS token strings of each segment of line l in block k.
     Returns, per lyric line in order, one Segment (absolute ms) or None per segment.
     Runs on the GPU through ROCm in WSL when it is available, else on the CPU."""
-    os.environ.setdefault("TORCH_HOME", str(config.MODELS / "torch"))
+    # R3-27: point torch at our own cache unconditionally; a user-set TORCH_HOME must not make the
+    # status check and the aligner disagree about where the checkpoint is.
+    torch_home = config.MODELS / "torch"
+    os.environ["TORCH_HOME"] = str(torch_home)
+    spec = config.resolve_model("align", config.active_language())
+    model_path = spec.dest(spec.model_file(), config.MODELS)
     payload = {"wav": str(vocals16k), "device": config.ALIGN_DEVICE, "blocks": [
-        {"start_ms": b.start_ms, "end_ms": b.end_ms, "lines": lines} for b, lines in zip(blocks, seg_tokens)]}
+        {"start_ms": b.start_ms, "end_ms": b.end_ms, "lines": lines} for b, lines in zip(blocks, seg_tokens)],
+        "model_path": str(model_path), "model_size": spec.size, "torch_home": str(torch_home)}
     if config.ALIGN_WSL_ENABLED:
         try:
-            on_wsl = {**payload, "device": "cuda", "wav": wsl_path(payload["wav"])}
+            wsl_torch_home = str(config.ALIGN_WSL_ENV.get("TORCH_HOME") or torch_home)
+            mnt_model = wsl_path(payload["model_path"])
+            candidates = [f"{wsl_torch_home.rstrip('/')}/hub/checkpoints/{model_path.name}",
+                          mnt_model]
+            on_wsl = {**payload, "device": "cuda", "wav": wsl_path(payload["wav"]),
+                      "model_path": mnt_model, "model_candidates": candidates,
+                      "torch_home": wsl_torch_home}
             res = run_worker("lyricloom.workers.align_ctc", on_wsl, python=config.ALIGN_WSL_PYTHON,
                              wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.ALIGN_WSL_ENV, cancel=cancel)
             return _segments(blocks, res)

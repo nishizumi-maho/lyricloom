@@ -55,6 +55,16 @@ def test_real_singing_is_not_flagged():
     assert not looks_hallucinated(_tr(words * 9, step=500), 238.6)
 
 
+def test_missing_whisper_cli_error_names_the_real_setting(tmp_path, monkeypatch):
+    from lyricloom import config
+    from lyricloom.stages import transcribe
+
+    monkeypatch.setattr(config, "whisper_cli", lambda: tmp_path / "missing-whisper-cli")
+    with pytest.raises(RuntimeError, match="whisper_cli"):
+        transcribe.transcribe(FX / "jfk.wav", tmp_path, "en")
+
+
+
 @pytest.mark.gpu
 def test_transcribe_jfk(tmp_path):
     from lyricloom.stages.transcribe import transcribe

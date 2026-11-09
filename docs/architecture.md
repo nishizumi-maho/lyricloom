@@ -40,6 +40,8 @@ Every stage except `probe` has its own JSON cache. `write` also reads cached res
 | `lyricloom/workers/` | Subprocess entry points for torch/audio-separator work. |
 | `lyricloom/app/` | PySide6 window and pure model helpers. |
 | `lyricloom/vendor/mtl/` | Vendored LyricsAlignment-MTL inference code (MIT). |
+| `lyricloom/models.py` | Model catalog, per-language/per-track choices, verification status. |
+| `lyricloom/downloads.py` | Verified, resumable HTTPS downloads (`.part` + size + SHA-256). |
 | `lyricloom/runtime.py` | Model downloads and readiness checks. |
 | `lyricloom/cache.py` | Per-track work directory and JSON cache. |
 | `lyricloom/config.py` | Paths, settings, env vars, WSL/ROCm configuration. |
@@ -279,7 +281,7 @@ The trade-off is process startup and model load time per stage. The per-stage ca
 - models root: `LYRICLOOM_MODELS`, `models` setting, a developer `models/` folder, then the data root;
 - library: `library` setting, then `~/Music`;
 - vocals: `vocals` setting, then `<data>/vocals`;
-- tools: bundled `tools/bin`, project `tools/bin`, `<data>/bin`, then `PATH`.
+- tools: `whisper_cli` setting / `LYRICLOOM_WHISPER_CLI`, bundled `tools/bin`, project `tools/bin`, `<data>/bin`, then `PATH`.
 
 Environment variables that affect behavior:
 
@@ -287,7 +289,8 @@ Environment variables that affect behavior:
 |---|---|
 | `LYRICLOOM_DATA_DIR` | Moves settings, cache, vocals and default models. |
 | `LYRICLOOM_MODELS` | Moves only the models. |
-| `LYRICLOOM_WHISPER_MODEL` | Changes the expected Whisper file name. |
+| `LYRICLOOM_WHISPER_CLI` | Full path to a whisper.cpp `whisper-cli` (same as the `whisper_cli` setting). |
+| `LYRICLOOM_WHISPER_MODEL` | Deprecated: the old filename override. Use `model_choices` / `lyricloom models use`. |
 | `LYRICLOOM_SEPARATOR_DEVICE` | `auto`, `cpu`, `cuda` or `dml` for the separator worker. |
 | `LYRICLOOM_SEPARATOR_OVERLAP` | Separator overlap (default 2). |
 | `LYRICLOOM_CPU_THREADS` | Caps worker thread pools (default one quarter of logical CPUs). |
