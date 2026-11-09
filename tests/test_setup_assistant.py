@@ -194,3 +194,42 @@ def test_declining_cloud_consent_passes_allow_cloud_false(app, tmp_path, monkeyp
     finally:
         w.dirty = False
         w.close()
+
+
+def test_privacy_page_defaults_to_update_checks_on_and_saves_the_install_mode(app):
+    """Owner decision: update checks are on by default, with automatic installation."""
+    from lyricloom.app.setup_assistant import PrivacyPage
+
+    page = PrivacyPage()
+    assert page.check_updates.isChecked()
+    assert page.update_install.currentData() == "auto"
+    page.update_install.setCurrentIndex(page.update_install.findData("notify"))
+    assert page.apply()
+    assert config.setting("check_updates") is True
+    assert config.setting("update_install") == "notify"
+    page.check_updates.setChecked(False)
+    assert not page.update_install.isEnabled()
+    assert page.apply()
+    assert config.setting("check_updates") is False
+
+
+def test_skipped_plugin_notice_offers_the_musicbee_page(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from lyricloom import updater
+
+    config.set_setting(updater.PLUGIN_SKIP_NOTICE_SETTING, True)
+    opened = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
+    monkeypatch.setattr(QMessageBox, "clickedButton",
+                        lambda self: next(b for b in self.buttons() if b.text().startswith("Open")))
+    w = MainWindow(tmp_path)
+    try:
+        monkeypatch.setattr(w, "open_setup_assistant", lambda page=None: opened.append(page))
+        w._show_pending_plugin_notice()
+        assert opened == ["musicbee"]
+        w._show_pending_plugin_notice()   # shown once
+        assert opened == ["musicbee"]
+    finally:
+        w.dirty = False
+        w.close()

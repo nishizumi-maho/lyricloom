@@ -56,6 +56,9 @@ MinVersion=10.0
 CloseApplications=yes
 CloseApplicationsFilter=*.exe,*.dll
 RestartApplications=no
+; Keep the task choices from an earlier version (for example the optional
+; MusicBee plugin). A silent update passes /SKIPPLUGIN=1 to override it.
+UsePreviousTasks=yes
 
 OutputDir=..\..\dist
 OutputBaseFilename=LyricLoom-Setup-{#MyAppVersion}
@@ -78,8 +81,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 ; Check makes this task checked by default only when MusicBee is installed; a
-; machine without MusicBee shows it unchecked and disabled.
-Name: "musicbeeplugin"; Description: "Install the Starry Karaoke plugin for MusicBee"; GroupDescription: "MusicBee"; Check: MusicBeeDetected
+; machine without MusicBee shows it unchecked and disabled. A silent update
+; while MusicBee is open passes /SKIPPLUGIN=1 so MusicBee is never closed.
+Name: "musicbeeplugin"; Description: "Install the Starry Karaoke plugin for MusicBee"; GroupDescription: "MusicBee"; Check: MusicBeeTaskAllowed
 
 [Files]
 Source: "..\..\dist\LyricLoom\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -107,7 +111,11 @@ Root: HKCU; Subkey: "Software\LyricLoom"; ValueType: string; ValueName: "Install
 Root: HKCU; Subkey: "Software\LyricLoom"; ValueType: string; ValueName: "Executable"; ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletevalue
 
 [Run]
+; Interactive install: the normal "Launch LyricLoom" checkbox on the finished
+; page. Silent installs skip this entry (skipifsilent) and use the next one,
+; which only starts the app when the updater passed /RELAUNCH=1.
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: RelaunchAfterSilentInstall
 
 ; The uninstaller removes the installation directory and the plugin files recorded
 ; in its uninstall log. It then asks once (default No) whether to also delete
@@ -118,6 +126,11 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 ; touched. The rest of the user's MusicBee Plugins folder is never touched.
 
 [Code]
+function RelaunchAfterSilentInstall: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
 function MusicBeeDetected: Boolean;
 begin
   Result :=
@@ -129,6 +142,11 @@ begin
     RegKeyExists(HKEY_LOCAL_MACHINE, 'Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\MusicBee') or
     FileExists(ExpandConstant('{pf}\MusicBee\MusicBee.exe')) or
     FileExists(ExpandConstant('{pf32}\MusicBee\MusicBee.exe'));
+end;
+
+function MusicBeeTaskAllowed: Boolean;
+begin
+  Result := MusicBeeDetected and (ExpandConstant('{param:SKIPPLUGIN|0}') <> '1');
 end;
 
 function ReadSettingString(const FileName, KeyName: String): String;

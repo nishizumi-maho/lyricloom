@@ -158,11 +158,23 @@ class SettingsDialog(QDialog):
 
         privacy = QGroupBox("Privacy")
         pform = QFormLayout(privacy)
-        self.check_updates = QCheckBox("Check GitHub Releases for updates on startup")
-        self.check_updates.setChecked(data.get("check_updates") is True)
+        self.check_updates = QCheckBox("Check GitHub Releases for updates at startup and every 24 hours")
+        self.check_updates.setChecked(updater.check_enabled())
         self.check_updates.setToolTip(
-            "When on, one request to api.github.com asks for public release metadata at startup.")
+            "When on, one request to api.github.com asks for public release metadata at startup "
+            "and every 24 hours. Nothing about you or your library is sent.")
         pform.addRow(self.check_updates)
+        self.update_install = QComboBox()
+        for label, mode in (("Install automatically when LyricLoom closes", "auto"),
+                            ("Ask before installing", "ask"),
+                            ("Only notify me", "notify")):
+            self.update_install.addItem(label, mode)
+        self.update_install.setCurrentIndex(max(0, self.update_install.findData(updater.install_mode())))
+        self.update_install.setToolTip(
+            "Automatic: download a verified update in the background and install it silently when "
+            "LyricLoom closes. Ask: download and install only after you click Install now. Notify: "
+            "only show that a new release exists.")
+        pform.addRow("When an update is found", self.update_install)
         self.cloud = QCheckBox("Allow uploading the isolated vocal to AssemblyAI")
         self.cloud.setChecked(config.assemblyai_enabled())
         self.cloud.setToolTip(
@@ -316,6 +328,7 @@ class SettingsDialog(QDialog):
                 "check_updates": self.check_updates.isChecked(),
                 "assemblyai_enabled": self.cloud.isChecked(),
                 ASK_BEFORE_UPLOAD: self.ask_upload.isChecked(),
+                "update_install": self.update_install.currentData(),
                 "notify_queue_finished": self.notify_finished.isChecked(),
                 "smooth_animation": self.smooth.currentIndex() + 1,
                 "wsl_gpu": self.wsl.isChecked(),
@@ -384,6 +397,20 @@ class UpdateController(QObject):
         self._download_worker: _UpdateDownload | None = None
         self._progress: QProgressDialog | None = None
         self._cancel = threading.Event()
+        self._download_automatic = False
+        self._download_info: updater.UpdateInfo | None = None
+        self._info: updater.UpdateInfo | None = None
+        self._downloaded: Path | None = None
+
+    def _bar(self):
+        return getattr(self._window, "update_bar", None)
+
+    def _status(self, message: str, timeout: int = 12000) -> None:
+        status = getattr(self._window, "statusBar", None)
+        if status is not None:
+            bar = status() if callable(status) else status
+            if bar is not None:
+                bar.showMessage(message, timeout)
 
     def check(self, silent: bool = False) -> None:
         if self._check_thread is not None:
@@ -404,16 +431,21 @@ class UpdateController(QObject):
         self._threads.append(thread)
         thread.start()
 
-    def download(self, info: updater.UpdateInfo) -> None:
+    def download(self, info: updater.UpdateInfo, *, automatic: bool = False) -> bool:
+        """Start a verified download. Returns False when one is already running."""
         if self._download_thread is not None:
-            return
+            return False
         self._cancel.clear()
-        self._progress = QProgressDialog(f"Downloading LyricLoom {info.version}…", "", 0, 0, self._window)
-        self._progress.setWindowTitle("Updating LyricLoom")
-        self._progress.setCancelButton(None)
-        self._progress.setAutoClose(False)
-        self._progress.setAutoReset(False)
-        self._progress.show()
+        self._download_automatic = automatic
+        self._download_info = info
+        if not automatic:
+            self._progress = QProgressDialog(f"Downloading LyricLoom {info.version}…", "", 0, 0,
+                                             self._window)
+            self._progress.setWindowTitle("Updating LyricLoom")
+            self._progress.setCancelButton(None)
+            self._progress.setAutoClose(False)
+            self._progress.setAutoReset(False)
+            self._progress.show()
         thread = QThread(self)
         worker = _UpdateDownload(info, self._cancel)
         worker.moveToThread(thread)
@@ -428,6 +460,7 @@ class UpdateController(QObject):
         self._download_worker = worker
         self._threads.append(thread)
         thread.start()
+        return True
 
     def _check_finished(self) -> None:
         self._check_thread = None
@@ -441,18 +474,131 @@ class UpdateController(QObject):
     def check_done(self, info) -> None:
         if info is None:
             if not self._silent:
-                QMessageBox.information(self._window, "Updates", f"LyricLoom {VERSION} is up to date.")
+                QMessageBox.information(self._window, "Updates",
+                                        f"You have the latest version (LyricLoom {VERSION}).")
             return
+        if updater.is_skipped(info.version):
+            if not self._silent:
+                QMessageBox.information(
+                    self._window, "Updates",
+                    f"LyricLoom {info.version} is available, but you chose to skip this version. "
+                    "You will be offered newer versions when they are released.")
+            return
+        if self._info is not None and self._info.version == info.version and self._downloaded is not None:
+            self._show_notice()   # already downloaded; a re-check must not fetch it again
+            return
+        self._info = info
+        self._downloaded = None
         if self._silent:
-            self._window.statusBar().showMessage(
-                f"Update {info.version} is available (Help > Check for updates)", 12000)
+            self._status(f"Update {info.version} is available", 12000)
+        if not updater.installer_available():
+            self._show_notice()
             return
-        answer = QMessageBox.question(
-            self._window, "Update available",
-            f"LyricLoom {info.version} is available (you have {VERSION}).\n\n"
-            f"{(info.notes or 'See the release page for details.')[:1800]}\n\nDownload and install now?")
-        if answer == QMessageBox.Yes:
-            self.download(info)
+        if updater.install_mode() == "auto":
+            self._status(f"Downloading LyricLoom {info.version} …")
+            if self.download(info, automatic=True):
+                return
+        self._show_notice()
+
+    def _show_notice(self) -> None:
+        """Show (or refresh) the non-modal banner for the current release."""
+        info = self._info
+        if info is None:
+            return
+        action_text = None
+        mode = updater.install_mode()
+        if updater.installer_available():
+            if mode == "auto" and self._downloaded is not None:
+                action_text = "Restart now"
+            elif mode == "ask" and self._downloaded is None:
+                action_text = "Install now"
+        bar = self._bar()
+        if bar is None:
+            if not self._silent:
+                QMessageBox.information(
+                    self._window, "Update available",
+                    f"LyricLoom {info.version} is available.\n\n"
+                    f"{info.notes or 'See the release page for details.'}")
+            return
+        bar.show_update(
+            info,
+            action_text=action_text,
+            show_tarball=not updater.installer_available() and not config.IS_WINDOWS,
+            on_action=self._notice_action,
+            on_later=self._notice_later,
+            on_skip=self._notice_skip,
+        )
+
+    def _notice_action(self) -> None:
+        """The banner's mode-specific action: install a ready download or start an ask download."""
+        if self._info is None:
+            return
+        if self._downloaded is not None:
+            if updater.install_mode() == "ask":
+                self._begin_install(silent=False, relaunch=False)
+            else:
+                self._begin_install(silent=True, relaunch=True)
+        elif updater.install_mode() == "ask":
+            self._status(f"Downloading LyricLoom {self._info.version} …")
+            if not self.download(self._info, automatic=False):
+                QMessageBox.warning(self._window, "Updates", "An update download is already running.")
+
+    def _notice_later(self) -> None:
+        if self._downloaded is not None and updater.install_mode() == "auto":
+            self._status("Update postponed; it will be installed when LyricLoom closes", 8000)
+        else:
+            self._status("Update postponed", 8000)
+
+    def _notice_skip(self) -> None:
+        info = self._info
+        if info is None:
+            return
+        try:
+            updater.skip_version(info.version)
+        except OSError as exc:
+            QMessageBox.warning(self._window, "Updates",
+                                f"Could not remember the skipped version:\n{exc}")
+        path = self.take_downloaded_update()
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._status(f"LyricLoom {info.version} will not be offered again", 8000)
+
+    def take_downloaded_update(self, path: Path | None = None, *,
+                               auto_only: bool = False) -> Path | None:
+        """Hand a verified download to the caller once; never returns the same file twice."""
+        if self._downloaded is None:
+            return None
+        if auto_only and updater.install_mode() != "auto":
+            return None
+        if path is not None and Path(path) != self._downloaded:
+            return None
+        result, self._downloaded = self._downloaded, None
+        return result
+
+    def _begin_install(self, *, silent: bool, relaunch: bool) -> bool:
+        """Ask MainWindow to stop the queue, then start the installer and close the window."""
+        path = self._downloaded
+        if path is None:
+            return False
+        prepare = getattr(self._window, "prepare_update", None)
+        if prepare is not None and not prepare(path, silent=silent, relaunch=relaunch):
+            return False   # the queue is still stopping; MainWindow installs it when it finishes
+        try:
+            updater.launch_installer(path, silent=silent, relaunch=relaunch, skip_plugin=False)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self._window, "Update", "Could not start the installer:\n" + str(exc))
+            return False
+        self.take_downloaded_update(path)
+        # Close the window so the normal close path stops the background threads instead of a bare
+        # event-loop exit while the update/scan threads still run.
+        if hasattr(self._window, "close"):
+            self._window.close()
+        else:
+            QApplication.quit()
+        return True
 
     @Slot(str)
     def check_failed(self, message: str) -> None:
@@ -472,28 +618,34 @@ class UpdateController(QObject):
         if self._progress is not None:
             self._progress.close()
             self._progress = None
-        prepare = getattr(self._window, "prepare_update", None)
-        if prepare is not None and not prepare(path):
-            return   # the queue is still stopping; MainWindow installs it when it finishes
-        try:
-            updater.launch_installer(path)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self._window, "Update", "Could not start the installer:\n" + str(exc))
+        automatic, self._download_automatic = self._download_automatic, False
+        downloaded_info, self._download_info = self._download_info, None
+        if (self._info is not None and downloaded_info is not None
+                and downloaded_info.version != self._info.version):
+            # A check found a different release while this download ran; never install the
+            # verified file as if it belonged to the new version (it will be cleaned on restart).
             return
-        # Close the window so the normal close path stops the background threads instead of a bare
-        # event-loop exit while the update/scan threads still run.
-        if hasattr(self._window, "close"):
-            self._window.close()
-        else:
-            QApplication.quit()
+        self._downloaded = Path(path)
+        if automatic:
+            self._show_notice()
+            if self._info is not None:
+                self._status(f"LyricLoom {self._info.version} is ready; restart to install", 12000)
+            return
+        self._begin_install(silent=False, relaunch=False)
 
     @Slot(str)
     def download_failed(self, message: str) -> None:
         if self._progress is not None:
             self._progress.close()
             self._progress = None
+        automatic, self._download_automatic = self._download_automatic, False
+        self._download_info = None
         if self._cancel.is_set():
             return   # shutting down: the user asked for the download to stop
+        if automatic:
+            self._status("Could not download the update: " + message, 12000)
+            self._show_notice()   # still offer the release page and the notes
+            return
         QMessageBox.critical(self._window, "Update failed", message)
 
     def shutdown(self) -> None:
