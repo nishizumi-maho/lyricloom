@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -25,27 +26,46 @@ namespace StarryKaraoke.Recorder
         private readonly Job _job;
         private volatile bool _cancel;
         private volatile bool _userCancel;
+        private volatile JobObject _jobObject;
         private int _framesDone;
         public event Action<int, int> Progress;     // frames done, total
         public event Action<string> Status;
         public event Action<Exception> Finished;    // null on success
 
         public Renderer(Job job) { _job = job; }
+
+        /// <summary>Asks every phase to stop at its next check: encoder probe, segment rendering,
+        /// the final join and the commit. The join checks between short waits, so Cancel is not held
+        /// until a minutes-long ffmpeg call finishes.</summary>
         public void Cancel() { _userCancel = true; _cancel = true; }
+
+        /// <summary>Cancel and terminate the ffmpeg processes in the job object (Force stop).</summary>
+        public void Kill()
+        {
+            _userCancel = true;
+            _cancel = true;
+            try { _jobObject?.KillAll(); } catch (Exception) { }
+        }
 
         public void Start() => new Thread(Run) { IsBackground = true, Name = "Starry Karaoke recorder" }.Start();
 
         private void Run()
         {
-            var work = Path.Combine(Path.GetTempPath(), "StarryKaraoke", "rec-" + Guid.NewGuid().ToString("N").Substring(0, 8));
-            var partial = _job.Out + ".part.mp4";
+            string work = null;
+            string partial = null;
             try
             {
-                Directory.CreateDirectory(work);
+                work = RecorderTemp.CreateRunFolder();
+                partial = OutputSafety.PartialPath(_job.Out);
+                _jobObject = JobObject.Create();
+                // Defence in depth: Job.FromArgs already refused this, but never let a manually
+                // constructed Job write over the audio or any other input it reads.
+                OutputSafety.ValidateOutput(_job.Out, _job.Audio, _job.Lrc, _job.SettingsPath, _job.Ffmpeg);
                 if (!string.IsNullOrEmpty(_job.Dict)) RomajiCore.Romanizer.UseFirstExistingDictionary(_job.Dict);
                 var s = _job.Settings;
-                var lines = Timeline.Build(Lrc.Parse(File.ReadAllText(_job.Lrc)), _job.DurationMs, s.Japanese,
+                var lines = Timeline.Build(Lrc.Parse(_job.Lyrics), _job.DurationMs, s.Japanese,
                                            x => { try { return RomajiCore.Romanizer.ToRomaji(x) ?? ""; } catch (Exception) { return ""; } });
+                ThrowIfCancelled();
 
                 var fps = _job.Fps;
                 // audio time the video starts at: 0, or just before the first sung line
@@ -58,7 +78,7 @@ namespace StarryKaraoke.Recorder
 
                 Status?.Invoke("Testing the video encoder...");
                 var encoder = PickEncoder();
-                var workers = Math.Max(1, Math.Min(Math.Min(8, Environment.ProcessorCount / 3), total / (fps * 4)));
+                var workers = WorkersFor(encoder, total, fps, Environment.ProcessorCount);
                 Status?.Invoke($"Rendering in {workers} parts ({EncoderName(encoder)})...");
 
                 var bounds = Enumerable.Range(0, workers + 1).Select(k => (int)((long)total * k / workers)).ToArray();
@@ -76,6 +96,7 @@ namespace StarryKaraoke.Recorder
                     return th;
                 }).ToList();
                 foreach (var th in threads) th.Join();
+
                 if (_userCancel) throw new OperationCanceledException();
                 var failed = errors.FirstOrDefault(e => e != null && !(e is OperationCanceledException));
                 if (failed != null) throw failed;
@@ -87,19 +108,46 @@ namespace StarryKaraoke.Recorder
                 var seek = startMs > 0 ? "-ss " + (startMs / 1000).ToString("0.000", CultureInfo.InvariantCulture) + " " : "";
                 RunFfmpeg($"-y -loglevel error -f concat -safe 0 -i {Q(list)} {seek}-i {Q(_job.Audio)} -map 0:v:0 -map 1:a:0 " +
                           $"-c:v copy -c:a aac -b:a 256k -shortest -movflags +faststart -f mp4 {Q(partial)}");
-                if (File.Exists(_job.Out)) File.Delete(_job.Out);
-                File.Move(partial, _job.Out);
+                ThrowIfCancelled();
+
+                // Never delete the target first: the partial file is complete and ffmpeg has exited,
+                // then Commit swaps it in, keeping the old file until the swap succeeded.
+                OutputSafety.Commit(partial, _job.Out);
                 Finished?.Invoke(null);
+            }
+            catch (OperationCanceledException)
+            {
+                Finished?.Invoke(new OperationCanceledException("Recording cancelled."));
             }
             catch (Exception e)
             {
-                try { if (File.Exists(partial)) File.Delete(partial); } catch (Exception) { }
                 Finished?.Invoke(e);
             }
             finally
             {
-                try { Directory.Delete(work, true); } catch (Exception) { }
+                try { if (File.Exists(partial)) File.Delete(partial); } catch (Exception) { }
+                RecorderTemp.DeleteRunFolder(work);
+                var jobObject = _jobObject;
+                _jobObject = null;
+                jobObject?.Dispose();
             }
+        }
+
+        private void ThrowIfCancelled()
+        {
+            if (_cancel || _userCancel) throw new OperationCanceledException();
+        }
+
+        /// <summary>At most two parts for a hardware encoder (driver session limits), and at most half
+        /// the logical processors (minimum 1, maximum 8) for software encoding (R4-12).</summary>
+        internal static int WorkersFor(string encoder, int totalFrames, int fps, int processorCount)
+        {
+            var hardware = !string.IsNullOrEmpty(encoder) &&
+                           !encoder.TrimStart().StartsWith("libx264", StringComparison.OrdinalIgnoreCase);
+            var half = Math.Max(1, Math.Min(8, Math.Max(0, processorCount) / 2));
+            var cap = hardware ? Math.Min(2, half) : half;
+            var byLength = fps > 0 ? Math.Max(1, totalFrames / (fps * 4)) : 1;
+            return Math.Max(1, Math.Min(cap, byLength));
         }
 
         private static string Q(string p) => "\"" + p.Replace("\"", "\\\"") + "\"";
@@ -114,9 +162,11 @@ namespace StarryKaraoke.Recorder
             {
                 try
                 {
+                    ThrowIfCancelled();
                     RunFfmpeg($"-y -loglevel error -f lavfi -i color=black:s={_job.Width}x{_job.Height}:d=0.2 -c:v {enc} -pix_fmt yuv420p -f null -");
                     return enc;
                 }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception) { }
             }
             return "libx264 -preset fast -crf 18";
@@ -124,15 +174,61 @@ namespace StarryKaraoke.Recorder
 
         private static string EncoderName(string enc) => enc.Split(' ')[0].Replace("h264_amf", "GPU AMD").Replace("h264_nvenc", "GPU NVIDIA").Replace("h264_qsv", "GPU Intel").Replace("libx264", "CPU");
 
+        /// <summary>Runs ffmpeg while remaining cancellable. stderr is read asynchronously so the
+        /// process cannot block on a full pipe; WaitForExit is polled so Cancel kills it promptly.</summary>
         private void RunFfmpeg(string args)
         {
-            var p = Process.Start(new ProcessStartInfo(_job.Ffmpeg, args)
+            ThrowIfCancelled();
+            using (var p = new Process
             {
-                UseShellExecute = false, RedirectStandardError = true, CreateNoWindow = true
-            });
-            var err = p.StandardError.ReadToEnd();
-            p.WaitForExit();
-            if (p.ExitCode != 0) throw new Exception("ffmpeg failed (code " + p.ExitCode + "):\n" + err.Trim());
+                StartInfo = new ProcessStartInfo(_job.Ffmpeg, args)
+                {
+                    UseShellExecute = false, RedirectStandardError = true, CreateNoWindow = true
+                }
+            })
+            {
+                if (!p.Start()) throw new Exception("Could not start ffmpeg: " + _job.Ffmpeg);
+                _jobObject?.Assign(p);
+
+                var err = new StringBuilder();
+                p.ErrorDataReceived += (o, e) =>
+                {
+                    if (e.Data == null) return;
+                    lock (err) { if (err.Length < 8000) err.AppendLine(e.Data); }
+                };
+                p.BeginErrorReadLine();
+                try
+                {
+                    while (!p.WaitForExit(100))
+                    {
+                        if (_cancel)
+                        {
+                            TryKill(p);
+                            throw new OperationCanceledException();
+                        }
+                    }
+                    p.WaitForExit();   // flush the asynchronous stderr handlers
+                }
+                finally
+                {
+                    if (_cancel) TryKill(p);
+                }
+
+                ThrowIfCancelled();
+                string text;
+                lock (err) text = err.ToString();
+                if (p.ExitCode != 0) throw new Exception("ffmpeg failed (code " + p.ExitCode + "):\n" + text.Trim());
+            }
+        }
+
+        private static void TryKill(Process p)
+        {
+            try
+            {
+                if (!p.HasExited) p.Kill();
+                p.WaitForExit(2000);
+            }
+            catch (Exception) { }
         }
 
         // ---------------------------------------------------------------- one segment
@@ -152,7 +248,11 @@ namespace StarryKaraoke.Recorder
             // exactly where they would be had the video been rendered in one go
             var warm = Math.Max(0, from - fps * 4);
             scene.Update(1.0, LyricTime(warm), size);
-            for (var i = warm; i < from; i++) scene.Update(1.0 / fps, LyricTime(i), size);
+            for (var i = warm; i < from; i++)
+            {
+                if (_cancel) throw new OperationCanceledException();
+                scene.Update(1.0 / fps, LyricTime(i), size);
+            }
 
             var psi = new ProcessStartInfo(_job.Ffmpeg)
             {
@@ -161,8 +261,14 @@ namespace StarryKaraoke.Recorder
                 UseShellExecute = false, RedirectStandardInput = true, RedirectStandardError = true, CreateNoWindow = true
             };
             var ff = Process.Start(psi);
-            var ffErr = "";
-            ff.ErrorDataReceived += (o, e) => { if (e.Data != null && ffErr.Length < 4000) ffErr += e.Data + "\n"; };
+            if (ff == null) throw new Exception("Could not start ffmpeg: " + _job.Ffmpeg);
+            _jobObject?.Assign(ff);
+            var ffErr = new StringBuilder();
+            ff.ErrorDataReceived += (o, e) =>
+            {
+                if (e.Data == null) return;
+                lock (ffErr) { if (ffErr.Length < 4000) ffErr.AppendLine(e.Data); }
+            };
             ff.BeginErrorReadLine();
 
             var gw = Math.Max(2, w / 4); var gh = Math.Max(2, h / 4);
@@ -221,12 +327,29 @@ namespace StarryKaraoke.Recorder
                 }
                 stdin.Close();
                 ff.WaitForExit();
-                if (ff.ExitCode != 0) throw new Exception("ffmpeg failed (code " + ff.ExitCode + "):\n" + ffErr.Trim());
+                ThrowIfCancelled();
+                if (ff.ExitCode != 0)
+                {
+                    string text;
+                    lock (ffErr) text = ffErr.ToString();
+                    throw new Exception("ffmpeg failed (code " + ff.ExitCode + "):\n" + text.Trim());
+                }
             }
-            catch
+            catch (OperationCanceledException)
             {
                 try { if (!ff.HasExited) ff.Kill(); } catch (Exception) { }
                 throw;
+            }
+            catch (Exception)
+            {
+                try { if (!ff.HasExited) ff.Kill(); } catch (Exception) { }
+                if (_userCancel) throw new OperationCanceledException();
+                throw;
+            }
+            finally
+            {
+                try { stdin.Dispose(); } catch (Exception) { }
+                try { ff.Dispose(); } catch (Exception) { }
             }
         }
     }

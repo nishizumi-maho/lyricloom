@@ -17,4 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\StarryKaraoke\StarryKaraoke.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="StarryKaraoke.Tests" />
+  </ItemGroup>
 </Project>
