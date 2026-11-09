@@ -16,5 +16,16 @@ namespace StarryKaraoke.Tests
             Assert.Equal("·  ·  ·", Strings.CountdownDots);
             Assert.DoesNotContain("A seguir", Strings.NextSongPrefix);
         }
+
+        /// <summary>The karaoke window's own text is in the same place as the scene's.</summary>
+        [Fact]
+        public void Window_strings_are_english()
+        {
+            Assert.Equal("Sent to LyricLoom — the lyrics appear here when they are ready", Strings.LyricLoomPending);
+            Assert.Equal("Song delay +100 ms", Strings.SongDelayLabel(100));
+            Assert.Equal("Song delay reset", Strings.SongDelayReset);
+            Assert.Equal("Make word-timed lyrics with LyricLoom...", Strings.MakeLyricsWithLyricLoom);
+            Assert.Equal("Fullscreen (F11)", Strings.EnterFullscreen);
+        }
     }
 }
