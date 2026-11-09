@@ -57,6 +57,29 @@ namespace StarryKaraoke.Tests
         }
 
         [Fact]
+        public void Settings_preview_is_debounced_instead_of_rebuilt_on_every_change()
+        {
+            Exception failure = null;
+            var previews = 0;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    var w = new SettingsWindow(new Settings(), _ => previews++);
+                    w.ChangeForTest(s => s.TextScale = 1.3);
+                    Assert.Equal(0, previews);          // the 150 ms timer has not fired yet
+                    Assert.True(w.HasPendingPreview);
+                    w.Close();
+                }
+                catch (Exception e) { failure = e; }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+            Assert.Null(failure);
+        }
+
+        [Fact]
         public void Settings_window_constructs_with_the_theme_section()
         {
             Exception failure = null;

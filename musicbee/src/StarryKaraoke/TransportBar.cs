@@ -27,11 +27,13 @@ namespace MusicBeePlugin
         private readonly TextBlock _played = TimeText(), _length = TimeText();
         private readonly Button _playPause, _mute;
         private readonly Slider _volume;
+        private readonly TextBlock _offsetText;
         private readonly System.Windows.Threading.DispatcherTimer _hideTimer;
         private readonly Action<Exception> _log;
         private double _positionMs, _durationMs;
         private bool _shown, _playing, _muteState;
         private bool _updatingVolume;
+        private string _offsetShown = "";
 
         public TransportBar(PlayerControls controls, Color accent, Action<Exception> log = null)
         {
@@ -56,7 +58,14 @@ namespace MusicBeePlugin
                 if (!_updatingVolume) _controls.SetVolume?.Invoke((float)e.NewValue);
             }, _log);
             _mute = IconButton("\uE767", "Mute (M)", 13, () => _controls.SetMute?.Invoke(!_muteState), _log);
+            _offsetText = new TextBlock
+            {
+                Text = "", Foreground = new SolidColorBrush(Color.FromRgb(255, 206, 92)), FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(4, 0, 8, 0),
+                ToolTip = "This song's lyric delay; [ and ] adjust it, Ctrl+0 resets it"
+            };
             var volumeRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            volumeRow.Children.Add(_offsetText);
             volumeRow.Children.Add(_mute);
             volumeRow.Children.Add(_volume);
 
@@ -97,11 +106,22 @@ namespace MusicBeePlugin
             _controls.Seek?.Invoke(Math.Max(0, Math.Min(_durationMs - 500, _positionMs + deltaMs)));
         }
 
+        /// <summary>The per-song delay is shown next to the volume controls whenever it is not zero.</summary>
+        public void SetSongOffset(int offsetMs)
+        {
+            var text = offsetMs == 0 ? "" : "delay " + offsetMs.ToString("+0;-0;0") + " ms";
+            if (text == _offsetShown) return;
+            _offsetShown = text;
+            _offsetText.Text = text;
+        }
+
         /// <summary>Called by the window every frame with the player's state.</summary>
-        public void Update(double positionMs, double durationMs, bool playing, float volume, bool mute)
+        public void Update(double positionMs, double durationMs, bool playing, float volume, bool mute,
+                           int songOffsetMs = 0)
         {
             _positionMs = positionMs;
             _durationMs = durationMs;
+            SetSongOffset(songOffsetMs);
             if (playing != _playing)
             {
                 _playing = playing;
