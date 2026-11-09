@@ -29,6 +29,17 @@ def _worker_argv(module: str) -> list[str]:
     return [sys.executable, "-m", module]
 
 
+def _is_this_interpreter(python: str | None) -> bool:
+    """True when `python` names the running interpreter. In a packaged build that is the GUI
+    executable, which must never be started as a worker (it would open a second window)."""
+    if python is None:
+        return True
+    try:
+        return Path(python).resolve() == Path(sys.executable).resolve()
+    except OSError:
+        return False
+
+
 def read_payload() -> dict:
     return json.loads(sys.stdin.buffer.read().decode("utf-8"))
 
@@ -92,7 +103,7 @@ def run_worker(module: str, payload: dict, python: str | None = None, timeout_s:
                "PATH": os.pathsep.join(path_parts + [os.environ.get("PATH", "")]),
                # Caps torch/numpy/onnxruntime thread pools in the worker (see config.CPU_THREADS).
                **threads}
-        argv = _worker_argv(module) if python is None else [python, "-m", module]
+        argv = _worker_argv(module) if _is_this_interpreter(python) else [python, "-m", module]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if config.IS_WINDOWS else 0
     proc = subprocess.run(
         argv, input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
