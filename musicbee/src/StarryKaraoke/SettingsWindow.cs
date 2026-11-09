@@ -7,31 +7,49 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace MusicBeePlugin
 {
-    /// <summary>Settings, applied live while the window is open. Cancel puts the old ones back.</summary>
+    /// <summary>Settings, applied live while the window is open. Cancel puts the old ones back. Live
+    /// previews are coalesced for 150 ms so dragging a slider does not rebuild the whole lyric layout
+    /// on every mouse move.</summary>
     internal sealed class SettingsWindow : Window
     {
+        private const int PreviewDelayMs = 150;
+
         private readonly Settings _original;
         private readonly Settings _edit;
         private readonly Action<Settings> _preview;
         private readonly Action<Exception> _log;
+        private readonly Func<string> _diagnostics;
         private readonly StackPanel _panel = new StackPanel { Margin = new Thickness(16) };
         private readonly List<Action> _colorRows = new List<Action>();
+        private readonly DispatcherTimer _previewTimer;
+        private Settings _pendingPreview;
         private ComboBox _themeCombo;
         private CheckBox _randomThemeCheck;
         private bool _settingTheme;
         public Settings Result { get; private set; }
 
-        public SettingsWindow(Settings current, Action<Settings> preview, Action<Exception> log = null)
+        public SettingsWindow(Settings current, Action<Settings> preview, Action<Exception> log = null,
+                              Func<string> diagnostics = null)
         {
             _original = current.Clone();
             _edit = current.Clone();
             _preview = preview;
             _log = log;
+            _diagnostics = diagnostics;
+            _previewTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(PreviewDelayMs) };
+            _previewTimer.Tick += (s, e) => Safe.Run(() =>
+            {
+                _previewTimer.Stop();
+                var pending = _pendingPreview;
+                _pendingPreview = null;
+                if (pending != null) _preview(pending);
+            }, _log);
             Title = "Starry Karaoke — Settings";
-            Width = 480;
+            Width = 560;
             SizeToContent = SizeToContent.Height;
             ResizeMode = ResizeMode.NoResize;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -58,6 +76,21 @@ namespace MusicBeePlugin
             Row("On an unsupported song", unsupported);
             Check("Bring the window to the front when it opens automatically", _edit.AutoOpenFocus,
                   v => Set(x => x.AutoOpenFocus = v));
+
+            var displays = new List<DisplayChoice> { new DisplayChoice("", "Current monitor") };
+            foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+                displays.Add(new DisplayChoice(screen.DeviceName, DisplayLabel(screen)));
+            var display = new ComboBox { ItemsSource = displays, Width = 230 };
+            display.SelectedItem = displays.Find(d =>
+                string.Equals(d.DeviceName, _edit.FullscreenMonitor, StringComparison.OrdinalIgnoreCase)) ?? displays[0];
+            display.SelectionChanged += (s, e) => Safe.Run(() =>
+            {
+                if (display.SelectedItem is DisplayChoice choice)
+                    Set(x => x.FullscreenMonitor = choice.DeviceName);
+            }, _log);
+            Row("Fullscreen monitor", display);
+            Check("Keep on top in fullscreen", _edit.FullscreenTopmost,
+                  v => Set(x => x.FullscreenTopmost = v));
 
             Section("LyricLoom");
             var llPath = new TextBox { Text = _edit.LyricLoomPath, Width = 100, VerticalContentAlignment = VerticalAlignment.Center };
@@ -125,7 +158,7 @@ namespace MusicBeePlugin
             {
                 if (int.TryParse(offset.Text, out var v)) Set(x => x.LyricsOffsetMs = v);
             }, _log);
-            Row("Lyrics delay (ms, + = later)", offset);
+            Row("Lyrics delay (ms, base)", offset);
 
             Section("Colors");
             ColorRow("Lit", () => _edit.LitColor, v => _edit.LitColor = v);
@@ -149,13 +182,14 @@ namespace MusicBeePlugin
             Check("Show progress bar", _edit.ShowProgress, v => Set(x => x.ShowProgress = v));
             Check("Fullscreen shows only the lyrics", _edit.FullscreenLyricsOnly, v => Set(x => x.FullscreenLyricsOnly = v));
 
-            var monitorHz = KaraokeWindow.MonitorRefreshRate();
+            var fpsChoices = new List<string> { "Display refresh rate", "30", "60", "120" };
+            if (_edit.WindowFps > 0 && _edit.WindowFps != 30 && _edit.WindowFps != 60 && _edit.WindowFps != 120)
+                fpsChoices.Add(_edit.WindowFps.ToString(CultureInfo.InvariantCulture));
             var winFps = new ComboBox
             {
-                ItemsSource = new[] { $"Monitor ({monitorHz} Hz)", "30", "60", "120", "144", "240" },
-                SelectedIndex = 0
+                ItemsSource = fpsChoices,
+                SelectedIndex = _edit.WindowFps == 0 ? 0 : Math.Max(0, fpsChoices.IndexOf(_edit.WindowFps.ToString(CultureInfo.InvariantCulture)))
             };
-            if (_edit.WindowFps > 0) winFps.SelectedItem = _edit.WindowFps.ToString(CultureInfo.InvariantCulture);
             winFps.SelectionChanged += (s, e) => Safe.Run(() =>
             {
                 Set(x => x.WindowFps = winFps.SelectedIndex <= 0
@@ -167,6 +201,15 @@ namespace MusicBeePlugin
             Section("Party mode");
             Check("Fullscreen on play, hide cursor, keep the display awake", _edit.PartyMode, v => Set(x => x.PartyMode = v));
             Check("Show the next song near the end", _edit.ShowNextSong, v => Set(x => x.ShowNextSong = v));
+            var onStop = new ComboBox
+            {
+                ItemsSource = new[] { "Keep fullscreen", "Leave fullscreen", "Hide the window", "Close the window" },
+                SelectedIndex = Math.Max(0, Math.Min(3, (int)_edit.PartyModeOnStop)),
+                Width = 230
+            };
+            onStop.SelectionChanged += (s, e) => Safe.Run(
+                () => Set(x => x.PartyModeOnStop = (PartyModeOnStop)onStop.SelectedIndex), _log);
+            Row("When playback stops", onStop);
 
             Section("Instrumental intro");
             Check("Skip the intro automatically on playback", _edit.AutoSkipIntro, v => Set(x => x.AutoSkipIntro = v));
@@ -191,9 +234,53 @@ namespace MusicBeePlugin
                 if (fps.SelectedItem is int f) Set(x => x.VideoFps = f);
             }, _log);
             Row("Video FPS (higher = slower)", fps);
-            var ff = new TextBox { Text = _edit.FfmpegPath };
+            var ff = new TextBox { Text = _edit.FfmpegPath, Width = 210, VerticalContentAlignment = VerticalAlignment.Center };
             ff.TextChanged += (s, e) => Safe.Run(() => Set(x => x.FfmpegPath = ff.Text.Trim().Trim('"')), _log);
-            Row("ffmpeg.exe (empty = automatic)", ff);
+            var ffBrowse = new Button { Content = "Browse...", Width = 74, Margin = new Thickness(6, 0, 0, 0) };
+            ffBrowse.Click += (s, e) => Safe.Run(() =>
+            {
+                var dlg = new Microsoft.Win32.OpenFileDialog
+                {
+                    Title = "ffmpeg.exe",
+                    Filter = "ffmpeg (ffmpeg.exe)|ffmpeg.exe|Programs (*.exe)|*.exe|All files (*.*)|*.*"
+                };
+                if (dlg.ShowDialog(this) == true) ff.Text = dlg.FileName;
+            }, _log);
+            var ffTest = new Button { Content = "Test", Width = 54, Margin = new Thickness(6, 0, 0, 0) };
+            ffTest.Click += (s, e) => Safe.Run(() => TestFfmpeg(ff.Text), _log);
+            var ffRow = new StackPanel { Orientation = Orientation.Horizontal };
+            ffRow.Children.Add(ff);
+            ffRow.Children.Add(ffBrowse);
+            ffRow.Children.Add(ffTest);
+            Row("ffmpeg.exe (empty = automatic)", ffRow);
+
+            Section("Diagnostics");
+            string diagnosticsReportText = null;
+            try { diagnosticsReportText = _diagnostics?.Invoke(); }
+            catch (Exception e) { _log?.Invoke(e); }
+            var diagnosticsText = new TextBox
+            {
+                Text = diagnosticsReportText ?? "Diagnostics are not available in this window.",
+                IsReadOnly = true,
+                AcceptsReturn = true,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                MinHeight = 105,
+                MaxHeight = 160
+            };
+            var diagnosticsButtons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
+            var copyDiagnostics = new Button { Content = "Copy", Width = 84, Margin = new Thickness(0, 0, 8, 0) };
+            copyDiagnostics.Click += (s, e) => Safe.Run(() =>
+            {
+                Clipboard.SetText(diagnosticsText.Text);
+                copyDiagnostics.Content = "Copied";
+            }, _log);
+            var openLog = new Button { Content = "Open log folder", Width = 120 };
+            openLog.Click += (s, e) => Safe.Run(() => DiagnosticsReport.OpenLogFolder(LogPathFromDiagnostics(diagnosticsText.Text)), _log);
+            diagnosticsButtons.Children.Add(copyDiagnostics);
+            diagnosticsButtons.Children.Add(openLog);
+            _panel.Children.Add(diagnosticsText);
+            _panel.Children.Add(diagnosticsButtons);
 
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 16, 0, 0) };
             var reset = new Button { Content = "Defaults", Width = 84, Margin = new Thickness(0, 0, 8, 0) };
@@ -212,7 +299,28 @@ namespace MusicBeePlugin
             _panel.Children.Add(buttons);
 
             Content = new ScrollViewer { Content = _panel, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = SystemParameters.WorkArea.Height * 0.9 };
-            Closed += (s, e) => Safe.Run(() => { if (Result == null) _preview(_original); }, _log);
+            Closed += (s, e) => Safe.Run(() =>
+            {
+                _previewTimer.Stop();
+                _pendingPreview = null;
+                if (Result == null) _preview(_original);
+            }, _log);
+        }
+
+        private void TestFfmpeg(string configured)
+        {
+            var exe = FfmpegLocator.Resolve(configured, _edit.LyricLoomPath);
+            if (string.IsNullOrEmpty(exe))
+            {
+                MessageBox.Show(this,
+                    "ffmpeg was not found.\n\nInstall it with \"winget install Gyan.FFmpeg\", or use Browse... to pick ffmpeg.exe.",
+                    "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            var version = FfmpegInfo.VersionLine(exe);
+            MessageBox.Show(this,
+                "ffmpeg found:\n" + exe + (version.Length > 0 ? "\n\n" + version : "\n\nThe file did not report a version."),
+                "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         private void TestLyricLoom(string configured)
@@ -242,17 +350,48 @@ namespace MusicBeePlugin
             d.WindowLeft = _original.WindowLeft; d.WindowTop = _original.WindowTop;
             d.WindowWidth = _original.WindowWidth; d.WindowHeight = _original.WindowHeight;
             d.WindowMonitor = _original.WindowMonitor;
+            d.FullscreenMonitor = _original.FullscreenMonitor;
             d.Fullscreen = _original.Fullscreen; d.WindowOpen = _original.WindowOpen;
             return d;
         }
 
+        /// <summary>Applies a change to the edited copy and schedules one preview after the debounce
+        /// interval; a slider drag therefore rebuilds the scene once, not once per tick.</summary>
         private void Set(Action<Settings> change)
         {
             Safe.Run(() =>
             {
                 change(_edit);
-                _preview(_edit.Clone());
+                _pendingPreview = _edit.Clone();
+                _previewTimer.Stop();
+                _previewTimer.Start();
             }, _log);
+        }
+
+        /// <summary>Lets the window-control tests verify the debounce without pumping a dispatcher.</summary>
+        internal void ChangeForTest(Action<Settings> change) => Set(change);
+
+        internal bool HasPendingPreview => _previewTimer.IsEnabled;
+
+        private sealed class DisplayChoice
+        {
+            public string DeviceName { get; }
+            private string Label { get; }
+            public DisplayChoice(string deviceName, string label) { DeviceName = deviceName; Label = label; }
+            public override string ToString() => Label;
+        }
+
+        private static string DisplayLabel(System.Windows.Forms.Screen screen)
+        {
+            var bounds = screen.Bounds;
+            return $"{screen.DeviceName}  ({bounds.Width}×{bounds.Height}{(screen.Primary ? ", primary" : "")})";
+        }
+
+        private static string LogPathFromDiagnostics(string text)
+        {
+            foreach (var line in (text ?? "").Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                if (line.StartsWith("Log: ", StringComparison.Ordinal)) return line.Substring(5).Trim();
+            return "";
         }
 
         private void RefreshColors()

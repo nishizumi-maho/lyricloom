@@ -8,6 +8,15 @@ using System.Xml.Serialization;
 
 namespace MusicBeePlugin
 {
+    /// <summary>What party mode does to the karaoke window when playback pauses or stops.</summary>
+    public enum PartyModeOnStop
+    {
+        Keep = 0,
+        LeaveFullscreen = 1,
+        Hide = 2,
+        Close = 3
+    }
+
     /// <summary>Everything the user can change, saved as XML in MusicBee's persistent storage folder.</summary>
     public sealed class Settings
     {
@@ -39,6 +48,8 @@ namespace MusicBeePlugin
         public bool LineBursts = true;
         /// <summary>Party mode: open in fullscreen on playback, hide the cursor and keep the display awake.</summary>
         public bool PartyMode;
+        /// <summary>What party mode does to the window when playback pauses or stops.</summary>
+        public PartyModeOnStop PartyModeOnStop = PartyModeOnStop.LeaveFullscreen;
         /// <summary>In party mode, show the next track during the last seconds of the song.</summary>
         public bool ShowNextSong = true;
         /// <summary>0.5 (slow) to 2 (fast): scroll, fades and the line growing.</summary>
@@ -57,14 +68,19 @@ namespace MusicBeePlugin
         public bool VideoSkipIntro;
         /// <summary>How long before the first sung line a skipped intro resumes.</summary>
         public int IntroLeadMs = 3000;
-        /// <summary>Frame rate of the karaoke window: 0 follows the monitor's refresh rate.</summary>
-        public int WindowFps = 0;
+        /// <summary>Frame rate of the karaoke window; 0 follows the window monitor's refresh rate.
+        /// Defaults to 60 instead of the old "maximum refresh rate".</summary>
+        public int WindowFps = FrameRatePolicy.DefaultFps;
         public string VideoResolution = "1920x1080";
         public int VideoFps = 30;
 
         public double WindowLeft = double.NaN, WindowTop = double.NaN, WindowWidth = 1100, WindowHeight = 680;
         /// <summary>Device name of the monitor the window was last on (empty: current/primary).</summary>
         public string WindowMonitor = "";
+        /// <summary>Device name of the monitor fullscreen uses (empty: the window's current one).</summary>
+        public string FullscreenMonitor = "";
+        /// <summary>Keep the fullscreen karaoke window above other applications.</summary>
+        public bool FullscreenTopmost = true;
         public bool Fullscreen;
         public bool WindowOpen;
 
@@ -150,13 +166,18 @@ namespace MusicBeePlugin
         private static Settings AfterReadFailure() => new Settings();
 
         /// <summary>Deletes the files this plugin keeps in <paramref name="folder"/>: the settings, their
-        /// backup, kept unreadable copies and leftover temp files. Used when the user uninstalls the
-        /// plugin from MusicBee. Returns how many files were deleted; never throws.</summary>
+        /// backup, kept unreadable copies, the per-song lyric offsets and leftover temp files. Used
+        /// when the user uninstalls the plugin from MusicBee. Returns how many files were deleted;
+        /// never throws.</summary>
         public static int DeleteFiles(string folder, string fileName = FileName)
         {
             if (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)) return 0;
             var deleted = 0;
-            var patterns = new[] { fileName, fileName + ".bak", fileName + ".bad-*", fileName + ".*.tmp" };
+            var patterns = new[]
+            {
+                fileName, fileName + ".bak", fileName + ".bad-*", fileName + ".*.tmp",
+                SongOffsetStore.FileName, SongOffsetStore.FileName + ".*.tmp"
+            };
             foreach (var pattern in patterns)
             {
                 string[] files;
@@ -232,10 +253,12 @@ namespace MusicBeePlugin
             WindowWidth = Clamp(WindowWidth, 100, 10000, 1100);
             WindowHeight = Clamp(WindowHeight, 100, 10000, 680);
             if (string.IsNullOrWhiteSpace(WindowMonitor)) WindowMonitor = "";
+            if (string.IsNullOrWhiteSpace(FullscreenMonitor)) FullscreenMonitor = "";
 
             if (!Enum.IsDefined(typeof(JapaneseMode), Japanese)) Japanese = JapaneseMode.RomajiOnly;
             if (!Enum.IsDefined(typeof(AutoOpenLyrics), AutoOpenLyrics)) AutoOpenLyrics = AutoOpenLyrics.WordTimedOnly;
             if (!Enum.IsDefined(typeof(UnsupportedSongAction), OnUnsupportedSong)) OnUnsupportedSong = UnsupportedSongAction.Keep;
+            if (!Enum.IsDefined(typeof(PartyModeOnStop), PartyModeOnStop)) PartyModeOnStop = PartyModeOnStop.LeaveFullscreen;
             if (SettingsVersion < 1) SettingsVersion = 1;
 
             if (string.IsNullOrWhiteSpace(VideoResolution)) VideoResolution = "1920x1080";
@@ -293,6 +316,9 @@ namespace MusicBeePlugin
                     case "OnUnsupportedSong":
                         RepairEnum(element, typeof(UnsupportedSongAction), UnsupportedSongAction.Keep);
                         break;
+                    case "PartyModeOnStop":
+                        RepairEnum(element, typeof(PartyModeOnStop), PartyModeOnStop.LeaveFullscreen);
+                        break;
                     case "TextScale":
                     case "StarDensity":
                     case "TransitionSpeed":
@@ -329,6 +355,7 @@ namespace MusicBeePlugin
                     case "Fullscreen":
                     case "WindowOpen":
                     case "AutoOpenFocus":
+                    case "FullscreenTopmost":
                         bool b;
                         if (!bool.TryParse(value, out b) && value != "0" && value != "1")
                             doc.DocumentElement.RemoveChild(element);
