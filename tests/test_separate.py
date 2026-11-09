@@ -1,3 +1,4 @@
+import hashlib
 import sys
 from pathlib import Path
 
@@ -6,7 +7,6 @@ import pytest
 import soundfile as sf
 
 from lyricloom.workers import WorkerError, run_worker
-
 TESTS = Path(__file__).resolve().parent
 
 
@@ -161,8 +161,15 @@ def test_kept_vocals_mirror_the_library(tmp_path, library):
     assert sep_mod.kept_vocals_path(library / "Test Artist" / "Test Album" / "01 - Synthetic Song.flac") == \
         config.vocals_root() / "Test Artist" / "Test Album" / "01 - Synthetic Song.vocals.flac"
     outside = tmp_path / "Other" / "テスト歌手" / "2020 - Synthetic Album [Single]" / "01 - Synthetic Song.flac"
+    digest = hashlib.sha1(str(outside.resolve()).encode("utf-8")).hexdigest()[:12]
     assert sep_mod.kept_vocals_path(outside) == \
-        config.vocals_root() / "テスト歌手" / "2020 - Synthetic Album [Single]" / "01 - Synthetic Song.vocals.flac"
+        config.vocals_root() / "_external" / digest / "01 - Synthetic Song.vocals.flac"
+
+
+def test_kept_vocals_paths_do_not_collide_outside_the_library(tmp_path, library):
+    one = tmp_path / "Drive A" / "Artist" / "Album" / "01 - Song.flac"
+    two = tmp_path / "Drive B" / "Artist" / "Album" / "01 - Song.flac"
+    assert sep_mod.kept_vocals_path(one) != sep_mod.kept_vocals_path(two)
 
 
 def test_vocals_root_is_a_setting(tmp_path):
@@ -205,6 +212,21 @@ def test_separate_reuses_kept_vocals_without_separating(tmp_path, library, monke
     assert out["device"] == "kept"
     assert np.array_equal(sf.read(out["vocals"], dtype="int32")[0], samples)
     assert sf.info(out["vocals"]).subtype == "PCM_24"
+
+
+def test_stale_kept_stem_is_not_reused(tmp_path, library, monkeypatch):
+    audio = library / "A" / "B" / "01 - C.flac"
+    _wav(audio)
+    stem = tmp_path / "stem.wav"
+    _wav(stem)
+    kept = sep_mod.keep_vocals(audio, stem)
+    assert kept is not None and kept.exists()
+    _wav(audio, seconds=2.0)                    # the user replaced the audio
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _fake_worker(calls))
+    out = sep_mod.separate(audio, tmp_path / "work")
+    assert calls and out["device"] != "kept"
+    assert any(p.name.endswith(".stale") for p in kept.parent.iterdir())
 
 
 @pytest.mark.gpu

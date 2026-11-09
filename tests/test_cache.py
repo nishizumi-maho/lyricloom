@@ -21,3 +21,12 @@ def test_load_ignores_other_version(tmp_path, monkeypatch):
     cache.save(audio, "lyrics", "1", {"k": "日本語"})
     assert cache.load(audio, "lyrics", "1") == {"k": "日本語"}
     assert cache.load(audio, "lyrics", "2") is None
+
+
+def test_load_rejects_a_different_model_fingerprint(tmp_path, monkeypatch):
+    monkeypatch.setattr("lyricloom.config.WORK_ROOT", tmp_path / "work")
+    audio = tmp_path / "a.flac"
+    audio.write_bytes(b"x")
+    cache.save(audio, "separate", "1", {"v": 1}, inputs={"separator": "aaaa"})
+    assert cache.load(audio, "separate", "1", inputs={"separator": "aaaa"}) == {"v": 1}
+    assert cache.load(audio, "separate", "1", inputs={"separator": "bbbb"}) is None

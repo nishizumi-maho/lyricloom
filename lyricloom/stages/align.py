@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import config
+from .. import config, models
 from ..align.anchors import blocks, find_anchors
 from ..align.confidence import REVIEW_THRESHOLD, line_conf, track_conf
 from ..align.ctc import align_blocks
@@ -30,6 +30,7 @@ class AlignResult:
     lines: list[Line]
     track_conf: float
     review: bool
+    models_used: dict[str, str] = field(default_factory=dict)
 
 
 def lyric_lang(meta: TrackMeta, transcript: Transcript) -> str:
@@ -48,17 +49,26 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
     anchor_score = {a.line_idx: a.score for a in anchors}
     bs = blocks(anchors, len(texts), total_ms)
 
+    align_spec = config.resolve_model("align", lang)
     seg_texts = [split_line(t, lang) for t in texts]
-    aligned, sung = None, False
-    if lang == "en" and vocals is not None and config.MTL_ENABLED:
+    aligned, sung, singing_spec = None, False, None
+    if lang == "en" and vocals is not None and models.singing_ready(lang):
         try:
+            singing_spec = config.resolve_model("singing", lang)
             aligned, sung = align_lines_mtl(vocals, seg_texts), True
         except (WorkerError, ValueError, OSError) as e:
             log.warning("singing model failed, using the CTC aligner: %s", str(e)[-300:])
     if aligned is None:
         seg_tokens = [[[to_mms_tokens(reading(s, lang)) for s in seg_texts[i]] for i in range(b.line_start, b.line_end)]
                       for b in bs]
-        aligned = align_blocks(vocals16k, bs, seg_tokens)
+        # align_blocks resolves the align model for the current choice; make the lyric language
+        # visible to it so a per-language align choice is honoured even outside runner.process.
+        previous = config.active_language()
+        config.set_active_language(lang)
+        try:
+            aligned = align_blocks(vocals16k, bs, seg_tokens)
+        finally:
+            config.set_active_language(previous)
 
     lines = []
     for i, (segs_text, segs) in enumerate(zip(seg_texts, aligned)):
@@ -76,4 +86,7 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
     lines = refine(lines, total_ms)
     lines = trim_line_ends(lines, vocals16k)
     conf = track_conf(lines)
-    return AlignResult(lines, conf, any(l.conf < REVIEW_THRESHOLD for l in lines))
+    used = {"align": align_spec.id}
+    if sung and singing_spec is not None:
+        used["singing"] = singing_spec.id
+    return AlignResult(lines, conf, any(l.conf < REVIEW_THRESHOLD for l in lines), used)

@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 APP_NAME = "LyricLoom"
@@ -175,27 +176,104 @@ def models_root() -> Path:
 
 
 MODELS = models_root()
+# Kept for compatibility with older code and installs.  New code resolves a model through
+# `models.catalog`/`resolve_model`, which understands the model_choices setting and custom models.
 WHISPER_MODEL_NAME = os.environ.get("LYRICLOOM_WHISPER_MODEL", "ggml-large-v3.bin")
 WHISPER_MODEL = MODELS / WHISPER_MODEL_NAME
 
 
-def _tool(name: str) -> Path | None:
-    """A bundled or installed helper binary, with the platform suffix."""
+def whisper_cli_candidates() -> list[Path]:
+    """Every path checked for whisper-cli, in precedence order (the error message lists them)."""
     suffix = ".exe" if IS_WINDOWS else ""
-    candidates = [
-        RESOURCE_ROOT / "tools" / "bin" / f"{name}{suffix}",
-        PROJECT_ROOT / "tools" / "bin" / f"{name}{suffix}",
-        APP_DATA / "bin" / f"{name}{suffix}",
+    explicit = os.environ.get("LYRICLOOM_WHISPER_CLI") or _settings().get("whisper_cli")
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(str(explicit)).expanduser())
+    candidates += [
+        RESOURCE_ROOT / "tools" / "bin" / f"whisper-cli{suffix}",
+        PROJECT_ROOT / "tools" / "bin" / f"whisper-cli{suffix}",
+        APP_DATA / "bin" / f"whisper-cli{suffix}",
     ]
-    for candidate in candidates:
+    found = shutil.which("whisper-cli")
+    if found:
+        candidates.append(Path(found))
+    return candidates
+
+
+def whisper_cli() -> Path:
+    """The whisper.cpp binary to run.
+
+    Precedence: the ``whisper_cli`` setting (or ``LYRICLOOM_WHISPER_CLI``) > the bundled copy >
+    a developer checkout's copy > the per-user bin folder > ``PATH``.  The configured candidate is
+    returned even when missing, so the error message can name what the user set.
+    """
+    suffix = ".exe" if IS_WINDOWS else ""
+    explicit = os.environ.get("LYRICLOOM_WHISPER_CLI") or _settings().get("whisper_cli")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    for candidate in whisper_cli_candidates():
         if candidate.is_file():
             return candidate
-    found = shutil.which(name)
-    return Path(found) if found else None
+    return RESOURCE_ROOT / "tools" / "bin" / f"whisper-cli{suffix}"
 
 
-WHISPER_CLI = _tool("whisper-cli") or (
-    RESOURCE_ROOT / "tools" / "bin" / ("whisper-cli.exe" if IS_WINDOWS else "whisper-cli"))
+# --------------------------------------------------------------------------- model choices
+
+# The model used by each stage for the track being processed (a per-track override from the CLI
+# or the app's "Process with other models..." action).  A thread-local keeps concurrent folder
+# runs from leaking a choice into another track.
+_ACTIVE_MODELS = threading.local()
+_ACTIVE_LANGUAGE = threading.local()
+
+
+def set_active_models(overrides: dict[str, str] | None) -> None:
+    _ACTIVE_MODELS.overrides = dict(overrides or {})
+
+
+def clear_active_models() -> None:
+    _ACTIVE_MODELS.overrides = {}
+
+
+def active_models() -> dict[str, str]:
+    return dict(getattr(_ACTIVE_MODELS, "overrides", {}) or {})
+
+
+def set_active_language(lang: str | None) -> None:
+    """The track's tag language, so stage helpers without a language argument (separation) can
+    resolve a per-language model choice."""
+    _ACTIVE_LANGUAGE.lang = lang
+
+
+def active_language() -> str | None:
+    return getattr(_ACTIVE_LANGUAGE, "lang", None)
+
+
+def clear_active_language() -> None:
+    _ACTIVE_LANGUAGE.lang = None
+
+
+def model_choices() -> dict:
+    value = _settings().get("model_choices")
+    return value if isinstance(value, dict) else {}
+
+
+def resolve_model(stage: str, lang: str | None = None,
+                  models: dict[str, str] | None = None):
+    """The :class:`lyricloom.models.ModelSpec` a stage should use for ``lang``.
+
+    Precedence: per-run ``models`` override > language choice > default choice > catalog default.
+    Unknown or invalid ids are logged and skipped; this function always returns a model.
+    """
+    from . import models as catalog
+
+    merged = {**active_models(), **(models or {})}
+    return catalog.resolve(stage, lang=lang if lang is not None else active_language(),
+                           overrides=merged, choices=model_choices())
+
+
+# Resolved at import for compatibility; transcribe() asks whisper_cli() at stage start so a setting
+# changed in the app takes effect without restarting.
+WHISPER_CLI = whisper_cli()
 
 # Mel-Band RoFormer with one of the highest published vocals SDRs in audio-separator.
 SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"

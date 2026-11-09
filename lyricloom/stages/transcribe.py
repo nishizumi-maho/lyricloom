@@ -6,7 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .. import config
+from .. import config, models
 from ..model import Transcript, Word
 
 
@@ -46,21 +46,36 @@ def looks_hallucinated(tr: Transcript, duration_s: float) -> bool:
     return n >= REPETITION_MIN_WORDS and len(distinct) <= REPETITION_MAX_DISTINCT
 
 
+def _model_path(spec: models.ModelSpec) -> Path:
+    return spec.dest(spec.model_file(), config.MODELS)
+
+
+def _cli_error(cli: Path) -> RuntimeError:
+    searched = "\n  ".join(str(p) for p in config.whisper_cli_candidates())
+    return RuntimeError(
+        "whisper-cli was not found. Install whisper.cpp and set the `whisper_cli` setting (or the "
+        "LYRICLOOM_WHISPER_CLI environment variable) to its full path, put it in "
+        f"{config.APP_DATA / 'bin'}, or add it to PATH.\nChecked:\n  {searched}\n"
+        f"Configured path: {cli}")
+
+
 def transcribe(vocals16k: Path, work: Path, lang: str | None, prompt: str | None = None,
-               name: str = "whisper", extra: tuple[str, ...] | list[str] = ()) -> Transcript:
+               name: str = "whisper", extra: tuple[str, ...] | list[str] = (),
+               model: models.ModelSpec | None = None) -> Transcript:
     """`prompt` gives Whisper context (artist and title); `name` keeps several passes apart in the
     work dir; `extra` adds decoding options (e.g. a different temperature for a second pass)."""
     work.mkdir(parents=True, exist_ok=True)
-    if not Path(config.WHISPER_CLI).is_file():
+    spec = model or config.resolve_model("transcribe", lang)
+    cli = config.whisper_cli()
+    if not cli.is_file():
+        raise _cli_error(cli)
+    model_path = _model_path(spec)
+    if not model_path.is_file():
         raise RuntimeError(
-            "whisper-cli was not found. Open Help > Download models, or install whisper.cpp and "
-            "set LYRICLOOM_WHISPER_CLI.")
-    if not Path(config.WHISPER_MODEL).is_file():
-        raise RuntimeError(
-            f"the Whisper model is missing: {config.WHISPER_MODEL}. "
-            "Open Help > Download models to fetch it.")
+            f"the Whisper model {spec.id!r} is missing: {model_path}. "
+            f"Run `lyricloom models download {spec.id}` or open Help > Download models.")
     out = work / name
-    cmd = [str(config.WHISPER_CLI), "-m", str(config.WHISPER_MODEL), "-f", str(vocals16k),
+    cmd = [str(cli), "-m", str(model_path), "-f", str(vocals16k),
            "-l", lang if lang in ("ja", "pt", "en") else "auto", "-ojf", "-of", str(out),
            "-ml", "1", "-sow", "--beam-size", "5", "--best-of", "5", "-t", str(config.CPU_THREADS), "-np", *extra]
     if prompt:

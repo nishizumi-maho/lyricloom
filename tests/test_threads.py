@@ -20,8 +20,8 @@ def test_whisper_uses_thread_limit(monkeypatch, tmp_path):
     cli.write_text("", encoding="utf-8")
     model = tmp_path / "ggml.bin"
     model.write_text("", encoding="utf-8")
-    monkeypatch.setattr(config, "WHISPER_CLI", cli)
-    monkeypatch.setattr(config, "WHISPER_MODEL", model)
+    monkeypatch.setattr(config, "whisper_cli", lambda: cli)
+    monkeypatch.setattr(tr, "_model_path", lambda spec: model)
     tr.transcribe(Path("v.wav"), tmp_path, "pt")
     assert seen["cmd"][seen["cmd"].index("-t") + 1] == str(config.CPU_THREADS)
 
