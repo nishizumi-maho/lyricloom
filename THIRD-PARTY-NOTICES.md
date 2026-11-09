@@ -85,13 +85,16 @@ These are not part of the runtime application:
 | ruff | MIT |
 | PyInstaller | GPL-2.0-or-later with bootloader exception |
 
-## Separately licensed companion
+## Companion product: Starry Karaoke
 
-**Starry Karaoke for MusicBee** is a separate project:
+**Starry Karaoke for MusicBee** ships in this repository under [`musicbee/`](musicbee/README.md). It
+is a separate MIT-licensed product, not part of LyricLoom's GPL code. The Windows LyricLoom installer
+bundles the plugin files and offers an optional MusicBee install task, and the release also publishes
+`StarryKaraoke-MusicBee-<version>.zip` separately.
 
-<https://github.com/nishizumi-maho/MusicBee-StarryKaraoke>
-
-It is MIT-licensed and is not bundled with LyricLoom. Its NMeCab, IPADic and RomajiCore components keep their own licenses, included in its release ZIP. LyricLoom's GPL does not apply to the plugin, and the plugin's MIT license does not apply to LyricLoom.
+Its NMeCab, IPADic and RomajiCore components keep their own licenses, included in the release ZIP
+under `StarryKaraoke\licenses` and in the `musicbee/licenses` folder. LyricLoom's GPL does not apply to
+the plugin, and the plugin's MIT license does not apply to LyricLoom.
 
 ## Trademarks
 
