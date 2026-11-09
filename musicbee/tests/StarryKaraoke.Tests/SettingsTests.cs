@@ -47,11 +47,13 @@ namespace StarryKaraoke.Tests
                 Japanese = (JapaneseMode)42,
                 AutoOpenLyrics = (AutoOpenLyrics)99,
                 OnUnsupportedSong = (UnsupportedSongAction)7,
+                PartyModeOnStop = (PartyModeOnStop)42,
                 WindowWidth = double.NaN,
                 WindowHeight = double.NaN,
                 WindowLeft = double.PositiveInfinity,
                 LitColor = "not a colour",
                 WindowMonitor = null,
+                FullscreenMonitor = null,
                 FfmpegPath = null,
                 LyricLoomPath = null
             };
@@ -68,11 +70,13 @@ namespace StarryKaraoke.Tests
             Assert.Equal(JapaneseMode.RomajiOnly, s.Japanese);
             Assert.Equal(AutoOpenLyrics.WordTimedOnly, s.AutoOpenLyrics);
             Assert.Equal(UnsupportedSongAction.Keep, s.OnUnsupportedSong);
+            Assert.Equal(PartyModeOnStop.LeaveFullscreen, s.PartyModeOnStop);
             Assert.Equal(1100, s.WindowWidth);
             Assert.Equal(680, s.WindowHeight);
             Assert.True(double.IsNaN(s.WindowLeft));
             Assert.Equal("#FFCE5C", s.LitColor);
             Assert.Equal("", s.WindowMonitor);
+            Assert.Equal("", s.FullscreenMonitor);
             Assert.Equal("", s.FfmpegPath);
             Assert.Equal("", s.LyricLoomPath);
         }
@@ -95,6 +99,8 @@ namespace StarryKaraoke.Tests
                     "<Japanese>99</Japanese>" +
                     "<AutoOpenLyrics>42</AutoOpenLyrics>" +
                     "<OnUnsupportedSong>Klingon</OnUnsupportedSong>" +
+                    "<PartyModeOnStop>Klingon</PartyModeOnStop>" +
+                    "<FullscreenTopmost>maybe</FullscreenTopmost>" +
                     "<LineBursts>maybe</LineBursts>" +
                     "<WindowLeft>NaN</WindowLeft>" +
                     "<WindowWidth>NaN</WindowWidth>" +
@@ -116,6 +122,8 @@ namespace StarryKaraoke.Tests
                 Assert.Equal(JapaneseMode.RomajiOnly, s.Japanese);
                 Assert.Equal(AutoOpenLyrics.WordTimedOnly, s.AutoOpenLyrics);
                 Assert.Equal(UnsupportedSongAction.Keep, s.OnUnsupportedSong);
+                Assert.Equal(PartyModeOnStop.LeaveFullscreen, s.PartyModeOnStop);
+                Assert.True(s.FullscreenTopmost);
                 Assert.True(s.LineBursts);
                 Assert.True(double.IsNaN(s.WindowLeft));
                 Assert.Equal(1100, s.WindowWidth);
@@ -149,6 +157,9 @@ namespace StarryKaraoke.Tests
                 Assert.Equal(AutoOpenLyrics.WordTimedOnly, s.AutoOpenLyrics);
                 Assert.Equal(UnsupportedSongAction.Keep, s.OnUnsupportedSong);
                 Assert.False(s.AutoOpenFocus);
+                Assert.Equal(60, s.WindowFps);
+                Assert.True(s.FullscreenTopmost);
+                Assert.Equal(PartyModeOnStop.LeaveFullscreen, s.PartyModeOnStop);
             }
         }
 
@@ -180,7 +191,11 @@ namespace StarryKaraoke.Tests
                     OnUnsupportedSong = UnsupportedSongAction.Hide,
                     AutoOpenFocus = true,
                     LyricLoomPath = @"D:\Tools\LyricLoom.exe",
-                    WindowMonitor = @"\\.\DISPLAY2"
+                    WindowMonitor = @"\\.\DISPLAY2",
+                    FullscreenMonitor = @"\\.\DISPLAY3",
+                    FullscreenTopmost = false,
+                    PartyModeOnStop = PartyModeOnStop.Close,
+                    WindowFps = 120
                 }.Save(temp.Path);
 
                 var s = Settings.Load(temp.Path);
@@ -189,6 +204,10 @@ namespace StarryKaraoke.Tests
                 Assert.True(s.AutoOpenFocus);
                 Assert.Equal(@"D:\Tools\LyricLoom.exe", s.LyricLoomPath);
                 Assert.Equal(@"\\.\DISPLAY2", s.WindowMonitor);
+                Assert.Equal(@"\\.\DISPLAY3", s.FullscreenMonitor);
+                Assert.False(s.FullscreenTopmost);
+                Assert.Equal(PartyModeOnStop.Close, s.PartyModeOnStop);
+                Assert.Equal(120, s.WindowFps);
             }
         }
 

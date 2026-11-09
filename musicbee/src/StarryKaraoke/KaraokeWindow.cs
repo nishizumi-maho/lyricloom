@@ -66,12 +66,18 @@ namespace MusicBeePlugin
         private readonly TextBlock _toastText;
         private readonly DispatcherTimer _cursorTimer;
         private readonly DispatcherTimer _toastTimer;
-        private double _lastFrame, _lastPoll = -1e9;
+        private double _lastFrame, _lastPoll = -1e9, _lastOcclusionCheck = -1e9;
         private double _songTime;
+        private int _songOffsetMs;
         private Settings _settings;
         private bool _fullscreen;
         private bool _awake;
+        private bool _framesSubscribed;
+        private bool _renderSuspended;
+        private bool? _pollingNotified;
+        private int _monitorHz;
         private Rect _restore;
+        private WindowState _restoreState = WindowState.Normal;
         private readonly Action<Exception> _log;
         private readonly Border _hint;
         private readonly TextBlock _hintText;
@@ -89,11 +95,17 @@ namespace MusicBeePlugin
         public event EventHandler RecordRequested;
         public event EventHandler SkipIntroRequested;
         public event EventHandler LyricLoomRequested;
+        public event EventHandler DiagnosticsRequested;
         /// <summary>Raised when the user closed the window themselves (not a shutdown or a track change).</summary>
         public event EventHandler UserClosed;
         public event Action<JapaneseMode> JapaneseModeChosen;
-        /// <summary>The user nudged the lyric delay with [ or ]; the plugin saves it.</summary>
-        public event Action<int> OffsetChanged;
+        /// <summary>The user nudged this song's delay with [ or ]; the plugin saves it.</summary>
+        public event Action<int> SongOffsetChanged;
+        public event Action<string> FullscreenMonitorChosen;
+        public event Action<bool> FullscreenTopmostChanged;
+        /// <summary>False while the window is minimised, hidden or fully covered by another window;
+        /// the plugin stops its player poll timer then.</summary>
+        public event Action<bool> PollingNeeded;
 
         private readonly TransportBar _transport;
         private readonly PlayerControls _controls;
@@ -106,6 +118,7 @@ namespace MusicBeePlugin
         private Point _clickStart;
         private double _suppressDoubleClick;
         private double _loopStart = double.NaN, _loopEnd = double.NaN;
+        private LoopMode _loopMode = LoopMode.Off;
         private double _loopHoldUntil;
 
         public KaraokeWindow(Settings settings, Func<(double PositionMs, bool Playing, float Volume, bool Mute)> poll, PlayerControls controls,
@@ -113,7 +126,6 @@ namespace MusicBeePlugin
         {
             _log = log;
             ShowActivated = showActivated;
-            RaiseFrameRate();
             // after any player command, read the position on the next frame instead of up to 200 ms later.
             // `player` is its own variable: the lambdas must call the plugin's commands, never this wrapper
             // (capturing a variable that later points at the wrapper made every seek call itself forever).
@@ -129,6 +141,7 @@ namespace MusicBeePlugin
             };
             _settings = settings;
             _poll = poll;
+            _monitorHz = FrameRatePolicy.DefaultFps;
             _scene = new KaraokeScene(settings);
             Title = "Starry Karaoke";
             Background = Brushes.Black;
@@ -240,17 +253,36 @@ namespace MusicBeePlugin
 
             ContextMenu = BuildMenu();
             PreviewKeyDown += OnKey;   // preview: arrows and space reach us before any control can take them
-            Loaded += (s, e) => Safe.Run(() => { if (settings.Fullscreen) SetFullscreen(true); }, _log);
-            CompositionTarget.Rendering += OnFrame;
+            Loaded += (s, e) => Safe.Run(() =>
+            {
+                if (settings.Fullscreen) SetFullscreen(true);
+                UpdateRenderState();
+            }, _log);
             Closed += (s, e) => Safe.Run(() =>
             {
-                CompositionTarget.Rendering -= OnFrame;
+                StopFrames();
+                NotifyPolling(false);
                 _cursorTimer.Stop();
                 _toastTimer.Stop();
                 Mouse.OverrideCursor = null;
                 KeepAwake(false);
             }, _log);
-            Deactivated += (s, e) => Safe.Run(() => Mouse.OverrideCursor = null, _log);
+            IsVisibleChanged += (s, e) => Safe.Run(UpdateRenderState, _log);
+            StateChanged += (s, e) => Safe.Run(UpdateRenderState, _log);
+            LocationChanged += (s, e) => Safe.Run(() =>
+            {
+                if (_settings.WindowFps == 0) _monitorHz = MonitorRefreshRate(CurrentScreen());
+            }, _log);
+            DpiChanged += (s, e) => Safe.Run(() =>
+            {
+                if (_fullscreen) ApplyFullscreenBounds();
+            }, _log);
+            Activated += (s, e) => Safe.Run(UpdateRenderState, _log);
+            Deactivated += (s, e) => Safe.Run(() =>
+            {
+                Mouse.OverrideCursor = null;
+                UpdateRenderState();
+            }, _log);
             ApplyBlur();
         }
 
@@ -321,7 +353,8 @@ namespace MusicBeePlugin
 
         public void ShowMessage(string text) => ShowToast(text);
 
-        public void SetSong(List<KaraokeLine> lines, string title, double songMs, string songKey = null)
+        public void SetSong(List<KaraokeLine> lines, string title, double songMs, string songKey = null,
+                            int songOffsetMs = 0)
         {
             if (songKey != null && !string.Equals(songKey, _songKey, StringComparison.OrdinalIgnoreCase))
             {
@@ -330,10 +363,21 @@ namespace MusicBeePlugin
             }
             _scene.SetSong(lines, title, songMs);
             _songMs = songMs;
+            SetSongOffset(songOffsetMs);
             _lastPoll = -1e9;
-            _loopStart = _loopEnd = double.NaN;
-            _scene.LoopStart = _scene.LoopEnd = double.NaN;
+            ClearLoop();
             _transport.SetAccent(_scene.Accent);
+        }
+
+        /// <summary>This song's delay. The global Settings.LyricsOffsetMs remains the base added to it.</summary>
+        public int SongOffsetMs => _songOffsetMs;
+
+        private int EffectiveOffsetMs => _settings.LyricsOffsetMs + _songOffsetMs;
+
+        public void SetSongOffset(int offsetMs)
+        {
+            _songOffsetMs = Math.Max(-10000, Math.Min(10000, offsetMs));
+            _transport.SetSongOffset(_songOffsetMs);
         }
 
         /// <summary>Shows the LyricLoom hint for a song without word timing. The hint is dismissible and
@@ -362,11 +406,19 @@ namespace MusicBeePlugin
 
         public void ApplySettings(Settings s)
         {
+            var monitorChanged = !string.Equals(_settings.FullscreenMonitor, s.FullscreenMonitor,
+                                                StringComparison.OrdinalIgnoreCase);
             _settings = s;
             _scene.Apply(s);
             _scene.LyricsOnly = _fullscreen && s.FullscreenLyricsOnly;
             _transport.SetAccent(_scene.Accent);
+            if (s.WindowFps == 0) _monitorHz = MonitorRefreshRate(CurrentScreen());
             ApplyBlur();
+            if (_fullscreen)
+            {
+                Topmost = s.FullscreenTopmost;
+                if (monitorChanged) ApplyFullscreenBounds();
+            }
             if (!s.PartyMode) KeepAwake(false);
         }
 
@@ -384,7 +436,7 @@ namespace MusicBeePlugin
             {
                 s.WindowLeft = b.Left; s.WindowTop = b.Top; s.WindowWidth = b.Width; s.WindowHeight = b.Height;
             }
-            s.WindowMonitor = CurrentMonitor();
+            if (!_fullscreen) s.WindowMonitor = CurrentMonitor();
             s.Fullscreen = _fullscreen;
         }
 
@@ -400,11 +452,32 @@ namespace MusicBeePlugin
             catch (Exception) { return ""; }
         }
 
-        // ---- frame rate: WPF paints at most at its desired frame rate (60 unless raised), so raise it to
-        // the monitor's refresh rate; a fixed WindowFps below that skips frames instead.
+        // ---- frame rate: the scene is gated by FrameRatePolicy. Nothing here touches
+        // Timeline.DesiredFrameRateProperty, which is process-wide and would also change other WPF
+        // plugins in MusicBee.
 
         [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
         private static extern bool EnumDisplaySettings(string device, int mode, ref DevMode devMode);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect rect);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+
+        private const uint GW_HWNDPREV = 3;
+        private const uint SWP_NOSIZE = 0x0001, SWP_NOMOVE = 0x0002, SWP_NOZORDER = 0x0004, SWP_FRAMECHANGED = 0x0020;
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left, Top, Right, Bottom;
+        }
 
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
         private struct DevMode
@@ -418,40 +491,133 @@ namespace MusicBeePlugin
             public int BitsPerPel, PelsWidth, PelsHeight, DisplayFlags, DisplayFrequency;
         }
 
-        /// <summary>Highest refresh rate among the monitors (60 if unknown).</summary>
-        public static int MonitorRefreshRate()
+        /// <summary>Refresh rate of the monitor the window is on (60 if unknown). "Display" uses this
+        /// monitor only, never the highest rate among all attached screens.</summary>
+        public static int MonitorRefreshRate(System.Windows.Forms.Screen screen)
         {
-            var best = 0;
-            foreach (var screen in System.Windows.Forms.Screen.AllScreens)
-            {
-                var dm = new DevMode { Size = (short)System.Runtime.InteropServices.Marshal.SizeOf(typeof(DevMode)) };
-                if (EnumDisplaySettings(screen.DeviceName, -1, ref dm) && dm.DisplayFrequency > 1) best = Math.Max(best, dm.DisplayFrequency);
-            }
-            return best > 0 ? best : 60;
-        }
-
-        private static bool _frameRateRaised;
-
-        private static void RaiseFrameRate()
-        {
-            if (_frameRateRaised) return;
-            _frameRateRaised = true;
+            if (screen == null) return FrameRatePolicy.DefaultFps;
             try
             {
-                System.Windows.Media.Animation.Timeline.DesiredFrameRateProperty.OverrideMetadata(
-                    typeof(System.Windows.Media.Animation.Timeline),
-                    new FrameworkPropertyMetadata { DefaultValue = MonitorRefreshRate() });
+                var dm = new DevMode { Size = (short)System.Runtime.InteropServices.Marshal.SizeOf(typeof(DevMode)) };
+                if (EnumDisplaySettings(screen.DeviceName, -1, ref dm) && dm.DisplayFrequency > 1)
+                    return dm.DisplayFrequency;
             }
-            catch (Exception) { }   // already set in this process
+            catch (Exception) { }
+            return FrameRatePolicy.DefaultFps;
+        }
+
+        private System.Windows.Forms.Screen CurrentScreen()
+        {
+            try
+            {
+                var handle = new WindowInteropHelper(this).Handle;
+                if (handle != IntPtr.Zero) return System.Windows.Forms.Screen.FromHandle(handle);
+            }
+            catch (Exception) { }
+            try
+            {
+                return System.Windows.Forms.Screen.FromPoint(
+                    new System.Drawing.Point((int)Math.Round(Left), (int)Math.Round(Top)));
+            }
+            catch (Exception) { return System.Windows.Forms.Screen.PrimaryScreen; }
+        }
+
+        /// <summary>Starts or stops repainting and tells the plugin whether polling is worth doing.
+        /// Minimised/hidden unsubscribes; a fully covered window keeps the cheap rendering callback
+        /// (so it notices when the other window moves) but does no scene work and stops polling.</summary>
+        private void UpdateRenderState()
+        {
+            if (!IsVisible || WindowState == WindowState.Minimized)
+            {
+                StopFrames();
+                NotifyPolling(false);
+                KeepAwake(false);
+                return;
+            }
+            _monitorHz = MonitorRefreshRate(CurrentScreen());
+            _renderSuspended = IsFullyCovered();
+            if (_renderSuspended) KeepAwake(false);
+            StartFrames();
+            NotifyPolling(!_renderSuspended);
+        }
+
+        private void StartFrames()
+        {
+            if (_framesSubscribed) return;
+            CompositionTarget.Rendering += OnFrame;
+            _framesSubscribed = true;
+        }
+
+        private void StopFrames()
+        {
+            if (!_framesSubscribed) return;
+            CompositionTarget.Rendering -= OnFrame;
+            _framesSubscribed = false;
+        }
+
+        private void NotifyPolling(bool allowed)
+        {
+            if (_pollingNotified == allowed) return;
+            _pollingNotified = allowed;
+            try { PollingNeeded?.Invoke(allowed); }
+            catch (Exception e) { _log?.Invoke(e); }
+        }
+
+        /// <summary>True when another visible top-level window covers this window's whole rectangle.
+        /// This is what makes rendering stop behind a maximised browser or a game.</summary>
+        private bool IsFullyCovered()
+        {
+            try
+            {
+                var handle = new WindowInteropHelper(this).Handle;
+                if (handle == IntPtr.Zero) return false;
+                NativeRect mine;
+                if (!GetWindowRect(handle, out mine)) return false;
+                var previous = GetWindow(handle, GW_HWNDPREV);
+                for (var guard = 0; previous != IntPtr.Zero && guard < 256; guard++)
+                {
+                    if (IsWindowVisible(previous) && !IsIconic(previous))
+                    {
+                        NativeRect other;
+                        if (GetWindowRect(previous, out other) &&
+                            other.Left <= mine.Left + 2 && other.Top <= mine.Top + 2 &&
+                            other.Right >= mine.Right - 2 && other.Bottom >= mine.Bottom - 2)
+                            return true;
+                    }
+                    previous = GetWindow(previous, GW_HWNDPREV);
+                }
+            }
+            catch (Exception) { }
+            return false;
         }
 
         private void OnFrame(object sender, EventArgs e)
         {
             Safe.Run(() =>
             {
-                if (WindowState == WindowState.Minimized || !IsVisible) return;
+                if (WindowState == WindowState.Minimized || !IsVisible)
+                {
+                    StopFrames();
+                    NotifyPolling(false);
+                    return;
+                }
                 var now = _frameWatch.Elapsed.TotalSeconds;
-                if (_settings.WindowFps > 0 && now - _lastFrame < 1.0 / _settings.WindowFps - 0.0015) return;
+                if (now - _lastOcclusionCheck > 0.5)
+                {
+                    _lastOcclusionCheck = now;
+                    var covered = IsFullyCovered();
+                    if (covered != _renderSuspended)
+                    {
+                        _renderSuspended = covered;
+                        if (covered) KeepAwake(false);
+                        NotifyPolling(!covered);
+                    }
+                }
+                if (_renderSuspended) return;
+                var fps = FrameRatePolicy.EffectiveFps(_settings.WindowFps, _monitorHz, _playing,
+                                                        false, false, false);
+                if (fps <= 0) return;
+                if (now - _lastFrame < 1.0 / fps - 0.0015) return;
                 var dt = Math.Min(0.25, now - _lastFrame);
                 _lastFrame = now;
                 if (now - _lastPoll > 0.2)
@@ -467,7 +633,7 @@ namespace MusicBeePlugin
                     }
                     catch (Exception) { }
                 }
-                _songTime = _clock.NowMs() - _settings.LyricsOffsetMs;
+                _songTime = _clock.NowMs() - EffectiveOffsetMs;
                 KeepAwake(_settings.PartyMode && _playing);
                 CheckLoop(now);
 
@@ -477,7 +643,7 @@ namespace MusicBeePlugin
                 _sky.InvalidateVisual();
                 _glow.InvalidateVisual();
                 _text.InvalidateVisual();
-                _transport.Update(_clock.NowMs(), _songMs, _playing, _volume, _mute);
+                _transport.Update(_clock.NowMs(), _songMs, _playing, _volume, _mute, _songOffsetMs);
                 _scene.HideProgress = _transport.IsShown;
             }, _log);
         }
@@ -486,7 +652,7 @@ namespace MusicBeePlugin
         {
             if (double.IsNaN(_loopStart) || double.IsNaN(_loopEnd)) return;
             if (_songTime < _loopEnd + 120 || now < _loopHoldUntil) return;
-            var target = Math.Max(0, _loopStart + _settings.LyricsOffsetMs);
+            var target = Math.Max(0, _loopStart + EffectiveOffsetMs);
             if (_songMs > 0) target = Math.Min(target, Math.Max(0, _songMs - 200));
             _controls.Seek?.Invoke(target);
             _loopHoldUntil = now + 0.65;
@@ -516,7 +682,8 @@ namespace MusicBeePlugin
                 else if (e.Key == Key.L) ToggleLoop(Keyboard.Modifiers.HasFlag(ModifierKeys.Shift));
                 else if (e.Key == Key.OemOpenBrackets) NudgeOffset(-100);
                 else if (e.Key == Key.OemCloseBrackets) NudgeOffset(100);
-                else if ((e.Key == Key.D0 || e.Key == Key.NumPad0) && Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) NudgeOffset(-_settings.LyricsOffsetMs);
+                else if ((e.Key == Key.D0 || e.Key == Key.NumPad0) &&
+                         Keyboard.Modifiers.HasFlag(ModifierKeys.Control)) ResetOffset();
                 else if (e.Key == Key.M) ToggleMute();
                 else if (e.Key == Key.F12) SaveScreenshot();
                 else return;
@@ -524,13 +691,23 @@ namespace MusicBeePlugin
             }, _log);
         }
 
-        private void NudgeOffset(int delta)
+        /// <summary>[ and ] change this song's own delay; the global Settings.LyricsOffsetMs stays
+        /// the base, and the user's .lrc is never touched.</summary>
+        internal void NudgeOffset(int delta)
         {
-            var value = Math.Max(-10000, Math.Min(10000, _settings.LyricsOffsetMs + delta));
-            _settings.LyricsOffsetMs = value;
-            OffsetChanged?.Invoke(value);
-            ShowToast(value == 0 ? "Lyrics delay reset" : $"Lyrics delay {value:+0;-0;0} ms");
+            var value = Math.Max(-10000, Math.Min(10000, _songOffsetMs + delta));
+            if (value == _songOffsetMs)
+            {
+                ShowToast(_songOffsetMs == 0 ? "Song delay reset" : $"Song delay {_songOffsetMs:+0;-0;0} ms");
+                return;
+            }
+            _songOffsetMs = value;
+            _transport.SetSongOffset(value);
+            SongOffsetChanged?.Invoke(value);
+            ShowToast(value == 0 ? "Song delay reset" : $"Song delay {value:+0;-0;0} ms");
         }
+
+        internal void ResetOffset() => NudgeOffset(-_songOffsetMs);
 
         private void ToggleMute()
         {
@@ -539,41 +716,61 @@ namespace MusicBeePlugin
             ShowToast(_mute ? "Muted" : "Sound on");
         }
 
-        private void ToggleLoop(bool section)
+        /// <summary>`L` and Shift+L toggle; pressing the same range again turns the loop off, a
+        /// different range switches to it.</summary>
+        private void ToggleLoop(bool section) =>
+            ApplyLoop(LoopRules.Toggle(_loopMode, section ? LoopMode.Section : LoopMode.Line));
+
+        /// <summary>The menu/hotkey command "loop this section" always switches to that range,
+        /// even while a line loop is active (R4-28).</summary>
+        internal void SetLoop(bool section) =>
+            ApplyLoop(LoopRules.Set(_loopMode, section ? LoopMode.Section : LoopMode.Line));
+
+        internal void LoopOff() => ApplyLoop(LoopMode.Off);
+
+        private void ApplyLoop(LoopMode requested)
         {
-            if (!double.IsNaN(_loopStart))
+            if (requested == LoopMode.Off)
             {
-                _loopStart = _loopEnd = double.NaN;
-                _scene.LoopStart = _scene.LoopEnd = double.NaN;
+                ClearLoop();
                 ShowToast("Loop off");
                 RefreshMenu();
                 return;
             }
             var index = _scene.CurrentLine(_songTime);
             if (index < 0) index = 0;
-            var (start, end) = _scene.LineRange(index, section ? 4 : 1);
+            var (start, end) = _scene.LineRange(index, requested == LoopMode.Section ? 4 : 1);
             if (double.IsNaN(start) || double.IsNaN(end)) { ShowToast("No lyrics to loop"); return; }
             if (_songMs > 0) end = Math.Min(end, _songMs);
+            _loopMode = requested;
             _loopStart = start;
             _loopEnd = end;
             _scene.LoopStart = start;
             _scene.LoopEnd = end;
-            ShowToast(section ? "Looping this section" : "Looping this line");
-            _controls.Seek?.Invoke(Math.Max(0, start + _settings.LyricsOffsetMs));
+            ShowToast(requested == LoopMode.Section ? "Looping this section" : "Looping this line");
+            _controls.Seek?.Invoke(Math.Max(0, start + EffectiveOffsetMs));
             _loopHoldUntil = _frameWatch.Elapsed.TotalSeconds + 0.7;
             RefreshMenu();
+        }
+
+        private void ClearLoop()
+        {
+            _loopMode = LoopMode.Off;
+            _loopStart = _loopEnd = double.NaN;
+            _scene.LoopStart = _scene.LoopEnd = double.NaN;
         }
 
         private void SaveScreenshot()
         {
             try
             {
-                var w = (int)Math.Round(ActualWidth);
-                var h = (int)Math.Round(ActualHeight);
+                var dpi = VisualTreeHelper.GetDpi(this);
+                var w = (int)Math.Round(ActualWidth * dpi.DpiScaleX);
+                var h = (int)Math.Round(ActualHeight * dpi.DpiScaleY);
                 if (w < 2 || h < 2) return;
                 _toast.BeginAnimation(OpacityProperty, null);
                 _toast.Opacity = 0;
-                var bmp = new RenderTargetBitmap(w, h, 96, 96, PixelFormats.Pbgra32);
+                var bmp = new RenderTargetBitmap(w, h, 96 * dpi.DpiScaleX, 96 * dpi.DpiScaleY, PixelFormats.Pbgra32);
                 bmp.Render(_root);
                 var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "Starry Karaoke");
                 Directory.CreateDirectory(dir);
@@ -630,7 +827,7 @@ namespace MusicBeePlugin
                 var start = _scene.LineStart(index);
                 if (double.IsNaN(start)) return;
                 _suppressDoubleClick = _frameWatch.Elapsed.TotalSeconds + 0.45;
-                _controls.Seek?.Invoke(Math.Max(0, start + _settings.LyricsOffsetMs));
+                _controls.Seek?.Invoke(Math.Max(0, start + EffectiveOffsetMs));
                 ShowToast("Jumped to line");
                 e.Handled = true;
             }, _log);
@@ -646,30 +843,110 @@ namespace MusicBeePlugin
             }, _log);
         }
 
+        internal bool IsFullscreen => _fullscreen;
+
         internal void SetFullscreen(bool on)
         {
-            if (on == _fullscreen) return;
+            if (on == _fullscreen)
+            {
+                if (on) Topmost = _settings.FullscreenTopmost;
+                return;
+            }
             if (on)
             {
                 _restore = WindowState == WindowState.Normal ? new Rect(Left, Top, Width, Height) : RestoreBounds;
-                WindowState = WindowState.Normal;
+                _restoreState = WindowState == WindowState.Minimized ? WindowState.Normal : WindowState;
                 WindowStyle = WindowStyle.None;
                 ResizeMode = ResizeMode.NoResize;
-                WindowState = WindowState.Maximized;
+                _fullscreen = true;
+                ApplyFullscreenBounds();
                 _cursorTimer.Stop();
                 _cursorTimer.Start();
             }
             else
             {
+                _fullscreen = false;
+                Topmost = false;
                 WindowState = WindowState.Normal;
                 WindowStyle = WindowStyle.SingleBorderWindow;
                 ResizeMode = ResizeMode.CanResize;
-                if (_restore.Width > 0) { Left = _restore.Left; Top = _restore.Top; Width = _restore.Width; Height = _restore.Height; }
+                if (_restore.Width > 0)
+                {
+                    Left = _restore.Left; Top = _restore.Top; Width = _restore.Width; Height = _restore.Height;
+                }
+                if (_restoreState == WindowState.Maximized) WindowState = WindowState.Maximized;
                 _cursorTimer.Stop();
                 Mouse.OverrideCursor = null;
             }
-            _fullscreen = on;
             _scene.LyricsOnly = on && _settings.FullscreenLyricsOnly;
+            ContextMenu = BuildMenu();
+        }
+
+        /// <summary>Fills exactly one monitor's device bounds, including the taskbar area. Maximizing
+        /// would stop at the work area, so the window is a normal borderless window with those bounds.</summary>
+        private void ApplyFullscreenBounds()
+        {
+            try
+            {
+                var screen = FullscreenScreen();
+                Rect bounds;
+                var source = PresentationSource.FromVisual(this);
+                if (source?.CompositionTarget != null)
+                {
+                    // TransformFromDevice maps device pixels to DIPs (it already contains the
+                    // reciprocal of the DPI scale); transform the corners instead of guessing M11.
+                    var transform = source.CompositionTarget.TransformFromDevice;
+                    var topLeft = transform.Transform(new Point(screen.Bounds.Left, screen.Bounds.Top));
+                    var bottomRight = transform.Transform(new Point(screen.Bounds.Right, screen.Bounds.Bottom));
+                    bounds = new Rect(topLeft, bottomRight);
+                }
+                else
+                {
+                    bounds = FullscreenLayout.FromDevice(screen.Bounds, 1.0, 1.0);
+                }
+                if (bounds.IsEmpty) return;
+                WindowState = WindowState.Normal;
+                Left = bounds.Left;
+                Top = bounds.Top;
+                Width = bounds.Width;
+                Height = bounds.Height;
+                Topmost = _settings.FullscreenTopmost;
+                var handle = new WindowInteropHelper(this).Handle;
+                if (handle != IntPtr.Zero)
+                    SetWindowPos(handle, IntPtr.Zero, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            }
+            catch (Exception e)
+            {
+                _log?.Invoke(e);
+            }
+        }
+
+        private System.Windows.Forms.Screen FullscreenScreen()
+        {
+            if (!string.IsNullOrEmpty(_settings.FullscreenMonitor))
+            {
+                var saved = System.Windows.Forms.Screen.AllScreens.FirstOrDefault(s =>
+                    string.Equals(s.DeviceName, _settings.FullscreenMonitor, StringComparison.OrdinalIgnoreCase));
+                if (saved != null) return saved;
+            }
+            return CurrentScreen() ?? System.Windows.Forms.Screen.PrimaryScreen;
+        }
+
+        /// <summary>Applies a different fullscreen monitor immediately and tells the plugin to save it.</summary>
+        internal void ChooseFullscreenMonitor(string deviceName)
+        {
+            _settings.FullscreenMonitor = deviceName ?? "";
+            if (_fullscreen) ApplyFullscreenBounds();
+            FullscreenMonitorChosen?.Invoke(_settings.FullscreenMonitor);
+            ContextMenu = BuildMenu();
+        }
+
+        internal void SetFullscreenTopmost(bool topmost)
+        {
+            _settings.FullscreenTopmost = topmost;
+            Topmost = _fullscreen && topmost;
+            FullscreenTopmostChanged?.Invoke(topmost);
             ContextMenu = BuildMenu();
         }
 
@@ -679,16 +956,61 @@ namespace MusicBeePlugin
             var full = new MenuItem { Header = _fullscreen ? "Exit fullscreen (Esc)" : "Fullscreen (F11)" };
             full.Click += (s, e) => Safe.Run(() => SetFullscreen(!_fullscreen), _log);
             menu.Items.Add(full);
+            var topmost = new MenuItem
+            {
+                Header = "Keep on top in fullscreen",
+                IsCheckable = true,
+                IsChecked = _settings.FullscreenTopmost
+            };
+            topmost.Click += (s, e) => Safe.Run(() => SetFullscreenTopmost(!_settings.FullscreenTopmost), _log);
+            menu.Items.Add(topmost);
+            var display = new MenuItem { Header = "Fullscreen monitor" };
+            var current = CurrentMonitor();
+            foreach (var screen in System.Windows.Forms.Screen.AllScreens)
+            {
+                var item = new MenuItem
+                {
+                    Header = screen.DeviceName + (screen.Primary ? " (primary)" : ""),
+                    IsCheckable = true,
+                    IsChecked = string.Equals(screen.DeviceName, _settings.FullscreenMonitor,
+                                             StringComparison.OrdinalIgnoreCase) ||
+                                (string.IsNullOrEmpty(_settings.FullscreenMonitor) &&
+                                 string.Equals(screen.DeviceName, current, StringComparison.OrdinalIgnoreCase))
+                };
+                var device = screen.DeviceName;
+                item.Click += (s, e) => Safe.Run(() => ChooseFullscreenMonitor(device), _log);
+                display.Items.Add(item);
+            }
+            display.Items.Add(new Separator());
+            var currentItem = new MenuItem { Header = "Current monitor", IsCheckable = true };
+            currentItem.IsChecked = string.IsNullOrEmpty(_settings.FullscreenMonitor);
+            currentItem.Click += (s, e) => Safe.Run(() => ChooseFullscreenMonitor(""), _log);
+            display.Items.Add(currentItem);
+            menu.Items.Add(display);
+
             var skip = new MenuItem { Header = "Skip intro (P)" };
             skip.Click += (s, e) => Safe.Run(() => SkipIntroRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(skip);
 
-            var loop = new MenuItem { Header = "Loop current line (L)", IsCheckable = true, IsChecked = !double.IsNaN(_loopStart) };
+            var loop = new MenuItem
+            {
+                Header = "Loop current line (L)",
+                IsCheckable = true,
+                IsChecked = _loopMode == LoopMode.Line
+            };
             loop.Click += (s, e) => Safe.Run(() => ToggleLoop(false), _log);
             menu.Items.Add(loop);
-            var section = new MenuItem { Header = "Loop this section (Shift+L)" };
-            section.Click += (s, e) => Safe.Run(() => ToggleLoop(true), _log);
+            var section = new MenuItem
+            {
+                Header = "Loop this section (Shift+L)",
+                IsCheckable = true,
+                IsChecked = _loopMode == LoopMode.Section
+            };
+            section.Click += (s, e) => Safe.Run(() => SetLoop(true), _log);
             menu.Items.Add(section);
+            var loopOff = new MenuItem { Header = "Loop off", IsEnabled = _loopMode != LoopMode.Off };
+            loopOff.Click += (s, e) => Safe.Run(LoopOff, _log);
+            menu.Items.Add(loopOff);
             var shot = new MenuItem { Header = "Save screenshot (F12)" };
             shot.Click += (s, e) => Safe.Run(SaveScreenshot, _log);
             menu.Items.Add(shot);
@@ -719,6 +1041,9 @@ namespace MusicBeePlugin
             var settings = new MenuItem { Header = "Settings..." };
             settings.Click += (s, e) => Safe.Run(() => SettingsRequested?.Invoke(this, EventArgs.Empty), _log);
             menu.Items.Add(settings);
+            var diagnostics = new MenuItem { Header = "Diagnostics..." };
+            diagnostics.Click += (s, e) => Safe.Run(() => DiagnosticsRequested?.Invoke(this, EventArgs.Empty), _log);
+            menu.Items.Add(diagnostics);
             menu.Items.Add(new Separator());
             var close = new MenuItem { Header = "Close" };
             close.Click += (s, e) => Safe.Run(Close, _log);

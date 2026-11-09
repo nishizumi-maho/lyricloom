@@ -28,6 +28,7 @@ namespace MusicBeePlugin
         private bool _shuttingDown;
         private string _lastHeader = "";
         private double _lastDuration;
+        private SongOffsetStore _songOffsets;
         private SidecarWatcher _sidecarWatcher;
         private bool _lyricLoomStarting;
         private System.Windows.Threading.Dispatcher _safetyDispatcher;
@@ -68,6 +69,7 @@ namespace MusicBeePlugin
 
             string warning;
             _settings = Settings.LoadWithReport(StorageFolder, Settings.FileName, out warning);
+            _songOffsets = new SongOffsetStore(StorageFolder);
             RomajiCore.Romanizer.UseFirstExistingDictionary(
                 Path.Combine(dll, "RomajiLyrics", "IpaDic"),
                 Path.Combine(StorageFolder, "Plugins", "RomajiLyrics", "IpaDic"),
@@ -79,6 +81,10 @@ namespace MusicBeePlugin
                 InstallDispatcherSafetyNet();
 
             Log($"initialise {v} (MusicBee API {_mb.ApiRevision})");
+            Log("romaji dictionary: " + RomajiCore.Romanizer.DictionaryDirectory +
+                (File.Exists(Path.Combine(RomajiCore.Romanizer.DictionaryDirectory, "sys.dic")) ? "" : " (missing sys.dic)"));
+            if (_songOffsets != null && !string.IsNullOrEmpty(_songOffsets.LastError))
+                Log(_songOffsets.LastError);
             if (!string.IsNullOrEmpty(warning))
             {
                 Log(warning);
@@ -190,6 +196,20 @@ namespace MusicBeePlugin
                     _mb.MB_AddMenuItem("mnuTools/Starry Karaoke: make word-timed lyrics with LyricLoom",
                                        "Starry Karaoke: ask LyricLoom to write word-timed lyrics for the playing song",
                                        (s, e) => OnUi(() => Safe.Run(CreateLyricsWithLyricLoom, LogException)));
+                    // These are separate MusicBee menu commands so MusicBee's own hotkey editor can
+                    // bind them, even while the karaoke window does not have the keyboard focus.
+                    AddCommand("Starry Karaoke: toggle window", "Show, restore or hide the karaoke window",
+                               Toggle);
+                    AddCommand("Starry Karaoke: toggle fullscreen", "Toggle fullscreen on the chosen monitor",
+                               ToggleFullscreen);
+                    AddCommand("Starry Karaoke: lyrics delay +100 ms", "Delay this song's lyrics by 100 ms",
+                               () => AdjustSongOffset(100));
+                    AddCommand("Starry Karaoke: lyrics delay -100 ms", "Show this song's lyrics 100 ms earlier",
+                               () => AdjustSongOffset(-100));
+                    AddCommand("Starry Karaoke: reset this song's lyrics delay", "Reset this song's extra lyric delay",
+                               ResetSongOffset);
+                    AddCommand("Starry Karaoke: loop current line", "Loop the line that is playing",
+                               LoopCurrentLine);
                     if (_settings.WindowOpen) OnUi(Open);
                     break;
                 case NotificationType.TrackChanged:
@@ -238,18 +258,26 @@ namespace MusicBeePlugin
 
         private void HandlePlayStateChanged()
         {
-            if (_settings.PartyMode)
-            {
-                ThreadPool.QueueUserWorkItem(_ =>
-                {
-                    try
-                    {
-                        if (_mb.Player_GetPlayState() == PlayState.Playing) OnUi(() => Safe.Run(PartyStart, LogException));
-                    }
-                    catch (Exception) { }
-                });
-            }
+            if (_settings.PartyMode) QueuePartyAction();
             QueueAutoOpenAttempt();
+        }
+
+        /// <summary>Party mode reads the real player state right before it acts. A stale poll value
+        /// must not open a fullscreen window after playback stopped, or leave one up when it did.</summary>
+        private void QueuePartyAction()
+        {
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                PlayState state;
+                try { state = _mb.Player_GetPlayState(); }
+                catch (Exception) { return; }
+                OnUi(() => Safe.Run(() =>
+                {
+                    if (_settings == null || _shuttingDown || !_settings.PartyMode) return;
+                    if (state == PlayState.Playing) PartyStart();
+                    else PartyStop();
+                }, LogException));
+            });
         }
 
         /// <summary>Only the first Playing notification for a song may auto-open; a pause/resume must
@@ -359,7 +387,7 @@ namespace MusicBeePlugin
                     break;
                 default:
                     _lines = new List<KaraokeLine>();
-                    w.SetSong(_lines, _lastHeader, _lastDuration, url);
+                    w.SetSong(_lines, _lastHeader, _lastDuration, url, _songOffsets.Get(url));
                     w.SetNextSong("");
                     w.SetWordTimingAvailable(false, !string.IsNullOrEmpty(url));
                     w.ShowMessage(kind == LyricsKind.LineTimed
@@ -369,22 +397,61 @@ namespace MusicBeePlugin
             }
         }
 
-        /// <summary>Party mode: bring the karaoke forward and fill the screen when playback starts.</summary>
+        /// <summary>Party mode: bring the karaoke forward and fill the screen when playback starts.
+        /// The caller has already read the live play state on the worker.</summary>
         private void PartyStart()
         {
             if (!_settings.PartyMode) return;
-            if (string.Equals(_dismissedSongUrl, _currentSongUrl, StringComparison.OrdinalIgnoreCase)) return;
-            if (_window == null) Open();
+            if (!string.IsNullOrEmpty(_dismissedSongUrl) &&
+                string.Equals(_dismissedSongUrl, _currentSongUrl, StringComparison.OrdinalIgnoreCase)) return;
+            if (_window == null) OpenWindow(autoOpen: true);
+            else
+            {
+                if (_window.WindowState == System.Windows.WindowState.Minimized)
+                    _window.WindowState = System.Windows.WindowState.Normal;
+                if (!_window.IsVisible)
+                {
+                    _window.ShowActivated = true;
+                    _window.Show();
+                }
+            }
             _window?.Activate();
             _window?.SetFullscreen(true);
+        }
+
+        /// <summary>Applies Settings.PartyModeOnStop when the player is no longer playing. The
+        /// window is not treated as a user dismissal when party mode closes or hides it.</summary>
+        private void PartyStop()
+        {
+            var w = _window;
+            if (w == null) return;
+            switch (_settings.PartyModeOnStop)
+            {
+                case PartyModeOnStop.LeaveFullscreen:
+                    w.SetFullscreen(false);
+                    break;
+                case PartyModeOnStop.Hide:
+                    w.SetFullscreen(false);
+                    w.Hide();
+                    StopPolling();
+                    break;
+                case PartyModeOnStop.Close:
+                    w.CloseForTrackChange();
+                    break;
+            }
         }
 
         // ---------------------------------------------------------------- windows
 
         private void Toggle()
         {
-            if (_window != null) _window.Close();
-            else Open();
+            if (_window == null || !_window.IsVisible ||
+                _window.WindowState == System.Windows.WindowState.Minimized)
+            {
+                Open();   // View > Starry Karaoke also restores a minimised or hidden window
+                return;
+            }
+            _window.Close();
         }
 
         private void Open()
@@ -403,7 +470,6 @@ namespace MusicBeePlugin
             w.ShowActivated = _settings.AutoOpenFocus;
             w.Show();
             if (_settings.AutoOpenFocus) w.Activate();
-            StartPolling();
         }
 
         private void OpenWindow(bool autoOpen)
@@ -413,9 +479,10 @@ namespace MusicBeePlugin
             if (_window != null)
             {
                 _window.ShowActivated = activate;
-                _window.Show();
+                if (_window.WindowState == System.Windows.WindowState.Minimized)
+                    _window.WindowState = System.Windows.WindowState.Normal;
+                if (!_window.IsVisible) _window.Show();
                 if (activate) _window.Activate();
-                StartPolling();
                 return;
             }
 
@@ -428,7 +495,6 @@ namespace MusicBeePlugin
                 SetVolume = v => OnPlayer(() => _mb.Player_SetVolume(Math.Max(0, Math.Min(1, v)))),
                 SetMute = m => OnPlayer(() => _mb.Player_SetMute(m))
             };
-            StartPolling();
             var w = new KaraokeWindow(_settings,
                                       () => (BitConverter.Int64BitsToDouble(Interlocked.Read(ref _polledPositionBits)),
                                              _polledPlaying, _polledVolume, _polledMute),
@@ -438,7 +504,29 @@ namespace MusicBeePlugin
             w.RecordRequested += (s, e) => Safe.Run(RecordVideo, LogException);
             w.SkipIntroRequested += (s, e) => Safe.Run(() => SkipIntro(force: true), LogException);
             w.LyricLoomRequested += (s, e) => Safe.Run(CreateLyricsWithLyricLoom, LogException);
-            w.OffsetChanged += ms => Safe.Run(() => { _settings.LyricsOffsetMs = ms; SaveSettings(); }, LogException);
+            w.DiagnosticsRequested += (s, e) => Safe.Run(ShowDiagnostics, LogException);
+            w.SongOffsetChanged += ms => Safe.Run(() =>
+            {
+                var url = CurrentSongUrl();
+                if (string.IsNullOrEmpty(url)) return;
+                _songOffsets.Set(url, ms);
+                if (!string.IsNullOrEmpty(_songOffsets.LastError)) Log(_songOffsets.LastError);
+            }, LogException);
+            w.FullscreenMonitorChosen += device => Safe.Run(() =>
+            {
+                _settings.FullscreenMonitor = device ?? "";
+                SaveSettings();
+            }, LogException);
+            w.FullscreenTopmostChanged += topmost => Safe.Run(() =>
+            {
+                _settings.FullscreenTopmost = topmost;
+                SaveSettings();
+            }, LogException);
+            w.PollingNeeded += allowed =>
+            {
+                if (allowed) StartPolling();
+                else StopPolling();
+            };
             w.JapaneseModeChosen += mode => Safe.Run(() =>
             {
                 _settings.Japanese = mode;
@@ -452,7 +540,7 @@ namespace MusicBeePlugin
                 // Do not auto-open this song again, but a new song may.
                 if (!_shuttingDown) _dismissedSongUrl = _currentSongUrl;
             };
-            w.Closing += (s, e) => w.StoreBounds(_settings);
+            w.Closing += (s, e) => Safe.Run(() => w.StoreBounds(_settings), LogException);
             w.Closed += (s, e) =>
             {
                 if (!ReferenceEquals(_window, w)) return;
@@ -466,10 +554,10 @@ namespace MusicBeePlugin
             // WindowOpen is only saved as true by a clean MusicBee shutdown (Close), so a crash with the
             // window open does not make it open again, and crash again, at every start.
             _window = w;
+            StartPolling();
             w.SetLyricLoomEnabled(!string.IsNullOrEmpty(_currentSongUrl) && File.Exists(_currentSongUrl));
             w.Show();
             if (activate) w.Activate();
-            if (_settings.PartyMode && _polledPlaying) w.SetFullscreen(true);
             LoadSong();
         }
 
@@ -534,11 +622,17 @@ namespace MusicBeePlugin
         {
             if (_settingsWindow != null)
             {
+                if (_settingsWindow.WindowState == System.Windows.WindowState.Minimized)
+                    _settingsWindow.WindowState = System.Windows.WindowState.Normal;
+                if (!_settingsWindow.IsVisible) _settingsWindow.Show();
                 _settingsWindow.Activate();
                 return;
             }
             var before = _settings.Japanese;
-            var dlg = new SettingsWindow(_settings, preview => Safe.Run(() => _window?.ApplySettings(preview), LogException), LogException);
+            var dlg = new SettingsWindow(_settings, preview => Safe.Run(() => _window?.ApplySettings(preview), LogException),
+                                         LogException, BuildDiagnosticsText);
+            // A topmost fullscreen karaoke window must not hide its own settings dialog.
+            dlg.Topmost = _window != null && _window.IsFullscreen;
             ElementHost.EnableModelessKeyboardInterop(dlg);
             dlg.Closed += (s, e) => Safe.Run(() =>
             {
@@ -551,7 +645,9 @@ namespace MusicBeePlugin
                 _window?.ApplySettings(_settings);
                 _window?.RefreshMenu();
                 if (_settings.Japanese != before) LoadSong();
-                if (_settings.PartyMode && _polledPlaying) PartyStart();
+                // Editing colours or turning party mode on must not bring the karaoke window in
+                // front of whatever the user is doing. Party mode starts on the next genuine
+                // play-state change instead.
             }, LogException);
             _settingsWindow = dlg;
             dlg.Show();
@@ -637,6 +733,29 @@ namespace MusicBeePlugin
 
         private void RecordVideo(string exe, string dll, string audio, string lrc, double duration, string title, string artist, string header)
         {
+            // Resolve ffmpeg before asking for an output file: a user without ffmpeg must learn that
+            // now, not after typing a filename into a recorder that then shows a modal error.
+            var ffmpeg = ResolveFfmpeg();
+            if (string.IsNullOrEmpty(ffmpeg))
+            {
+                const string text = "ffmpeg was not found, so a video cannot be recorded.\n\n" +
+                                    "Install it with \"winget install Gyan.FFmpeg\", or put ffmpeg.exe next to LyricLoom / on PATH, " +
+                                    "or choose it in Settings > Recorded video.\n\nOpen Settings now?";
+                var owner = _window;
+                var answer = owner != null
+                    ? System.Windows.MessageBox.Show(owner, text, "Starry Karaoke",
+                        System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Information)
+                    : System.Windows.MessageBox.Show(text, "Starry Karaoke",
+                        System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Information);
+                if (answer == System.Windows.MessageBoxResult.Yes) OpenSettings();
+                return;
+            }
+            if (!string.Equals(_settings.FfmpegPath, ffmpeg, StringComparison.OrdinalIgnoreCase))
+            {
+                _settings.FfmpegPath = ffmpeg;
+                SaveSettings();
+            }
+
             string target;
             using (var dlg = new SaveFileDialog
             {
@@ -664,7 +783,8 @@ namespace MusicBeePlugin
 
             string Q(string s) => "\"" + s.Replace("\"", "'") + "\"";
             var args = $"--lrc {Q(lrcPath)} --audio {Q(audio)} --out {Q(target)} --settings {Q(Path.Combine(work, settingsName))} " +
-                       $"--title {Q(header)} --duration {duration.ToString(System.Globalization.CultureInfo.InvariantCulture)} --dict {Q(dictDir)}";
+                       $"--title {Q(header)} --duration {duration.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+                       $"--dict {Q(dictDir)} --ffmpeg {Q(ffmpeg)}";
             Log("record: " + target);
             try
             {
@@ -685,6 +805,125 @@ namespace MusicBeePlugin
 
         private static void Message(string text) =>
             System.Windows.MessageBox.Show(text, "Starry Karaoke", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Information);
+
+        // ---------------------------------------------------------------- menu commands
+
+        private void AddCommand(string text, string description, Action action) =>
+            _mb.MB_AddMenuItem("mnuTools/" + text, description,
+                               (s, e) => OnUi(() => Safe.Run(action, LogException)));
+
+        private void ToggleFullscreen()
+        {
+            if (_window == null || !_window.IsVisible ||
+                _window.WindowState == System.Windows.WindowState.Minimized)
+            {
+                OpenWindow(autoOpen: false);
+                _window?.SetFullscreen(true);
+                return;
+            }
+            _window.SetFullscreen(!_window.IsFullscreen);
+        }
+
+        /// <summary>Changes the playing song's own delay. Works with no window open too: the store
+        /// remembers it for when the window next loads the song.</summary>
+        private void AdjustSongOffset(int delta)
+        {
+            var url = CurrentSongUrl();
+            if (string.IsNullOrEmpty(url)) return;
+            if (_window != null && string.Equals(url, _currentSongUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                _window.NudgeOffset(delta);
+                return;
+            }
+            var value = Math.Max(-10000, Math.Min(10000, _songOffsets.Get(url) + delta));
+            _songOffsets.Set(url, value);
+            if (!string.IsNullOrEmpty(_songOffsets.LastError)) Log(_songOffsets.LastError);
+        }
+
+        private void ResetSongOffset()
+        {
+            var url = CurrentSongUrl();
+            if (string.IsNullOrEmpty(url)) return;
+            if (_window != null && string.Equals(url, _currentSongUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                _window.ResetOffset();
+                return;
+            }
+            _songOffsets.Reset(url);
+        }
+
+        private void LoopCurrentLine()
+        {
+            if (_window == null) OpenWindow(autoOpen: false);
+            _window?.SetLoop(false);
+        }
+
+        private string CurrentSongUrl()
+        {
+            if (!string.IsNullOrEmpty(_currentSongUrl)) return _currentSongUrl;
+            try { return _mb.NowPlaying_GetFileUrl() ?? ""; }
+            catch (Exception) { return ""; }
+        }
+
+        // ---------------------------------------------------------------- diagnostics
+
+        private string ResolveFfmpeg()
+        {
+            try { return FfmpegLocator.Resolve(_settings?.FfmpegPath, _settings?.LyricLoomPath); }
+            catch (Exception e)
+            {
+                Log("could not look for ffmpeg: " + e.Message);
+                return null;
+            }
+        }
+
+        private string MusicBeeVersionText()
+        {
+            try
+            {
+                var file = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName;
+                var version = string.IsNullOrEmpty(file)
+                    ? ""
+                    : System.Diagnostics.FileVersionInfo.GetVersionInfo(file).FileVersion;
+                return (string.IsNullOrEmpty(version) ? "unknown" : version) + " (API " + _mb.ApiRevision + ")";
+            }
+            catch (Exception)
+            {
+                return "unknown (API " + _mb.ApiRevision + ")";
+            }
+        }
+
+        /// <summary>Only the versions and paths listed in the review are included; never lyrics and
+        /// never an unrelated file path.</summary>
+        private string BuildDiagnosticsText()
+        {
+            var pluginVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "";
+            var dictionary = RomajiCore.Romanizer.DictionaryDirectory ?? "";
+            var dictionaryFound = !string.IsNullOrEmpty(dictionary) &&
+                                  File.Exists(Path.Combine(dictionary, "sys.dic"));
+            // Do not copy Romanizer.LastError into the report: an exception stack trace can contain
+            // paths outside the ones diagnostics is allowed to show.
+            var dictionaryError = dictionaryFound
+                ? (string.IsNullOrEmpty(RomajiCore.Romanizer.LastError)
+                    ? null
+                    : "the dictionary could not be loaded; see the log")
+                : "sys.dic was not found";
+            var ffmpeg = ResolveFfmpeg() ?? "";
+            var ffmpegVersion = ffmpeg.Length > 0 ? FfmpegInfo.VersionLine(ffmpeg) : "";
+            string lyricLoom = "";
+            try { lyricLoom = LyricLoomLocator.Default.Find(_settings?.LyricLoomPath) ?? ""; }
+            catch (Exception) { }
+            return DiagnosticsReport.Build(pluginVersion, MusicBeeVersionText(), dictionary, dictionaryError,
+                                           ffmpeg, ffmpegVersion, lyricLoom, _logPath);
+        }
+
+        private void ShowDiagnostics()
+        {
+            var window = new DiagnosticsWindow(BuildDiagnosticsText(), _logPath);
+            window.Topmost = _window != null && _window.IsFullscreen;
+            ElementHost.EnableModelessKeyboardInterop(window);
+            window.Show();
+        }
 
         // ---------------------------------------------------------------- lyrics
 
@@ -724,13 +963,14 @@ namespace MusicBeePlugin
                         header = Lrc.Tidy(Romanize(header)) is var r && r.Length > 0 ? r : header;
                     var hasWordTiming = AutoOpenRule.Classify(song.Lrc) == LyricsKind.WordTimed;
                     var canCreateLyrics = !string.IsNullOrEmpty(song.Url) && File.Exists(song.Url);
+                    var songOffset = _songOffsets.Get(song.Url);
                     OnUi(() =>
                     {
                         if (gen != _songGeneration) return;
                         _lines = lines;
                         _lastHeader = header;
                         _lastDuration = duration;
-                        _window?.SetSong(lines, header, duration, song.Url);
+                        _window?.SetSong(lines, header, duration, song.Url, songOffset);
                         _window?.SetNextSong(song.Next);
                         _window?.SetWordTimingAvailable(hasWordTiming, canCreateLyrics);
                         _window?.SetLyricLoomEnabled(canCreateLyrics);
@@ -749,7 +989,7 @@ namespace MusicBeePlugin
                         _lines = new List<KaraokeLine>();
                         _lastHeader = header;
                         _lastDuration = duration;
-                        _window?.SetSong(_lines, header, duration, _currentSongUrl);
+                        _window?.SetSong(_lines, header, duration, _currentSongUrl, _songOffsets.Get(_currentSongUrl));
                         _window?.SetNextSong("");
                         _window?.SetWordTimingAvailable(false,
                             !string.IsNullOrEmpty(_currentSongUrl) && File.Exists(_currentSongUrl));
@@ -783,7 +1023,7 @@ namespace MusicBeePlugin
         {
             var target = Timeline.IntroSkipTarget(_lines, _settings.IntroLeadMs);
             if (target == null) return;
-            var offset = _settings.LyricsOffsetMs;
+            var offset = _settings.LyricsOffsetMs + _songOffsets.Get(_currentSongUrl);
             OnPlayer(() =>
             {
                 var pos = _mb.Player_GetPosition();
