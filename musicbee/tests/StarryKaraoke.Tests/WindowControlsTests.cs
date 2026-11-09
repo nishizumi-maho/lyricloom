@@ -30,7 +30,7 @@ namespace StarryKaraoke.Tests
                         SetVolume = v => { volumes++; volume = v; },
                         SetMute = m => { mutes++; mute = m; }
                     };
-                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false), player);
+                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false, 0.0), player);
                     w.Controls.Seek(42000);
                     w.Controls.PlayPause();
                     w.Controls.Previous();
@@ -106,9 +106,29 @@ namespace StarryKaraoke.Tests
             {
                 try
                 {
-                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false), new PlayerControls());
+                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false, 0.0), new PlayerControls());
                     var expected = System.Windows.Media.VisualTreeHelper.GetDpi(w).PixelsPerDip;
                     Assert.Equal(expected, w.ScenePixelsPerDip);
+                    w.Close();
+                }
+                catch (Exception e) { failure = e; }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+            Assert.Null(failure);
+        }
+
+        [Fact]
+        public void Moving_text_uses_animated_hinting_and_no_layout_rounding()
+        {
+            Exception failure = null;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false, 0.0), new PlayerControls());
+                    Assert.True(w.MovingTextIsAnimated);
                     w.Close();
                 }
                 catch (Exception e) { failure = e; }
@@ -127,7 +147,7 @@ namespace StarryKaraoke.Tests
             {
                 try
                 {
-                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false), new PlayerControls());
+                    var w = new KaraokeWindow(new Settings(), () => (0.0, false, 1f, false, 0.0), new PlayerControls());
                     w.SetWordTimingAvailable(hasWordTiming: false, canCreateLyrics: true);
                     Assert.True(w.IsHintVisible);
                     Assert.False(w.IsLyricLoomStatusVisible);

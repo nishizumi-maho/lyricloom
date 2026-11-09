@@ -34,8 +34,13 @@ namespace MusicBeePlugin
         private readonly Dictionary<int, string> _clocks = new Dictionary<int, string>();
 
         // animation
+        private ScrollPath _scrollPath;
         private double _scroll, _scrollVel;
         private bool _scrollReady;
+        private double _scrollResidual, _scrollResidualVel, _scrollResidualAt;
+        private double _animSec;
+        private double _lastT;
+        private bool _haveT;
         private double[] _emph = new double[0];
         private Star[] _stars = new Star[0];
         private double _wallSec;
@@ -95,7 +100,7 @@ namespace MusicBeePlugin
 
             public GradientKey(double litX, double feather, double alpha, Color body, Color tip)
             {
-                _litX = (int)Math.Round(litX * 4);
+                _litX = KaraokeScene.LitBucket(litX);
                 _feather = (int)Math.Round(feather * 10);
                 _alpha = (int)Math.Round(Math.Max(0, Math.Min(1, alpha)) * 255);
                 _body = ToUint(body);
@@ -169,7 +174,8 @@ namespace MusicBeePlugin
             _songMs = songMs;
             _emph = new double[_lines.Count];
             _blocks = null;
-            _scrollReady = false;
+            _scrollPath = null;
+            _haveT = false;
             _nextSong = "";
             _texts.Clear();
             _clock = "";
@@ -198,9 +204,11 @@ namespace MusicBeePlugin
 
         // ---------------------------------------------------------------- layout
 
-        private void EnsureLayout(Size size)
+        /// <summary>Rebuilds the wrapped rows when the text, size, theme or DPI changed. Returns true
+        /// when it did, so the scroll can absorb the new layout without jumping.</summary>
+        private bool EnsureLayout(Size size)
         {
-            if (_blocks != null && size == _size) return;
+            if (_blocks != null && size == _size) return false;
             // The star positions are normalised, so they do not need to be regenerated for a resize:
             // reshuffling the whole sky every time the user drags the window edge looks like a glitch.
             if (_stars.Length == 0) MakeStars(size);
@@ -222,6 +230,28 @@ namespace MusicBeePlugin
                 top += y + _basePx * 0.6;
                 _blocks.Add(b);
             }
+            BuildScrollPath();
+            return true;
+        }
+
+        /// <summary>One allocation per layout change: the pure scroll path reads centres and start
+        /// times from this object every frame.</summary>
+        private void BuildScrollPath()
+        {
+            if (_blocks == null || _blocks.Count == 0 || _lines.Count == 0)
+            {
+                _scrollPath = null;
+                return;
+            }
+            var n = Math.Min(_blocks.Count, _lines.Count);
+            var centers = new double[n];
+            var starts = new double[n];
+            for (var i = 0; i < n; i++)
+            {
+                centers[i] = _blocks[i].Top + _blocks[i].Height / 2;
+                starts[i] = _lines[i].StartMs;
+            }
+            _scrollPath = new ScrollPath(centers, starts, _s.TransitionSpeed, _basePx * 1.5);
         }
 
         private static double Margin(Size size) => Math.Max(24, size.Width * 0.05);
@@ -299,38 +329,112 @@ namespace MusicBeePlugin
 
         // ---------------------------------------------------------------- animation
 
-        /// <summary>Advances springs and fades by dt seconds for song time t (ms).</summary>
+        /// <summary>Advances the wall clock for the stars, and evaluates the time-driven scroll and
+        /// emphasis for song time t (ms). dt is the real time since the previous frame; it only
+        /// drives the residual spring and the twinkling, never the path.</summary>
         public void Update(double dt, double t, Size size)
         {
+            if (dt < 0) dt = 0;
             _wallSec += dt;
-            EnsureLayout(size);
-            if (_blocks.Count == 0) return;
-            var speed = Math.Max(0.3, Math.Min(3, _s.TransitionSpeed));
-            var cur = Timeline.CurrentIndex(_lines, t);
+            _animSec += dt;
+            var layoutChanged = EnsureLayout(size);
+            if (_blocks == null || _blocks.Count == 0 || _scrollPath == null || _lines.Count == 0) return;
 
-            // scroll: critically damped spring towards the current line's centre
-            var focus = cur < 0 ? 0 : cur;
-            var target = _blocks[focus].Top + _blocks[focus].Height / 2;
-            if (cur < 0) target -= _basePx * 1.5;   // intro: first line a little below the middle
-            if (!_scrollReady || dt > 0.5) { _scroll = target; _scrollVel = 0; _scrollReady = true; }
+            var phase = _scrollPath.PhaseAt(t);
+            var oldScroll = _scroll;
+            var oldVelocity = _scrollVel;
+            var discontinuity = false;
+            if (!_scrollReady)
+            {
+                _scroll = phase.Position;
+                _scrollVel = 0;
+                _scrollResidual = 0;
+                _scrollResidualVel = 0;
+                _scrollReady = true;
+            }
             else
             {
-                var w = 2 * Math.PI / (0.75 / speed);
-                var acc = w * w * (target - _scroll) - 2 * w * _scrollVel;
-                _scrollVel += acc * dt;
-                _scroll += _scrollVel * dt;
+                discontinuity = layoutChanged || IsSongTimeJump(t, dt);
+                if (discontinuity)
+                {
+                    // Preserve both the shown position and its velocity: the residual starts at the
+                    // difference and lets the critically damped spring absorb it without a cut.
+                    _scrollResidual = oldScroll - phase.Position;
+                    _scrollResidualVel = ScrollPath.ClampResidualVelocity(
+                        _scrollResidual, oldVelocity - _scrollPath.VelocityAt(t));
+                    _scrollResidualAt = _animSec;
+                }
+                var residual = _scrollResidual == 0 && _scrollResidualVel == 0
+                    ? 0
+                    : ScrollPath.ResidualAt(_scrollResidual, _scrollResidualVel, _animSec - _scrollResidualAt);
+                if (Math.Abs(residual) < 0.001 && Math.Abs(_scrollResidualVel) < 0.001)
+                {
+                    residual = 0;
+                    _scrollResidual = 0;
+                    _scrollResidualVel = 0;
+                }
+                _scroll = phase.Position + residual;
             }
 
-            // emphasis: 1 for the current line (until the next starts), easing in and out
-            var k = 1 - Math.Exp(-dt * 7 * speed);
-            for (var i = 0; i < _emph.Length; i++)
+            if (discontinuity)
+                _scrollVel = oldVelocity;       // the residual starts with exactly that velocity
+            else if (dt > 0.000001)
+                _scrollVel = (_scroll - oldScroll) / dt;
+            _lastT = t;
+            _haveT = true;
+
+            // Emphasis follows the same eased u as the scroll: the incoming line grows while it
+            // glides in, and the outgoing one dims over the same interval.
+            Array.Clear(_emph, 0, _emph.Length);
+            if (phase.IsTransition)
             {
-                var on = i == cur ? 1.0 : 0.0;
-                _emph[i] += (on - _emph[i]) * k;
+                var eased = ScrollPath.Smootherstep(phase.U);
+                if (phase.From < 0)
+                {
+                    if (_emph.Length > 0) _emph[0] = eased;
+                }
+                else
+                {
+                    if (phase.From < _emph.Length) _emph[phase.From] = 1 - eased;
+                    if (phase.From + 1 < _emph.Length) _emph[phase.From + 1] = eased;
+                }
+            }
+            else
+            {
+                var current = Timeline.CurrentIndex(_lines, t);
+                if (current >= 0 && current < _emph.Length) _emph[current] = 1;
             }
         }
 
+        /// <summary>A seek (or a stall long enough that the clock had to snap) changes song time by
+        /// more than the frame's own interval. Paused frames keep t still, which is not a jump.</summary>
+        private bool IsSongTimeJump(double t, double dt)
+        {
+            if (!_haveT) return false;
+            if (t < _lastT - 0.001) return true;
+            // A paused frame keeps t still while real time advances; that is not a jump.
+            if (Math.Abs(t - _lastT) < 0.001) return false;
+            var expected = _lastT + dt * 1000.0;
+            return Math.Abs(t - expected) > 30.0;
+        }
+
         // ---------------------------------------------------------------- drawing
+
+        /// <summary>The scroll offset used by the last Update (for tests and the frame-series harness).</summary>
+        internal double ScrollOffset => _scroll;
+
+        /// <summary>How far the shown scroll still is from the pure path (for the settle check).</summary>
+        internal double ScrollResidual => _scrollPath == null ? 0 : _scroll - _scrollPath.PositionAt(_lastT);
+
+        /// <summary>The path's peak speed, in pixels per second (for continuity bounds).</summary>
+        internal double ScrollPeakVelocity => _scrollPath?.PeakVelocity ?? 0;
+
+        /// <summary>The path's peak acceleration, in pixels per second squared.</summary>
+        internal double ScrollPeakAcceleration => _scrollPath?.PeakAcceleration ?? 0;
+
+        /// <summary>The scale the given line is drawn with (for the frame-series harness).</summary>
+        internal double LineScale(int index) =>
+            _s.GrowCurrentLine && index >= 0 && index < _emph.Length ? 1 + 0.08 * _emph[index] : 1;
 
         public void Render(Layer layer, DrawingContext dc, Size size, double t)
         {
@@ -362,7 +466,7 @@ namespace MusicBeePlugin
                     fade *= Smooth(Math.Max(0, Math.Min(1, (center - headerBottom * 0.35) / (headerBottom * 0.65))));
                 if (fade <= 0.01) continue;
                 var e = _emph.Length > i ? _emph[i] : 0;
-                var scale = _s.GrowCurrentLine ? 1 + 0.08 * Smooth(e) : 1;
+                var scale = _s.GrowCurrentLine ? 1 + 0.08 * e : 1;
                 dc.PushTransform(new ScaleTransform(scale, scale, size.Width / 2, center));
                 DrawBlock(dc, layer, size, b, _lines[i], top, near, e, t, i == cur, fade);
                 dc.Pop();
@@ -397,8 +501,8 @@ namespace MusicBeePlugin
                 foreach (var r in b.Sub) DrawRow(dc, r, top, size, Mix(baseColor, Fade(_dim, alpha), 0.25));
             }
             if (e < 0.01) return;
-            // the lit fill fades in and out with the line's emphasis
-            var litAlpha = Smooth(e) * alpha;
+            // the lit fill fades in and out with the line's emphasis (already eased by the path)
+            var litAlpha = e * alpha;
             var lit = line.Main.LitChars(t);
             foreach (var r in b.Main) DrawLit(dc, layer, r, top, size, lit, litAlpha);
             if (line.Sub != null)
@@ -443,20 +547,22 @@ namespace MusicBeePlugin
         }
 
         /// <summary>The sweep's gold-to-transparent gradient, cached by its quantised position and alpha.
-        /// The first brush for a bucket is built with the exact values, so a still frame renders as before;
-        /// a later frame may reuse a brush from within the same quarter-pixel bucket.</summary>
+        /// The edge moves in quarter-pixel buckets (at most 0.25 px per step, never more than 0.125 px
+        /// from the mathematical position): a sub-pixel change still looks continuous at any refresh
+        /// rate, and the cache stays small.</summary>
         private Brush LitFill(double litX, double feather, double alpha, Color body, Color tip)
         {
             var key = new GradientKey(litX, feather, alpha, body, tip);
             if (_gradients.TryGetValue(key, out var cached)) return cached;
+            var snapped = LitBucket(litX) / 4.0;
 
             // one gradient does it all: gold, brightening towards the sweep, then fading out over the
             // feather (the soft edge), transparent beyond it
             var g = new LinearGradientBrush
             {
                 MappingMode = BrushMappingMode.Absolute,
-                StartPoint = new Point(litX - feather * 5, 0),
-                EndPoint = new Point(litX + feather * 0.6, 0)
+                StartPoint = new Point(snapped - feather * 5, 0),
+                EndPoint = new Point(snapped + feather * 0.6, 0)
             };
             var span = feather * 5.6;
             g.GradientStops.Add(new GradientStop(Fade(body, alpha), 0));
@@ -715,6 +821,10 @@ namespace MusicBeePlugin
         }
 
         // ---------------------------------------------------------------- helpers
+
+        /// <summary>The lit edge quantised to a quarter of a device-independent pixel (the
+        /// GradientKey stores times four).</summary>
+        internal static int LitBucket(double litX) => (int)Math.Round(litX * 4);
 
         private string Clock(double ms)
         {

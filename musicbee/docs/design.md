@@ -55,11 +55,16 @@ StarryKaraoke.Recorder project produces the offscreen video recorder.
 gradient brushes are cached and rebuilt only when the text, size, theme, DPI or loop range changes.
 
 - **Soft edge:** the gold fill advances with a feathered edge (gradient mask) and a glow, instead of
-  a hard cut.
-- **Line-change fade:** the incoming line brightens and the outgoing one dims gradually (about
-  350 ms).
-- **Current line grows:** the sung line grows to about 108% and returns to normal size when it ends.
-- **Smooth scrolling:** lines slide to their new position with ease-in-out.
+  a hard cut. The edge is cached per quarter pixel, so it steps by at most 0.25 px and is never more
+  than 0.125 px from its exact position.
+- **Line-change fade:** the incoming line brightens and the outgoing one dims with the same eased
+  scroll progress (about 0.4 s at the default speed).
+- **Current line grows:** the sung line grows to about 108% while it glides into the centre, and
+  returns to normal size when it leaves.
+- **Smooth scrolling:** a time-driven `smootherstep` path eases each line to the centre with zero
+  velocity and acceleration at both ends. Only a real discontinuity (seek, resize, font change,
+  new song) starts a residual, which a critically damped spring removes in about 0.35 s without
+  overshooting.
 - **Line bursts:** a short, deterministic ring of small stars appears after each line ends.
 
 The window sets `KaraokeScene.PixelsPerDip` from `VisualTreeHelper.GetDpi(this)` when it loads, on
@@ -68,9 +73,11 @@ scaled display. The recorder and the Preview tool leave it at 1.0 because they r
 96 DPI.
 
 `FrameRatePolicy` gates the rendering callback: a hidden, minimised or fully covered window does no
-scene work and stops the player poll timer; a paused song ticks at 10 fps; a playing song uses the
-configured rate (display refresh rate, 30, 60 or 120, default 60) capped by the window monitor's
-refresh rate. The plugin never changes WPF's process-wide `Timeline.DesiredFrameRateProperty`, so it
+scene work and stops the player poll timer; a paused song ticks at a slow exact divisor; a playing
+song renders at an integer divisor of the window monitor's refresh rate (Match display, Half
+refresh or Third refresh; Match display is the default). Frame time comes from
+`RenderingEventArgs.RenderingTime`, so a 120 or 144 Hz display runs at its own rate rather than a
+fixed 60. The plugin never changes WPF's process-wide `Timeline.DesiredFrameRateProperty`, so it
 cannot slow down other WPF plugins in MusicBee.
 
 ## Auto-open and the sidecar watcher
@@ -146,7 +153,7 @@ instead of letting an exception escape into MusicBee.
 - .NET Framework 4.8, like Desktop Lyrics. MusicBee is a 32-bit process; the recorder builds AnyCPU
   and prefers 64-bit so ffmpeg and WPF have room.
 - The window is **WPF**, which draws with hardware acceleration. Glow (BlurEffect), a gradient
-  opacity mask, scale and fade run smoothly at 60 fps even in fullscreen.
+  opacity mask, scale and fade run smoothly at the display's refresh rate, even in fullscreen.
 - RomajiCore is included as a copy in `external/RomajiCore`, so the repository stays self-contained.
 - Unit tests (xunit) cover the parser, the per-character timings, the per-word romaji, the theme
   presets, auto-open and sidecar decisions, the LyricLoom guard, the recorder's output safety and
