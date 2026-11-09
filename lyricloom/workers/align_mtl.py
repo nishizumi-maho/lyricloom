@@ -18,8 +18,21 @@ from .copies import first_checkpoint_dir
 FRAME_S = 256 / 22050 * 3
 
 
+def _mtl_repo(configured: str) -> str:
+    """The LyricsAlignment-MTL code folder: the configured one when it holds wrapper.py, otherwise
+    the copy shipped inside the lyricloom package (a WSL environment built by the setup assistant
+    installs the package but has no separate /opt/lyricloom/mtl folder)."""
+    from pathlib import Path
+
+    if configured and (Path(configured) / "wrapper.py").is_file():
+        return configured
+    vendored = Path(__file__).resolve().parent.parent / "vendor" / "mtl"
+    return str(vendored) if (vendored / "wrapper.py").is_file() else configured
+
+
 def main() -> None:
     p = read_payload()
+    p["repo"] = _mtl_repo(p.get("repo", ""))
     # The corpora are a pinned catalog model downloaded by the app; never fetch them here.
     nltk_dir = p.get("nltk_dir")
     if nltk_dir:

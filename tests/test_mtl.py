@@ -165,3 +165,17 @@ def test_singing_model_unc_path_uses_the_local_fallback(monkeypatch):
     assert [c["wsl"] for c in calls] == [None]
     assert (out[0][0].start_ms, out[0][0].end_ms) == (1000, 1400)
 
+
+
+def test_mtl_worker_uses_the_bundled_code_when_the_configured_folder_is_missing(tmp_path):
+    """A WSL environment built by the setup assistant has the lyricloom package (with the vendored
+    LyricsAlignment-MTL code) but no separate /opt/lyricloom/mtl folder; the worker must still find
+    wrapper.py instead of failing back to the CPU."""
+    from lyricloom.workers import align_mtl as worker
+
+    vendored = Path(worker._mtl_repo(str(tmp_path / "missing")))
+    assert (vendored / "wrapper.py").is_file() and vendored.name == "mtl"
+    configured = tmp_path / "mtl"
+    configured.mkdir()
+    (configured / "wrapper.py").write_text("# user copy\n", encoding="utf-8")
+    assert worker._mtl_repo(str(configured)) == str(configured)
