@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 from pathlib import Path
 
 from .. import config
@@ -41,7 +42,8 @@ def map_words(seg_texts: list[list[str]], words: list[list]) -> list[list[Segmen
     return out
 
 
-def align_lines_mtl(vocals: Path, seg_texts: list[list[str]]) -> list[list[Segment | None]]:
+def align_lines_mtl(vocals: Path, seg_texts: list[list[str]],
+                    cancel: threading.Event | None = None) -> list[list[Segment | None]]:
     lines = [" ".join(k for k in map(word_key, line) if k) for line in seg_texts]
     payload = {"wav": str(vocals), "lines": lines, "repo": str(config.MTL_REPO),
                "checkpoint_dir": str(config.MTL_CHECKPOINT.parent.parent)}
@@ -50,9 +52,9 @@ def align_lines_mtl(vocals: Path, seg_texts: list[list[str]]) -> list[list[Segme
                   "repo": config.MTL_WSL_REPO, "checkpoint_dir": config.MTL_WSL_CHECKPOINT}
         try:
             res = run_worker("lyricloom.workers.align_mtl", on_wsl, python=config.ALIGN_WSL_PYTHON,
-                             wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.MTL_WSL_ENV)
+                             wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.MTL_WSL_ENV, cancel=cancel)
             return map_words(seg_texts, res["words"])
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             log.warning("singing model in WSL failed, using .venv-mtl on the CPU: %s", str(e)[-300:])
-    res = run_worker("lyricloom.workers.align_mtl", payload, python=str(config.MTL_PYTHON))
+    res = run_worker("lyricloom.workers.align_mtl", payload, python=str(config.MTL_PYTHON), cancel=cancel)
     return map_words(seg_texts, res["words"])

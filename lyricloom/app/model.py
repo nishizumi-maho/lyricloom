@@ -25,7 +25,7 @@ class TrackRow:
     path: Path
     artist: str
     title: str
-    status: str            # pending | done | review | other | failed | processing
+    status: str            # pending | done | review | other | failed | processing | cancelled
     source: str = ""
     conf: float = 0.0
     review_lines: list[int] = field(default_factory=list)
@@ -115,7 +115,11 @@ def read_status(audio: Path) -> TrackRow:
         return row
     source, _, conf = meta.get("#source", "").partition(" conf:")
     row.source = source
-    row.conf = float(conf) if conf else 0.0
+    try:
+        row.conf = float(conf) if conf else 0.0
+    except ValueError:
+        row.conf = 0.0
+        row.error = f"invalid confidence in {lrc.name}: {conf!r}"
     row.review_lines = [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
     row.status = "review" if row.review_lines or source == "transcription" else "done"
     return row
@@ -126,6 +130,10 @@ def scan(root: Path) -> list[TrackRow]:
 
 
 # ---- scan cache: one JSON per library; a track is re-read only when its audio or .lrc changed ----
+# The schema version lets an old or hand-edited cache be discarded instead of crashing every scan.
+
+SCAN_SCHEMA = 2
+
 
 def _cache_file(root: Path) -> Path:
     key = hashlib.sha1(str(Path(root).resolve()).lower().encode("utf-8")).hexdigest()[:12]
@@ -144,41 +152,111 @@ def _row_to_json(row: TrackRow, stamp: list) -> dict:
     return d
 
 
+def _discard_cache(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _read_cache(root: Path) -> dict[str, dict]:
+    """The cached rows, or {} when the file is missing, corrupt or from an older schema."""
+    path = _cache_file(root)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        _discard_cache(path)   # a corrupt cache must not be read again
+        return {}
+    if not isinstance(data, dict) or data.get("schema") != SCAN_SCHEMA:
+        _discard_cache(path)
+        return {}
+    rows = data.get("rows")
+    return rows if isinstance(rows, dict) else {}
+
+
 def _row_from_json(d: dict) -> TrackRow:
+    """Validates one cached row. Raises ValueError/TypeError so the caller can re-read the file."""
+    if not isinstance(d, dict):
+        raise ValueError("cached row is not an object")
     d = dict(d)
     d.pop("stamp", None)
-    d["path"] = Path(d["path"])
-    return TrackRow(**d)
+    path = d.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError("cached row has no path")
+    d["path"] = Path(path)
+    for key in ("artist", "title", "status"):
+        if not isinstance(d.get(key), str):
+            raise ValueError(f"cached row has no {key}")
+    d["source"] = d.get("source") if isinstance(d.get("source"), str) else ""
+    try:
+        d["conf"] = float(d.get("conf", 0.0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cached row has an invalid confidence") from exc
+    review = d.get("review_lines", [])
+    if not isinstance(review, list) or not all(isinstance(i, int) for i in review):
+        raise ValueError("cached row has invalid review lines")
+    d["review_lines"] = review
+    d["error"] = d.get("error") if isinstance(d.get("error"), str) else ""
+    return TrackRow(path=d["path"], artist=d["artist"], title=d["title"], status=d["status"],
+                    source=d["source"], conf=d["conf"], review_lines=d["review_lines"], error=d["error"])
+
+
+def _unreadable_row(audio: Path, exc: Exception) -> TrackRow:
+    folder = audio.parent.parent.name if audio.parent.parent != audio.parent else ""
+    return TrackRow(audio, folder, audio.stem, "other", error=f"could not read this file: {type(exc).__name__}: {exc}")
 
 
 def load_cached_rows(root: Path) -> list[TrackRow]:
-    """Rows from the last scan of this library, without touching the files (instant on startup)."""
-    try:
-        data = json.loads(_cache_file(root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    return [_row_from_json(d) for d in data.values()]
+    """Rows from the last scan of this library, without touching the files (instant on startup).
+    A corrupt cache or one bad row is ignored; the next scan rebuilds the cache."""
+    rows = []
+    for data in _read_cache(root).values():
+        try:
+            rows.append(_row_from_json(data))
+        except (TypeError, ValueError, KeyError):
+            continue
+    return rows
 
 
-def scan_cached(root: Path) -> list[TrackRow]:
-    """Full listing, re-reading only tracks whose audio or .lrc changed since the last scan."""
-    try:
-        old = json.loads(_cache_file(root).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        old = {}
+def scan_cached(root: Path, stats: dict | None = None) -> list[TrackRow]:
+    """Full listing, re-reading only tracks whose audio or .lrc changed since the last scan.
+
+    One unreadable file (a hand-edited .lrc, a file deleted mid-scan) must not kill Refresh, so
+    each file is handled on its own; `stats["unreadable"]` counts the failures for the UI."""
+    stats = stats if stats is not None else {}
+    stats["unreadable"] = 0
+    old = _read_cache(root)
     new, rows = {}, []
     for audio in find_audio(root):
         try:
             stamp = _stamp(audio)
-        except OSError:
+        except OSError as exc:
+            stats["unreadable"] += 1
+            rows.append(_unreadable_row(audio, exc))
             continue
         cached = old.get(str(audio))
-        row = _row_from_json(cached) if cached and cached.get("stamp") == stamp else read_status(audio)
+        row = None
+        if isinstance(cached, dict) and cached.get("stamp") == stamp:
+            try:
+                row = _row_from_json(cached)
+            except (TypeError, ValueError, KeyError):
+                row = None
+        if row is None:
+            try:
+                row = read_status(audio)
+            except Exception as exc:  # noqa: BLE001 - one bad file must not stop the scan
+                stats["unreadable"] += 1
+                row = _unreadable_row(audio, exc)
         new[str(audio)] = _row_to_json(row, stamp)
         rows.append(row)
     path = _cache_file(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(new, ensure_ascii=False), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": SCAN_SCHEMA, "rows": new}, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass   # the next scan rebuilds it; the listing itself is still valid
     return rows
 
 

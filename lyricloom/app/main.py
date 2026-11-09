@@ -4,7 +4,9 @@ from __future__ import annotations
 import os
 import re
 import sys
+import threading
 import time
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -24,12 +26,13 @@ from .. import VERSION
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
-from .dialogs import ModelsDialog, SettingsDialog, check_for_updates
+from .dialogs import (ModelsDialog, SettingsDialog, UpdateController, check_for_updates, validate_folder)
 from .karaoke import KaraokeWindow
 from .model import (STAGE_LABELS, TrackRow, apply_edits, delete_line, delete_word, insert_line, insert_word,
                     load_cached_rows, merge_with_previous, read_status, scan_cached, track_progress)
 
 FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done"]
+STATUS_LABELS = {"cancelled": "Stopped"}
 REVIEW_TINT = QColor(255, 196, 0, 70)
 _TS = re.compile(r"^(\d+):(\d{1,2})(?:[.:](\d{1,3}))?$")
 
@@ -44,6 +47,7 @@ def parse_ts(text: str) -> int | None:
 class FuncWorker(QObject):
     """Runs one function off the UI thread."""
     done = Signal(object)
+    failed = Signal(str)
 
     def __init__(self, fn):
         super().__init__()
@@ -51,43 +55,99 @@ class FuncWorker(QObject):
 
     @Slot()
     def run(self):
-        self.done.emit(self._fn())
+        try:
+            self.done.emit(self._fn())
+        except Exception as exc:  # noqa: BLE001 - reported in the window, never wedges the thread
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
 class QueueWorker(QObject):
-    """Processes tracks one at a time; stop() takes effect after the current track."""
+    """Processes tracks one at a time.
+
+    stop() stops after the current track; stop(now=True) sets the cancellation event that reaches
+    the running worker process. pause() stops before the next track (a subprocess cannot pause).
+    """
     track_started = Signal(str)
     stage = Signal(str)
     track_done = Signal(object)
     device = Signal(object)   # the finished TrackResult: where the vocals were separated
+    queue_error = Signal(str)
     finished = Signal()
 
     def __init__(self, paths: list[Path], force: bool, redo: bool = False):
         super().__init__()
-        self._paths, self._force, self._stop, self._redo = paths, force, False, redo
+        self._paths, self._force, self._redo = paths, force, redo
+        self._stop_after = False
+        self._cancel = threading.Event()
+        self._pause = threading.Event()
 
-    def stop(self):
-        self._stop = True
+    def stop(self, now: bool = False):
+        if now:
+            self._cancel.set()
+        else:
+            self._stop_after = True
+
+    def pause(self):
+        self._pause.set()
+
+    def resume(self):
+        self._pause.clear()
+
+    def is_paused(self) -> bool:
+        return self._pause.is_set()
 
     @Slot()
     def run(self):
+        try:
+            self._run_tracks()
+        except Exception as exc:  # noqa: BLE001 - the window must always get `finished`
+            self.queue_error.emit(f"{type(exc).__name__}: {exc}")
+        finally:
+            self.finished.emit()
+
+    def _run_tracks(self):
         for p in self._paths:
-            if self._stop:
+            while self._pause.is_set() and not self._cancel.is_set() and not self._stop_after:
+                time.sleep(0.05)
+            if self._cancel.is_set() or self._stop_after:
                 break
             self.track_started.emit(str(p))
-            if self._redo:
-                # word timing deleted and aligned again; lyrics, separation and transcription come
-                # from the cache when the song was done on this machine
-                runner.forget_sync(p)
-                res = runner.process(p, force=True, only_stage="align", on_stage=self.stage.emit)
-            else:
-                res = runner.process(p, force=self._force, on_stage=self.stage.emit)
-            row = read_status(p)
-            if res.status == "failed":
-                row.status, row.error = "failed", res.error
-            self.device.emit(res)
-            self.track_done.emit(row)
-        self.finished.emit()
+            moved: dict[Path, Path] = {}
+            try:
+                if self._redo:
+                    # word timing moved aside and aligned again; lyrics, separation and
+                    # transcription come from the cache when the song was done on this machine
+                    moved = runner.forget_sync(p)
+                    res = runner.process(p, force=True, only_stage="align",
+                                         on_stage=self.stage.emit, cancel=self._cancel)
+                    if res.status in ("failed", "cancelled"):
+                        runner.restore_sync(moved)
+                    else:
+                        runner.drop_sync_backup(moved)
+                else:
+                    res = runner.process(p, force=self._force, on_stage=self.stage.emit,
+                                         cancel=self._cancel)
+                row = read_status(p)
+                if res.status == "failed":
+                    row.status, row.error = "failed", res.error
+                elif res.status == "cancelled":
+                    row.status, row.error = "cancelled", res.error or "Stopped by the user"
+                self.device.emit(res)
+                self.track_done.emit(row)
+                if res.status == "cancelled":
+                    break
+            except Exception as exc:  # noqa: BLE001 - one bad track must not stop the queue
+                if moved:
+                    runner.restore_sync(moved)
+                message = f"{p.name}: {type(exc).__name__}: {exc}"
+                runner._log(p, "queue error\n" + traceback.format_exc())
+                self.queue_error.emit(message)
+                try:
+                    row = read_status(p)
+                except Exception:
+                    row = TrackRow(p, "", p.stem, "failed")
+                row.status, row.error = "failed", message
+                self.track_done.emit(row)
 
 
 class MainWindow(QMainWindow):
@@ -100,13 +160,14 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self._threads: list[tuple[QThread, QObject]] = []
         self._queue: QueueWorker | None = None
+        self._queue_error = ""
+        self._quit_after_queue = False
+        self._pending_installer: Path | None = None
+        self._cancel_background = threading.Event()
         self._stop_at: int | None = None
         self._shown_line = -1
         self.karaoke_window: KaraokeWindow | None = None
-        self._update_thread = None
-        self._update_worker = None
-        self._update_dl_thread = None
-        self._update_dl_worker = None
+        self._update_controller = UpdateController(self)
         self.setWindowTitle(config.APP_NAME)
         self.resize(1400, 850)
         self._build()
@@ -235,9 +296,15 @@ class MainWindow(QMainWindow):
         self.btn_pending = QPushButton("Process pending")
         self.btn_redo = QPushButton("Redo selected")
         self.btn_redo.setToolTip("Delete the word timing of the selected songs and align them again")
-        self.btn_stop = QPushButton("Stop", enabled=False)
+        self.btn_stop = QPushButton("Stop after this song", enabled=False)
+        self.btn_stop.setToolTip("Let the current song finish, then stop the queue")
+        self.btn_stop_now = QPushButton("Stop now", enabled=False)
+        self.btn_stop_now.setToolTip("Kill the running worker and stop the queue immediately")
+        self.btn_pause = QPushButton("Pause after this song", enabled=False)
+        self.btn_pause.setToolTip("Stop before the next song; the current song finishes")
         self.force = QCheckBox("Force")
-        for w in (self.btn_refresh, self.btn_sel, self.btn_pending, self.btn_redo, self.btn_stop, self.force):
+        for w in (self.btn_refresh, self.btn_sel, self.btn_pending, self.btn_redo,
+                  self.btn_stop, self.btn_stop_now, self.btn_pause, self.force):
             btns.addWidget(w)
         lv.addLayout(btns)
 
@@ -323,9 +390,12 @@ class MainWindow(QMainWindow):
         self._prog = None
         self.prog_timer = QTimer(self, interval=250, timeout=self._update_progress)
         self.btn_sel.clicked.connect(lambda: self.process([r.path for r in self._selected_rows()]))
-        self.btn_pending.clicked.connect(lambda: self.process([r.path for r in self.rows if r.status == "pending"]))
+        self.btn_pending.clicked.connect(
+            lambda: self.process([r.path for r in self.rows if r.status in ("pending", "cancelled")]))
         self.btn_redo.clicked.connect(self.redo_selected)
         self.btn_stop.clicked.connect(self._stop_queue)
+        self.btn_stop_now.clicked.connect(self._stop_now)
+        self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_play.clicked.connect(self.toggle_play)
         self.seek.sliderMoved.connect(lambda v: self.player.setPosition(v))
         self.vocals.toggled.connect(self._set_source)
@@ -344,7 +414,7 @@ class MainWindow(QMainWindow):
         self.btn_save.clicked.connect(self.save)
 
     # ---------- threads ----------
-    def _run(self, worker: QObject, on_done=None):
+    def _run(self, worker: QObject, on_done=None, on_failed=None):
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -353,6 +423,10 @@ class MainWindow(QMainWindow):
             worker.done.connect(thread.quit)
         else:
             worker.finished.connect(thread.quit)
+        if hasattr(worker, "failed"):
+            if on_failed is not None:
+                worker.failed.connect(on_failed)
+            worker.failed.connect(thread.quit)
         thread.finished.connect(lambda: self._threads.remove((thread, worker)) if (thread, worker) in self._threads else None)
         self._threads.append((thread, worker))
         thread.start()
@@ -367,15 +441,27 @@ class MainWindow(QMainWindow):
             self.rows = load_cached_rows(root)
             self._fill_table()
         self.statusBar().showMessage(f"Checking {root} for changes …")
-        self._run(FuncWorker(lambda: (root, scan_cached(root))), self._scanned)
+
+        def scan():
+            stats: dict = {}
+            return root, scan_cached(root, stats), stats
+
+        self._run(FuncWorker(scan), self._scanned, self._scan_failed)
 
     def _scanned(self, result):
-        root, rows = result
+        root, rows, stats = result
         if root != self.root:   # the library was switched while this scan ran
             return
         self.rows = rows
         self._fill_table()
-        self.statusBar().showMessage(f"{len(rows)} track" + ("" if len(rows) == 1 else "s"), 5000)
+        message = f"{len(rows)} track" + ("" if len(rows) == 1 else "s")
+        unreadable = int(stats.get("unreadable", 0))
+        if unreadable:
+            message += f" · {unreadable} file(s) could not be read (see the row tooltips)"
+        self.statusBar().showMessage(message, 8000 if unreadable else 5000)
+
+    def _scan_failed(self, message: str):
+        self.statusBar().showMessage("Scan failed: " + message + " — the previous list was kept", 12000)
 
     def set_api_key(self):
         state = "a key is set" if config.ASSEMBLYAI_ENABLED else "no key set: AssemblyAI is off"
@@ -384,22 +470,44 @@ class MainWindow(QMainWindow):
             QLineEdit.Password)
         if not ok:
             return
-        config.set_assemblyai_key(key)
+        try:
+            config.set_assemblyai_key(key)
+        except OSError as exc:
+            self._show_io_error("Save the AssemblyAI key", config.ASSEMBLYAI_KEY_FILE, exc)
+            return
         self.statusBar().showMessage("AssemblyAI key saved" if key.strip() else "AssemblyAI key removed: off", 5000)
 
     def set_script(self, script: str):
-        config.set_japanese_script(script)
-        n = apply_script_preference(self.root)
+        try:
+            config.set_japanese_script(script)
+            n = apply_script_preference(self.root)
+        except OSError as exc:
+            self._show_io_error("Update the Japanese script", self.root, exc)
+            return
         self.statusBar().showMessage(f"Japanese lyrics now in {script}: {n} song(s) updated", 6000)
 
     def choose_library(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose the music library", str(self.root))
         if not folder or Path(folder) == self.root or not self._confirm_discard():
             return
-        self.root = Path(folder)
-        config.set_library_root(self.root)   # the command line uses the same library
+        path, error = validate_folder("Music library", folder, must_exist=True)
+        if error:
+            QMessageBox.warning(self, "Music library", error)
+            return
+        self.root = path
+        try:
+            config.set_library_root(self.root)   # the command line uses the same library
+        except OSError as exc:
+            self._show_io_error("Save the library setting", config.SETTINGS_FILE, exc)
+            return
         self.rows = []
         self.refresh()
+
+    def _show_io_error(self, action: str, path: Path, exc: OSError) -> None:
+        reason = exc.strerror or str(exc)
+        message = f"{action} failed:\n{path}\n\n{reason}"
+        self.statusBar().showMessage(f"{action} failed: {reason}", 12000)
+        QMessageBox.critical(self, action, message)
 
     def _visible_rows(self) -> list[TrackRow]:
         f = FILTERS[self.filter.currentIndex()].lower()
@@ -410,7 +518,8 @@ class MainWindow(QMainWindow):
         rows = self._visible_rows()
         self.table.setRowCount(len(rows))
         for i, r in enumerate(rows):
-            for j, v in enumerate([r.artist, r.title, r.status, r.source, f"{r.conf:.2f}" if r.source else ""]):
+            for j, v in enumerate([r.artist, r.title, STATUS_LABELS.get(r.status, r.status),
+                                   r.source, f"{r.conf:.2f}" if r.source else ""]):
                 item = QTableWidgetItem(v)
                 item.setData(Qt.UserRole, str(r.path))
                 if r.status == "review":
@@ -440,9 +549,71 @@ class MainWindow(QMainWindow):
         if answer == QMessageBox.Yes:
             self.process(paths, redo=True)
 
+    def _ask_open_track(self) -> str:
+        box = QMessageBox(self)
+        box.setWindowTitle("Unsaved edits")
+        box.setIcon(QMessageBox.Warning)
+        box.setText(f"{self.audio.stem} is open with unsaved edits and is in this queue.")
+        box.setInformativeText("Saving first keeps your edits; discarding lets the queue replace them. "
+                               "Skipping leaves the track out of this run.")
+        save = box.addButton("Save", QMessageBox.AcceptRole)
+        discard = box.addButton("Discard edits", QMessageBox.DestructiveRole)
+        skip = box.addButton("Skip this track", QMessageBox.ActionRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save:
+            return "save"
+        if clicked is discard:
+            return "discard"
+        if clicked is skip:
+            return "skip"
+        return "cancel"
+
+    def _confirm_open_track(self, paths: list[Path], redo: bool) -> list[Path] | None:
+        """The open track is in this queue and has unsaved edits: save, discard or skip it.
+        Returns the paths to process, or None to cancel."""
+        if not (self.dirty and self.audio is not None and self.audio in paths):
+            return paths
+        choice = self._ask_open_track()
+        if choice == "save":
+            if not self.save():
+                return None
+        elif choice == "discard":
+            self._set_dirty(False)
+        elif choice == "skip":
+            paths = [p for p in paths if p != self.audio]
+            if not paths:
+                self.statusBar().showMessage("No tracks left to process", 5000)
+                return None
+        else:
+            return None
+        if redo and self.audio in paths:
+            self.statusBar().showMessage("Redo will replace this track's word timing", 5000)
+        return paths
+
+    def _validate_folders(self) -> bool:
+        checks = (
+            ("Music library", str(self.root), True, False),
+            ("Vocals cache", str(config.vocals_root()), False, True),
+            ("Work cache", str(config.WORK_ROOT), False, True),
+        )
+        for field, value, must_exist, create in checks:
+            _path, error = validate_folder(field, value, must_exist=must_exist, create=create)
+            if error:
+                QMessageBox.warning(self, field, error)
+                return False
+        return True
+
     def process(self, paths: list[Path], redo: bool = False):
         if not paths or self._queue is not None:
             return
+        paths = self._confirm_open_track(paths, redo)
+        if not paths:
+            return
+        if not self._validate_folders():
+            return
+        self._queue_error = ""
         self._queue = QueueWorker(paths, self.force.isChecked(), redo)
         self._prog = {"done": 0, "total": len(paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
@@ -451,8 +622,12 @@ class MainWindow(QMainWindow):
         q.stage.connect(self._stage_changed)
         q.device.connect(self._device_changed)
         q.track_done.connect(self._track_finished)
+        q.queue_error.connect(self._queue_error_received)
         q.finished.connect(self._queue_finished)
         self.btn_stop.setEnabled(True)
+        self.btn_stop_now.setEnabled(True)
+        self.btn_pause.setEnabled(True)
+        self.btn_pause.setText("Pause after this song")
         self.progress.setValue(0)
         self.progress.show()
         self.prog_timer.start()
@@ -517,13 +692,50 @@ class MainWindow(QMainWindow):
             self._queue.stop()
             self.statusBar().showMessage("Stopping after the current track …")
 
+    def _stop_now(self):
+        if self._queue:
+            self._queue.stop(now=True)
+            self.statusBar().showMessage("Stopping now …")
+
+    def _toggle_pause(self):
+        if not self._queue:
+            return
+        if self._queue.is_paused():
+            self._queue.resume()
+            self.btn_pause.setText("Pause after this song")
+            self.statusBar().showMessage("Queue resumed", 5000)
+        else:
+            self._queue.pause()
+            self.btn_pause.setText("Resume")
+            self.statusBar().showMessage("Pausing after the current track …")
+
+    def _queue_error_received(self, message: str):
+        self._queue_error = message
+        self.statusBar().showMessage("Queue error: " + message, 12000)
+
     def _queue_finished(self):
+        cancelled = bool(self._prog and self._prog.get("done", 0) < self._prog.get("total", 0))
         self._queue = None
         self._prog = None
         self.prog_timer.stop()
         self.progress.hide()
         self.btn_stop.setEnabled(False)
-        self.statusBar().showMessage("Queue finished", 5000)
+        self.btn_stop_now.setEnabled(False)
+        self.btn_pause.setEnabled(False)
+        self.btn_pause.setText("Pause after this song")
+        if self._queue_error:
+            self.statusBar().showMessage("Queue finished with an error: " + self._queue_error, 12000)
+            QMessageBox.warning(self, "Queue error", self._queue_error)
+            self._queue_error = ""
+        elif cancelled:
+            self.statusBar().showMessage("Queue stopped", 6000)
+        else:
+            self.statusBar().showMessage("Queue finished", 5000)
+        if self._pending_installer is not None:
+            QTimer.singleShot(0, self._install_pending_update)
+        elif self._quit_after_queue:
+            self._quit_after_queue = False
+            QTimer.singleShot(0, self.close)
 
     # ---------- track / player ----------
     def _on_track_selected(self):
@@ -767,10 +979,14 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             return
         audio = self.audio
+        self._cancel_background.clear()
         self.statusBar().showMessage("Aligning the pasted lyrics …")
-        self._run(FuncWorker(lambda: runner.realign(audio, text)), self._realigned)
+        self._run(FuncWorker(lambda: runner.realign(audio, text, cancel=self._cancel_background)), self._realigned)
 
     def _realigned(self, res):
+        if res.status == "cancelled":
+            self.statusBar().showMessage("Realign stopped", 5000)
+            return
         if res.status == "failed":
             QMessageBox.warning(self, "Realign failed", res.error)
             return
@@ -779,13 +995,22 @@ class MainWindow(QMainWindow):
             self._reload_lrc()
         self.statusBar().showMessage(f"Aligned: {res.status}, confidence {res.conf:.2f}", 6000)
 
-    def save(self):
+    def save(self) -> bool:
         if not (self.audio and self.doc and self.dirty):
-            return
-        write_lyrics(self.audio, self.doc)
+            return True
+        try:
+            write_lyrics(self.audio, self.doc)
+        except OSError as exc:
+            # Keep dirty so the edits are not lost; the window stays open.
+            self._show_io_error("Save lyrics", self.audio.with_suffix(".lrc"), exc)
+            return False
         self._set_dirty(False)
-        self._update_row(read_status(self.audio))
+        try:
+            self._update_row(read_status(self.audio))
+        except OSError as exc:
+            self._show_io_error("Read the saved lyrics", self.audio.with_suffix(".lrc"), exc)
         self.statusBar().showMessage("Saved (previous .lrc kept as .bak)", 5000)
+        return True
 
     def _set_dirty(self, dirty: bool):
         self.dirty = dirty
@@ -797,22 +1022,95 @@ class MainWindow(QMainWindow):
         r = QMessageBox.question(self, "Unsaved edits", "Save the edits to this track first?",
                                  QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel)
         if r == QMessageBox.Save:
-            self.save()
+            return self.save()      # a failed save keeps the window open
         return r != QMessageBox.Cancel
+
+    # ---------- shutdown and updates ----------
+    def _ask_queue_shutdown(self) -> str:
+        """One prompt for closing and for installing an update. Returns after/now/keep."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Queue running")
+        box.setIcon(QMessageBox.Question)
+        box.setText("A queue is still running.")
+        box.setInformativeText("Stop after the current song, stop the running worker now, or keep working?")
+        after = box.addButton("Stop after this song", QMessageBox.AcceptRole)
+        now = box.addButton("Stop now", QMessageBox.DestructiveRole)
+        box.addButton("Keep working", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is after:
+            return "after"
+        if box.clickedButton() is now:
+            return "now"
+        return "keep"
+
+    def prepare_update(self, path: Path) -> bool:
+        """Called in the GUI thread when an installer is ready. Uses the same shutdown path as
+        closing the window; returns True only when the app may exit and start the installer now."""
+        if self._queue is not None:
+            choice = self._ask_queue_shutdown()
+            if choice == "keep":
+                self.statusBar().showMessage("Update downloaded; quit LyricLoom when the queue is done", 12000)
+                return False
+            self._cancel_background.set()
+            self._pending_installer = path
+            if choice == "now":
+                self._queue.stop(now=True)
+            else:
+                self._queue.stop()
+            self.statusBar().showMessage("The update will install when the queue stops …", 12000)
+            return False
+        return self._confirm_discard()
+
+    def _install_pending_update(self):
+        path, self._pending_installer = self._pending_installer, None
+        if path is None or not self._confirm_discard():
+            return
+        try:
+            from ..updater import launch_installer
+
+            launch_installer(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Update", "Could not start the installer:\n" + str(exc))
+            return
+        self.close()
+
+    def _stop_threads(self):
+        self._cancel_background.set()
+        self._update_controller.shutdown()
+        for thread, _worker in list(self._threads):
+            thread.quit()
+            if not thread.wait(3000):
+                # Never terminate: a scan is read-only and a worker process is cancelled through
+                # the queue's cancellation event. run() joins whatever outlives the window.
+                pass
+
+    def finish_shutdown(self):
+        """Joins background threads after the event loop ends, so none is destroyed while running."""
+        self._update_controller.wait_for_threads()
+        for thread, _worker in list(self._threads):
+            thread.quit()
+            thread.wait()
 
     def closeEvent(self, e):
         if not self._confirm_discard():
             e.ignore()
             return
-        if self._queue:
-            self._queue.stop()
-        for thread, _ in list(self._threads):
-            thread.quit()
-            if not thread.wait(3000):
-                # A first scan of a large external library can take minutes. Do not keep the window
-                # open (or block Windows shutdown) waiting for it; the scan is read-only.
-                thread.terminate()
-                thread.wait(1000)
+        if self._queue is not None:
+            choice = self._ask_queue_shutdown()
+            if choice == "keep":
+                e.ignore()
+                return
+            self._cancel_background.set()
+            self._quit_after_queue = True
+            if choice == "now":
+                self._queue.stop(now=True)
+                self.statusBar().showMessage("Stopping now; LyricLoom will close …")
+            else:
+                self._queue.stop()
+                self.statusBar().showMessage("Stopping after the current song; LyricLoom will close …")
+            e.ignore()
+            return
+        self._stop_threads()
         super().closeEvent(e)
 
 
@@ -833,7 +1131,9 @@ def run():
         app.setWindowIcon(QIcon(str(icon)))
     w = MainWindow()
     w.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    w.finish_shutdown()
+    sys.exit(code)
 
 
 if __name__ == "__main__":

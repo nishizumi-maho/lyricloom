@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -54,7 +55,7 @@ def keep_vocals(audio: Path, vocals: Path) -> Path | None:
     return dst
 
 
-def _run_separator(audio: Path, work: Path) -> tuple[Path, str, str | None]:
+def _run_separator(audio: Path, work: Path, cancel: threading.Event | None = None) -> tuple[Path, str, str | None]:
     """Runs the separator: in WSL on the GPU when possible, else on Windows. Returns the stem it
     wrote, the device used and, after a failed WSL run, why it failed."""
     payload = {"audio": str(audio), "out_dir": str(work), "model": config.SEPARATOR_MODEL,
@@ -70,15 +71,16 @@ def _run_separator(audio: Path, work: Path) -> tuple[Path, str, str | None]:
             on_wsl["model_dir"] = wsl_path(payload["model_dir"])
         try:
             res = run_worker("lyricloom.workers.separate", on_wsl, python=config.SEPARATOR_WSL_PYTHON,
-                             wsl=config.SEPARATOR_WSL_DISTRO, wsl_env=config.SEPARATOR_WSL_ENV)
+                             wsl=config.SEPARATOR_WSL_DISTRO, wsl_env=config.SEPARATOR_WSL_ENV,
+                             cancel=cancel)
             return windows_path(res["vocals"]), "rocm", None
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             fallback = str(e)[-500:]
-    res = run_worker("lyricloom.workers.separate", payload, python=config.SEPARATOR_PYTHON)
+    res = run_worker("lyricloom.workers.separate", payload, python=config.SEPARATOR_PYTHON, cancel=cancel)
     return Path(res["vocals"]), res.get("device", config.SEPARATOR_DEVICE), fallback
 
 
-def separate(audio: Path, work: Path) -> dict:
+def separate(audio: Path, work: Path, cancel: threading.Event | None = None) -> dict:
     """Isolates the vocals of `audio` into work/vocals.wav (and a 16 kHz mono copy), reusing the
     kept vocals when there are some and keeping them otherwise."""
     work.mkdir(parents=True, exist_ok=True)
@@ -100,7 +102,7 @@ def separate(audio: Path, work: Path) -> dict:
                                    "clean_s": stats["clean_s"]}
             if stats["ok"]:
                 source = minus
-        produced, out["device"], fallback = _run_separator(source, work)
+        produced, out["device"], fallback = _run_separator(source, work, cancel)
         if fallback:
             out["fallback"] = fallback
         produced.replace(vocals)

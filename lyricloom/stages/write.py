@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 from .. import config
@@ -20,13 +21,15 @@ def _backup_path(lrc: Path) -> Path:
 
 
 def write_lrc(audio: Path, doc: LrcDoc) -> Path:
-    """Writes `<audio stem>.lrc` next to the audio. An existing .lrc is never lost: it is renamed to
-    .lrc.bak (or .lrc.bak1, .bak2, ... when older backups exist). The write is atomic."""
+    """Writes `<audio stem>.lrc` next to the audio. An existing .lrc is never lost: a copy goes to
+    .lrc.bak (or .lrc.bak1, .bak2, ... when older backups exist) and the new file replaces the old
+    one atomically. The old file is copied, not moved, so a crash between the backup and the replace
+    leaves the previous .lrc intact."""
     lrc = audio.with_suffix(".lrc")
     tmp = lrc.with_name(lrc.name + ".tmp")
     tmp.write_bytes(format_lrc(doc).encode("utf-8"))
     if lrc.exists():
-        lrc.replace(_backup_path(lrc))
+        shutil.copy2(lrc, _backup_path(lrc))
     os.replace(tmp, lrc)
     return lrc
 

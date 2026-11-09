@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 from .. import config
@@ -23,8 +24,8 @@ def _segments(blocks: list[Block], res: dict) -> list[list[Segment | None]]:
     return out
 
 
-def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[list[str]]]
-                 ) -> list[list[Segment | None]]:
+def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[list[str]]],
+                 cancel: threading.Event | None = None) -> list[list[Segment | None]]:
     """seg_tokens[k][l] = MMS token strings of each segment of line l in block k.
     Returns, per lyric line in order, one Segment (absolute ms) or None per segment.
     Runs on the GPU through ROCm in WSL when it is available, else on the CPU."""
@@ -35,8 +36,8 @@ def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[lis
         on_wsl = {**payload, "device": "cuda", "wav": wsl_path(payload["wav"])}
         try:
             res = run_worker("lyricloom.workers.align_ctc", on_wsl, python=config.ALIGN_WSL_PYTHON,
-                             wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.ALIGN_WSL_ENV)
+                             wsl=config.ALIGN_WSL_DISTRO, wsl_env=config.ALIGN_WSL_ENV, cancel=cancel)
             return _segments(blocks, res)
         except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
             log.warning("alignment in WSL failed, aligning on the CPU instead: %s", str(e)[-300:])
-    return _segments(blocks, run_worker("lyricloom.workers.align_ctc", payload))
+    return _segments(blocks, run_worker("lyricloom.workers.align_ctc", payload, cancel=cancel))
