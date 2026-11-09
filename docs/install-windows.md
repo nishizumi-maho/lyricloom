@@ -113,11 +113,12 @@ One track at a time is processed on purpose. That keeps memory and VRAM use pred
 1. Select the track to load it in the player.
 2. Low-confidence lines are tinted orange. The `[#review:]` tag in the `.lrc` lists their zero-based line numbers.
 3. Fix a word by selecting it and using the nudge buttons. Hold **Shift** to move the word's end instead of its start.
-4. Use **Add word…**, **Delete word**, **Insert line…**, **Merge with line above** or **Delete line** to repair the structure.
-5. **Paste lyrics…** replaces the whole lyric and aligns it again. The song must have been processed once, so the cached vocal stem and transcript exist.
-6. Click **Save**. The previous main `.lrc` is kept as a `.bak` file.
+4. Use **Add word…**, **Delete word**, **Insert line…**, **Merge with line above** or **Delete line** to repair the structure. Destructive edits ask first; **Ctrl+Z** undoes any edit and **Ctrl+Y** (or **Ctrl+Shift+Z**) redoes it.
+5. **Accept line** clears that line's `#review` flag and saves; **Accept all** clears every flag and saves. **F3** and **Shift+F3** jump between flagged lines.
+6. **Paste lyrics…** replaces the whole lyric and aligns it again. The song must have been processed once, so the cached vocal stem and transcript exist.
+7. Click **Save** (or press **Ctrl+S**). The previous main `.lrc` is kept as a `.bak` file.
 
-Editing does not automatically clear the `#review` tag. The track stays in the **Review** filter until the tag is removed or the song is processed again. This is deliberate: a human edit is not proof that every other line is correct.
+Editing does not clear `#review` automatically. The track stays in the **Review** filter until you accept the flagged lines (or process the song again). This is deliberate: a human edit is not proof that every other line is correct. Accepting every flag writes an empty `[#review:]` tag, which is how a transcription-only track leaves the Review filter.
 
 ## Playback
 
@@ -125,19 +126,22 @@ The built-in player uses the original audio and the cached isolated vocal.
 
 Main window:
 
-- **Play** starts or pauses.
-- The seek bar moves through the song.
+- **Play** (or **Space**) starts or pauses.
+- The seek bar moves through the song; click it to jump to that point or drag and release to seek.
 - Click a line to select it; double-click to seek to that line.
 - **Play line** plays from the selected line and stops at its end.
-- **Vocals only** switches to the cached `vocals.wav` when it exists; otherwise it falls back to the full mix.
+- **Vocals only** switches to the cached `vocals.wav` when it exists, or to the kept `*.vocals.flac` stem when the scratch cache was cleared. The checkbox is disabled when neither exists.
+- The window follows the Windows light/dark setting, and every control is reachable by keyboard (menus list their shortcuts).
 
-**Karaoke** button:
+**Karaoke** button (**Ctrl+K**):
 
-- Opens a full-screen starry karaoke window for the selected track.
+- Opens a starry karaoke window for the selected track, starting at the current playback position.
 - **Space** plays/pauses, **←/→** seek 5 seconds, **↑/↓** change volume.
 - **F11** toggles fullscreen; **Esc** leaves fullscreen or closes the window.
+- **N** and **P** move to the next or previous track in the library list.
+- The **Script** list chooses the main `.lrc`, the Japanese text or the romaji version; the main `.lrc` follows the script chosen in Settings.
 - The current line is highlighted word by word; the next line is dimmed.
-- **Vocals only** is enabled only when the cached vocal stem exists.
+- **Vocals only** is enabled only when the cached or kept vocal stem exists.
 
 For a MusicBee-based karaoke setup, install the separate Starry Karaoke plugin. See [docs/musicbee.md](musicbee.md).
 

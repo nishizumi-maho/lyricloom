@@ -127,7 +127,12 @@ def read_status(audio: Path) -> TrackRow:
         row.error = f"invalid confidence in {lrc.name}: {conf!r}"
     row.review_lines = [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
     row.notes = [part.strip() for part in meta.get("#warning", "").split(";") if part.strip()]
-    row.status = "review" if row.review_lines or source == "transcription" or row.notes else "done"
+    # A transcription-only lyric, or one the engine flagged with a warning, is an implicit review
+    # until the user accepts it. "Clear review flags" writes an empty [#review:] tag, which records
+    # that the whole lyric was accepted; the warnings stay visible as notes.
+    accepted = "#review" in meta
+    implicit_review = (source == "transcription" or bool(row.notes)) and not accepted
+    row.status = "review" if row.review_lines or implicit_review else "done"
     return row
 
 
@@ -296,12 +301,16 @@ def store_result(root: Path, row: TrackRow) -> None:
 
 
 def delete_line(doc: LrcDoc, index: int) -> LrcDoc:
-    """Removes one line; review markers after it move up by one."""
+    """Removes one line; review markers after it move up by one. An explicitly empty
+    `[#review:]` (the user accepted the whole lyric) is kept."""
     meta = dict(doc.meta)
+    accepted = meta.get("#review") == ""
     review = [int(x) for x in meta.pop("#review", "").split(",") if x.strip().isdigit()]
     review = [i - 1 if i > index else i for i in review if i != index]
     if review:
         meta["#review"] = ",".join(map(str, review))
+    elif accepted:
+        meta["#review"] = ""
     return LrcDoc(meta, [l for i, l in enumerate(doc.lines) if i != index])
 
 
@@ -332,11 +341,43 @@ def _review(meta: dict) -> list[int]:
     return [int(x) for x in meta.get("#review", "").split(",") if x.strip().isdigit()]
 
 
+def review_lines(doc: LrcDoc | None) -> list[int]:
+    """The zero-based line indices still flagged for review."""
+    return _review(doc.meta) if doc is not None else []
+
+
 def _with_review(meta: dict, review: list[int]) -> dict:
+    accepted = meta.get("#review") == ""   # an explicitly empty tag means "reviewed, no flags"
     meta = {k: v for k, v in meta.items() if k != "#review"}
     if review:
         meta["#review"] = ",".join(map(str, sorted(review)))
+    elif accepted:
+        meta["#review"] = ""
     return meta
+
+
+def mark_line_reviewed(doc: LrcDoc, index: int) -> LrcDoc:
+    """Clears one line's review flag. Accepting the last flagged line records an empty tag, so
+    the track can leave the Review filter without losing the fact that a human accepted it."""
+    review = _review(doc.meta)
+    if index not in review:
+        return doc
+    review.remove(index)
+    meta = _with_review(doc.meta, review)
+    if not review:
+        meta["#review"] = ""
+    return LrcDoc(meta, list(doc.lines))
+
+
+def clear_review_flags(doc: LrcDoc) -> LrcDoc:
+    """Accepts every line: removes the flags and records the decision with an empty tag. The empty
+    tag is what lets a transcription-only lyric leave the Review filter."""
+    if doc.meta.get("#review") == "":
+        return doc
+    source = doc.meta.get("#source", "")
+    if "#review" not in doc.meta and not source.startswith("transcription"):
+        return doc   # already accepted/done; do not add a pointless tag
+    return LrcDoc(_with_review({**doc.meta, "#review": ""}, []), list(doc.lines))
 
 
 def insert_word(doc: LrcDoc, line: int, after: int, text: str, total_ms: int) -> LrcDoc:

@@ -16,31 +16,34 @@ from pathlib import Path
 import mutagen
 
 from PySide6.QtCore import QByteArray, QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence
+from PySide6.QtGui import (QAction, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence,
+                           QUndoCommand, QUndoStack)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem,
-                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSlider, QSplitter,
-                               QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSplitter,
+                               QSystemTrayIcon, QTableView, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import cache, config, runner, runtime
 from .. import VERSION, updater
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
+from . import theme
 from .details import TrackDetailsDialog, details_text
 from .diagnostics import DiagnosticsDialog, diagnostics_text, open_local_folder, setup_app_logging
 from .dialogs import (ModelsDialog, SettingsDialog, UpdateController, check_for_updates, validate_folder)
 from .ipc import Server as IpcServer
 from .ipc import send as ipc_send
 from .karaoke import KaraokeWindow
-from .model import (STAGE_LABELS, TrackRow, apply_edits, delete_line, delete_word, insert_line, insert_word,
-                    load_cached_rows, merge_with_previous, read_status, scan_cached, store_result, track_progress)
+from .library import FILTERS, REVIEW_TINT, TrackFilterProxyModel, TrackTableModel
+from .media import default_script_path, script_candidates, vocal_source
+from .model import (STAGE_LABELS, TrackRow, apply_edits, clear_review_flags, delete_line, delete_word,
+                    insert_line, insert_word, load_cached_rows, mark_line_reviewed, merge_with_previous,
+                    read_status, review_lines, scan_cached, store_result, track_progress)
 from .paths import expand_audio_paths, validate_audio_file
+from .widgets import SeekSlider
 
-FILTERS = ["All", "Review", "Pending", "Failed", "Other", "Done"]
-STATUS_LABELS = {"cancelled": "Stopped"}
-REVIEW_TINT = QColor(255, 196, 0, 70)
 _TS = re.compile(r"^(\d+):(\d{1,2})(?:[.:](\d{1,3}))?$")
 LOG = logging.getLogger(__name__)
 
@@ -52,20 +55,27 @@ def parse_ts(text: str) -> int | None:
     return int(m.group(1)) * 60000 + int(m.group(2)) * 1000 + int((m.group(3) or "0").ljust(3, "0")[:3])
 
 
-class _SortItem(QTableWidgetItem):
-    """Table item with a numeric/lexical sort key so Confidence sorts as a number."""
+class _DocCommand(QUndoCommand):
+    """One document edit, stored as before/after snapshots.
 
-    def __init__(self, text: str, key=None):
+    `LrcDoc` is small and every edit function returns a new document, so snapshots are cheap and
+    cannot be changed by a later edit. The line/word shown after undo and redo is stored too, so
+    the list selection follows the edit instead of jumping to the top.
+    """
+
+    def __init__(self, window: "MainWindow", before: LrcDoc | None, after: LrcDoc | None, text: str,
+                 undo_line: int = -1, redo_line: int = -1, undo_word: int = -1, redo_word: int = -1):
         super().__init__(text)
-        self._key = text if key is None else key
+        self._window = window
+        self._before, self._after = before, after
+        self._undo_line, self._redo_line = undo_line, redo_line
+        self._undo_word, self._redo_word = undo_word, redo_word
 
-    def __lt__(self, other):
-        a = self._key
-        b = getattr(other, "_key", other.text())
-        try:
-            return float(a) < float(b)
-        except (TypeError, ValueError):
-            return str(a).lower() < str(b).lower()
+    def undo(self):
+        self._window._restore_doc(self._before, self._undo_line, self._undo_word)
+
+    def redo(self):
+        self._window._restore_doc(self._after, self._redo_line, self._redo_word)
 
 
 def queue_summary(results: list) -> str:
@@ -228,18 +238,28 @@ class MainWindow(QMainWindow):
         self._cancel_background = threading.Event()
         self._stop_at: int | None = None
         self._shown_line = -1
+        self._pending_seek: int | None = None
+        self._pending_play = False
+        self._last_playback_error = ""
+        self._paste_before: LrcDoc | None = None
         self.karaoke_window: KaraokeWindow | None = None
         self._update_controller = UpdateController(self)
+        self.undo_stack = QUndoStack(self)
+        app = QApplication.instance()
+        if app is not None and not getattr(app, "_lyricloom_theme_watch", False):
+            theme.apply_theme(app)
         self.setWindowTitle(config.APP_NAME)
         self.resize(1400, 850)
         self.setMinimumSize(640, 480)
-        self._build()
         self._build_menu()
+        self._build()
         self._restore_ui_state()
         self.player = QMediaPlayer(self)
         self.audio_out = QAudioOutput(self)
         self.player.setAudioOutput(self.audio_out)
         self.player.durationChanged.connect(lambda d: self.seek.setRange(0, d))
+        self.player.mediaStatusChanged.connect(self._media_status)
+        self.player.errorOccurred.connect(self._media_error)
         self.timer = QTimer(self, interval=50, timeout=self._tick)
         self.timer.start()
         self.refresh()
@@ -267,13 +287,56 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self):
         file_menu = self.menuBar().addMenu("&File")
-        act_library = QAction("Change &library…", self, triggered=self.choose_library)
-        act_settings = QAction("&Settings…", self, triggered=self.open_settings)
+        act_library = QAction("Change &library…", self, shortcut=QKeySequence.Open, triggered=self.choose_library)
+        act_save = QAction("&Save lyrics", self, shortcut=QKeySequence.Save, triggered=self.save)
+        act_refresh = QAction("&Refresh library", self, shortcut=QKeySequence.Refresh, triggered=self.refresh)
+        act_settings = QAction("&Settings…", self, shortcut=QKeySequence("Ctrl+,"), triggered=self.open_settings)
         act_quit = QAction("E&xit", self, shortcut=QKeySequence.Quit, triggered=self.close)
-        file_menu.addAction(act_library)
-        file_menu.addAction(act_settings)
+        for action in (act_library, act_save, act_refresh, act_settings):
+            file_menu.addAction(action)
         file_menu.addSeparator()
         file_menu.addAction(act_quit)
+
+        edit_menu = self.menuBar().addMenu("&Edit")
+        self.act_undo = QAction("&Undo", self, shortcut=QKeySequence.Undo, triggered=self.undo_stack.undo)
+        self.act_redo = QAction("&Redo", self, triggered=self.undo_stack.redo)
+        self.act_redo.setShortcuts([QKeySequence(QKeySequence.Redo), QKeySequence("Ctrl+Shift+Z")])
+        self.undo_stack.canUndoChanged.connect(self.act_undo.setEnabled)
+        self.undo_stack.canRedoChanged.connect(self.act_redo.setEnabled)
+        self.undo_stack.cleanChanged.connect(lambda clean: self._set_dirty(not clean))
+        self.act_undo.setEnabled(False)
+        self.act_redo.setEnabled(False)
+        self.act_accept_line = QAction("&Accept line", self, shortcut=QKeySequence("Ctrl+Return"),
+                                       triggered=self.accept_line)
+        self.act_accept_all = QAction("Clear &review flags", self,
+                                      shortcut=QKeySequence("Ctrl+Shift+Return"), triggered=self.accept_all)
+        self.act_next_review = QAction("&Next review line", self, shortcut=QKeySequence("F3"),
+                                       triggered=lambda: self.step_review(1))
+        self.act_prev_review = QAction("&Previous review line", self, shortcut=QKeySequence("Shift+F3"),
+                                       triggered=lambda: self.step_review(-1))
+        self.act_delete_line = QAction("&Delete line", self, shortcut=QKeySequence.Delete,
+                                       triggered=self.delete_current_line)
+        self.act_delete_line.setShortcutContext(Qt.WidgetWithChildrenShortcut)
+        for action in (self.act_undo, self.act_redo):
+            edit_menu.addAction(action)
+        edit_menu.addSeparator()
+        for action in (self.act_accept_line, self.act_accept_all, self.act_next_review, self.act_prev_review):
+            edit_menu.addAction(action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_delete_line)
+
+        playback_menu = self.menuBar().addMenu("&Playback")
+        self.act_play_pause = QAction("&Play/pause", self, shortcut=QKeySequence("Space"),
+                                      triggered=self.toggle_play)
+        self.act_karaoke = QAction("&Karaoke", self, shortcut=QKeySequence("Ctrl+K"),
+                                   triggered=self.open_karaoke)
+        self.act_find = QAction("&Find in library", self, shortcut=QKeySequence.Find,
+                                triggered=self._focus_search)
+        playback_menu.addAction(self.act_play_pause)
+        playback_menu.addAction(self.act_karaoke)
+        playback_menu.addSeparator()
+        playback_menu.addAction(self.act_find)
+
         help_menu = self.menuBar().addMenu("&Help")
         help_menu.addAction(QAction("&Download models…", self, triggered=self.open_models))
         help_menu.addAction(QAction("Check for &updates…", self, triggered=lambda: check_for_updates(self)))
@@ -283,6 +346,10 @@ class MainWindow(QMainWindow):
         help_menu.addAction(QAction("&Diagnostics…", self, triggered=self.show_diagnostics))
         help_menu.addSeparator()
         help_menu.addAction(QAction("&About LyricLoom", self, triggered=self.show_about))
+
+    def _focus_search(self):
+        self.search.setFocus(Qt.ShortcutFocusReason)
+        self.search.selectAll()
 
     def _first_run(self):
         if config.setting("library") or self.root != Path(config.DEFAULT_LIBRARY):
@@ -311,15 +378,49 @@ class MainWindow(QMainWindow):
             self.open_models()
 
     def open_settings(self):
+        previous_script = config.japanese_script()
         dialog = SettingsDialog(self)
-        if dialog.exec() == dialog.Accepted:
-            self.root = config.library_root()
-            self.rows = []
-            self.script.blockSignals(True)
-            self.script.setCurrentIndex(1 if config.japanese_script() == "romaji" else 0)
-            self.script.blockSignals(False)
-            self.refresh()
-            self.statusBar().showMessage("Settings saved. Restart LyricLoom to apply cache/GPU changes.", 8000)
+        if dialog.exec() != dialog.Accepted:
+            return
+        self.root = config.library_root()
+        self.rows = []
+        new_script = config.japanese_script()
+        message = "Settings saved. Restart LyricLoom to apply cache/GPU changes."
+        if new_script != previous_script:
+            try:
+                count = apply_script_preference(self.root, script=new_script, dry_run=True)
+            except OSError as exc:
+                self._show_io_error("Update the Japanese script", self.root, exc)
+                count = 0
+            if count and not self._confirm_script_rewrite(new_script, count):
+                try:
+                    config.set_japanese_script(previous_script)
+                except OSError as exc:
+                    self._show_io_error("Restore the Japanese script setting", config.SETTINGS_FILE, exc)
+                new_script = previous_script
+                message = "Settings saved. The Japanese script was left unchanged."
+            else:
+                try:
+                    n = apply_script_preference(self.root, script=new_script)
+                except OSError as exc:
+                    self._show_io_error("Update the Japanese script", self.root, exc)
+                else:
+                    message = f"Japanese lyrics now in {new_script}: {n} song(s) updated"
+        self._set_script_combo(new_script)
+        self.refresh()
+        self.statusBar().showMessage(message, 8000)
+
+    def _set_script_combo(self, script: str) -> None:
+        self.script.blockSignals(True)
+        self.script.setCurrentIndex(1 if script == "romaji" else 0)
+        self.script.blockSignals(False)
+
+    def _confirm_script_rewrite(self, script: str, count: int) -> bool:
+        answer = QMessageBox.question(
+            self, "Japanese script",
+            f"Rewrite the main .lrc of {count} Japanese song(s) to {script}?\n\n"
+            "The two script variants are kept. Each changed .lrc gets the usual .bak copy first.")
+        return answer == QMessageBox.Yes
 
     def open_models(self):
         ModelsDialog(self).exec()
@@ -387,6 +488,10 @@ class MainWindow(QMainWindow):
         self.search = QLineEdit(placeholderText="Search artist / title / status")
         top.addWidget(self.filter)
         top.addWidget(self.search)
+        self.script.setAccessibleName("Japanese lyric script")
+        self.filter.setAccessibleName("Status filter")
+        self.search.setAccessibleName("Search library")
+        self.search.setAccessibleDescription("Filters by artist, title or status")
         lv.addLayout(top)
         self.library_banner = QWidget()
         banner = QHBoxLayout(self.library_banner)
@@ -401,14 +506,20 @@ class MainWindow(QMainWindow):
         banner.addWidget(self.btn_retry_library)
         self.library_banner.hide()
         lv.addWidget(self.library_banner)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Artist", "Title", "Status", "Source", "Conf", "Notes"])
+        self.model = TrackTableModel(self.rows, self, device_text=self._device_text)
+        self.proxy = TrackFilterProxyModel(self)
+        self.proxy.setSourceModel(self.model)
+        self.table = QTableView()
+        self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._table_context_menu)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.setAccessibleName("Library tracks")
+        self.table.setAccessibleDescription("Artist, title, status, source, confidence and notes")
         lv.addWidget(self.table)
         btns = QHBoxLayout()
         self.btn_refresh = QPushButton("Refresh")
@@ -437,11 +548,14 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.track_label)
         pl = QHBoxLayout()
         self.btn_play = QPushButton("Play")
-        self.seek = QSlider(Qt.Horizontal)
+        self.seek = SeekSlider()
         self.time_label = QLabel("00:00.00")
         self.vocals = QCheckBox("Vocals only")
         self.btn_karaoke = QPushButton("Karaoke")
         self.btn_karaoke.setToolTip("Open the full-screen karaoke player for the selected track")
+        self.seek.setAccessibleName("Playback position")
+        self.seek.setToolTip("Seek: click to jump, drag to scrub")
+        self.vocals.setToolTip("Play the isolated vocals instead of the full mix when they exist")
         for w in (self.btn_play, self.seek, self.time_label, self.vocals, self.btn_karaoke):
             pl.addWidget(w)
         rv.addLayout(pl)
@@ -450,13 +564,18 @@ class MainWindow(QMainWindow):
         self.now.setWordWrap(True)
         self.now.setFont(QFont(self.font().family(), 18))
         self.now.setMinimumHeight(60)
+        self.now.setAccessibleName("Current lyric line")
         rv.addWidget(self.now)
         self.lines = QListWidget()
+        self.lines.setAccessibleName("Lyric lines")
+        self.lines.setAccessibleDescription("Select a line to edit its words")
         rv.addWidget(self.lines, 3)
         self.words = QTableWidget(0, 3)
         self.words.setHorizontalHeaderLabels(["Word", "Start", "End"])
         self.words.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.words.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.words.setAccessibleName("Word timing")
+        self.words.setAccessibleDescription("Word text, start time and end time")
         rv.addWidget(self.words, 2)
         ed = QHBoxLayout()
         self.nudges = []
@@ -468,6 +587,7 @@ class MainWindow(QMainWindow):
             self.nudges.append(b)
         self.btn_line = QPushButton("Play line")
         self.btn_delete = QPushButton("Delete line")
+        self.btn_delete.setToolTip("Delete the selected line (Ctrl+Z undoes it)")
         self.btn_paste = QPushButton("Paste lyrics…")
         self.btn_save = QPushButton("Save")
         for w in (self.btn_line, self.btn_delete, self.btn_paste, self.btn_save):
@@ -481,6 +601,18 @@ class MainWindow(QMainWindow):
         for w in (self.btn_add_word, self.btn_del_word, self.btn_add_line, self.btn_merge):
             ed2.addWidget(w)
         rv.addLayout(ed2)
+        ed3 = QHBoxLayout()
+        self.btn_accept_line = QPushButton("Accept line")
+        self.btn_accept_line.setToolTip("Clear this line's review flag and save (Ctrl+Enter)")
+        self.btn_accept_all = QPushButton("Accept all")
+        self.btn_accept_all.setToolTip("Clear every review flag and save (Ctrl+Shift+Enter)")
+        self.btn_prev_review = QPushButton("Previous review")
+        self.btn_prev_review.setToolTip("Select the previous line flagged for review (Shift+F3)")
+        self.btn_next_review = QPushButton("Next review")
+        self.btn_next_review.setToolTip("Select the next line flagged for review (F3)")
+        for w in (self.btn_accept_line, self.btn_accept_all, self.btn_prev_review, self.btn_next_review):
+            ed3.addWidget(w)
+        rv.addLayout(ed3)
 
         split = QSplitter()
         split.addWidget(left)
@@ -489,9 +621,10 @@ class MainWindow(QMainWindow):
         self.splitter = split
         self.setCentralWidget(split)
 
-        self.filter.currentIndexChanged.connect(self._fill_table)
-        self.search.textChanged.connect(self._fill_table)
-        self.table.itemSelectionChanged.connect(self._on_track_selected)
+        self.filter.currentIndexChanged.connect(self._apply_filter)
+        self._search_timer = QTimer(self, singleShot=True, interval=200, timeout=self._apply_search)
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.table.selectionModel().selectionChanged.connect(self._on_track_selected)
         self.btn_refresh.clicked.connect(self.refresh)
         self.btn_library.clicked.connect(self.choose_library)
         self.btn_settings.clicked.connect(self.open_settings)
@@ -503,6 +636,8 @@ class MainWindow(QMainWindow):
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
         self.progress.setMinimumWidth(420)
+        self.progress.setAccessibleName("Track progress")
+        self.progress.setAccessibleDescription("Progress of the current track through the processing stages")
         self.progress.setStyleSheet("QProgressBar { text-align: center; }"
                                     "QProgressBar::chunk { background-color: #2e9d4f; }")
         self.progress.hide()
@@ -524,7 +659,8 @@ class MainWindow(QMainWindow):
         self.btn_stop_now.clicked.connect(self._stop_now)
         self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_play.clicked.connect(self.toggle_play)
-        self.seek.sliderMoved.connect(lambda v: self.player.setPosition(v))
+        self.seek.sliderReleased.connect(self._seek_released)
+        self.seek.valueChanged.connect(self._seek_changed)
         self.vocals.toggled.connect(self._set_source)
         self.btn_karaoke.clicked.connect(self.open_karaoke)
         self.lines.currentRowChanged.connect(self._fill_words)
@@ -539,6 +675,25 @@ class MainWindow(QMainWindow):
         self.btn_merge.clicked.connect(self.merge_current_line)
         self.btn_paste.clicked.connect(self.paste_lyrics)
         self.btn_save.clicked.connect(self.save)
+        self.btn_accept_line.clicked.connect(self.accept_line)
+        self.btn_accept_all.clicked.connect(self.accept_all)
+        self.btn_prev_review.clicked.connect(lambda: self.step_review(-1))
+        self.btn_next_review.clicked.connect(lambda: self.step_review(1))
+        self.lines.addAction(self.act_delete_line)   # Delete only while the line list has focus
+        self._set_tab_order()
+
+    def _set_tab_order(self) -> None:
+        chain = [
+            self.btn_library, self.btn_settings, self.btn_key, self.script, self.filter, self.search,
+            self.table, self.btn_refresh, self.btn_sel, self.btn_pending, self.btn_redo, self.btn_details,
+            self.btn_stop, self.btn_stop_now, self.btn_pause, self.force, self.btn_play, self.seek,
+            self.vocals, self.btn_karaoke, self.lines, self.words, *self.nudges, self.btn_line,
+            self.btn_delete, self.btn_paste, self.btn_save, self.btn_add_word, self.btn_del_word,
+            self.btn_add_line, self.btn_merge, self.btn_accept_line, self.btn_accept_all,
+            self.btn_prev_review, self.btn_next_review,
+        ]
+        for first, second in zip(chain, chain[1:]):
+            QWidget.setTabOrder(first, second)
 
     # ---------- threads ----------
     def _run(self, worker: QObject, on_done=None, on_failed=None):
@@ -653,11 +808,28 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("AssemblyAI key saved" if key.strip() else "AssemblyAI key removed", 5000)
 
     def set_script(self, script: str):
+        previous = config.japanese_script()
+        if script == previous:
+            return
         try:
-            config.set_japanese_script(script)
-            n = apply_script_preference(self.root)
+            count = apply_script_preference(self.root, script=script, dry_run=True)
         except OSError as exc:
             self._show_io_error("Update the Japanese script", self.root, exc)
+            self._set_script_combo(previous)
+            return
+        if count and not self._confirm_script_rewrite(script, count):
+            self._set_script_combo(previous)
+            return
+        try:
+            config.set_japanese_script(script)
+            n = apply_script_preference(self.root, script=script)
+        except OSError as exc:
+            try:
+                config.set_japanese_script(previous)
+            except OSError:
+                pass
+            self._show_io_error("Update the Japanese script", self.root, exc)
+            self._set_script_combo(previous)
             return
         self.statusBar().showMessage(f"Japanese lyrics now in {script}: {n} song(s) updated", 6000)
 
@@ -686,55 +858,46 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, action, message)
 
     def _visible_rows(self) -> list[TrackRow]:
-        f = FILTERS[self.filter.currentIndex()].lower()
-        q = self.search.text().lower()
+        """The rows the user can see, in the table's current sort order."""
         rows = []
-        for r in self.rows:
-            status = STATUS_LABELS.get(r.status, r.status)
-            if (f == "all" or r.status == f) and (q in r.artist.lower() or q in r.title.lower()
-                                                  or q in status.lower() or q in r.status.lower()):
-                rows.append(r)
+        for i in range(self.proxy.rowCount()):
+            source = self.proxy.mapToSource(self.proxy.index(i, 0))
+            rows.append(self.model.row_at(source.row()))
         return rows
 
+    def _apply_filter(self) -> None:
+        self.proxy.set_status_filter(FILTERS[self.filter.currentIndex()])
+
+    def _apply_search(self) -> None:
+        self.proxy.set_search_text(self.search.text())
+
     def _fill_table(self):
-        rows = self._visible_rows()
-        header = self.table.horizontalHeader()
-        sort_column, sort_order = header.sortIndicatorSection(), header.sortIndicatorOrder()
-        self.table.setSortingEnabled(False)
-        self.table.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            status = STATUS_LABELS.get(r.status, r.status)
-            notes = ("⚠ warning" if r.notes else
-                     "⚠ fallback" if r.fallback else ("⚠ error" if r.error else ""))
-            values = [r.artist, r.title, status, r.source, f"{r.conf:.2f}" if r.source else "", notes]
-            keys = [r.artist.lower(), r.title.lower(), status.lower(), r.source.lower(),
-                    r.conf if r.source else -1.0, notes]
-            tips = []
-            if r.error:
-                tips.append("Error:\n" + r.error)
-            if r.notes:
-                tips.append("Warnings:\n" + "\n".join(r.notes))
-            if r.fallback:
-                tips.append("Fallback:\n" + r.fallback)
-            if r.device:
-                tips.append("Device: " + self._device_text(r.device))
-            if r.log_path:
-                tips.append("Log: " + r.log_path)
-            for j, (v, key) in enumerate(zip(values, keys)):
-                item = _SortItem(v, key)
-                item.setData(Qt.UserRole, str(r.path))
-                if r.status == "review":
-                    item.setBackground(REVIEW_TINT)
-                if tips:
-                    item.setToolTip("\n\n".join(tips))
-                self.table.setItem(i, j, item)
-        self.table.setSortingEnabled(True)
-        if 0 <= sort_column < self.table.columnCount():
-            self.table.sortItems(sort_column, sort_order)
+        """Shows the current row list. The model resets once per scan, not per keystroke or track."""
+        current = self._current_path()
+        self.model.set_rows(self.rows)
+        self._apply_filter()
+        self.proxy.set_search_text(self.search.text())
+        if current is not None:
+            self._select_path(current, prompt=False)
+
+    def _current_path(self) -> Path | None:
+        selection = self.table.selectionModel()
+        if selection is not None:
+            indexes = selection.selectedRows()
+            if indexes:
+                source = self.proxy.mapToSource(indexes[0])
+                return self.model.row_at(source.row()).path
+        return self.audio
 
     def _selected_rows(self) -> list[TrackRow]:
-        paths = {self.table.item(i.row(), 0).data(Qt.UserRole) for i in self.table.selectionModel().selectedRows()}
-        return [r for r in self.rows if str(r.path) in paths]
+        selection = self.table.selectionModel()
+        if selection is None:
+            return []
+        rows = []
+        for index in selection.selectedRows():
+            source = self.proxy.mapToSource(index)
+            rows.append(self.model.row_at(source.row()))
+        return rows
 
     def _update_row(self, row: TrackRow):
         for i, r in enumerate(self.rows):
@@ -743,12 +906,11 @@ class MainWindow(QMainWindow):
                 break
         else:
             self.rows.append(row)
-        self._fill_table()
+        self.model.update_row(row)
 
     def _ensure_rows(self, paths: list[Path]) -> None:
         """Adds rows for files that are not in the current scan (e.g. --process outside the library)."""
         known = {r.path for r in self.rows}
-        added = False
         for path in paths:
             if path in known:
                 continue
@@ -758,29 +920,29 @@ class MainWindow(QMainWindow):
                 row = TrackRow(path, path.parent.name, path.stem, "pending",
                                error=f"could not read this file: {type(exc).__name__}: {exc}")
             self.rows.append(row)
+            self.model.update_row(row)
             known.add(path)
-            added = True
-        if added:
-            self._fill_table()
 
     def _select_path(self, path: Path, *, prompt: bool = True) -> bool:
         try:
             wanted = str(Path(path).resolve())
         except (OSError, RuntimeError):
             wanted = str(path)
-        for i in range(self.table.rowCount()):
-            item = self.table.item(i, 0)
-            if item is None:
-                continue
+        for source_row, row in enumerate(self.model.rows):
             try:
-                value = str(Path(item.data(Qt.UserRole)).resolve())
+                value = str(row.path.resolve())
             except (OSError, RuntimeError):
-                value = str(item.data(Qt.UserRole))
-            if value == wanted:
-                if prompt and not self._confirm_discard():
-                    return False
-                self.table.selectRow(i)
-                return True
+                value = str(row.path)
+            if value != wanted:
+                continue
+            index = self.proxy.mapFromSource(self.model.index(source_row, 0))
+            if not index.isValid():
+                return False   # hidden by the current filter or search
+            if prompt and not self._confirm_discard():
+                return False
+            self.table.selectRow(index.row())
+            self.table.scrollTo(index, QAbstractItemView.PositionAtCenter)
+            return True
         return False
 
     def _select_pending(self) -> None:
@@ -793,6 +955,8 @@ class MainWindow(QMainWindow):
             self.filter.setCurrentIndex(0)
         if self.search.text():
             self.search.clear()
+            self._search_timer.stop()
+            self._apply_search()
         if not self._select_path(path):
             self._ensure_rows([path])
             self._select_path(path)
@@ -948,16 +1112,12 @@ class MainWindow(QMainWindow):
             self.enqueue_external(accepted)
 
     def _table_context_menu(self, pos) -> None:
-        row_index = self.table.rowAt(pos.y())
-        if row_index < 0:
+        index = self.table.indexAt(pos)
+        if not index.isValid():
             return
-        item = self.table.item(row_index, 0)
-        if item is None:
-            return
-        path = Path(item.data(Qt.UserRole))
-        row = next((r for r in self.rows if r.path == path), None)
-        if row is None:
-            return
+        source = self.proxy.mapToSource(index)
+        row = self.model.row_at(source.row())
+        path = row.path
         menu = QMenu(self)
         act_process = menu.addAction("Process")
         act_redo = menu.addAction("Redo word timing")
@@ -975,7 +1135,7 @@ class MainWindow(QMainWindow):
         elif chosen is act_search:
             self.process([path], research=True)
         elif chosen is act_details:
-            self.table.selectRow(row_index)
+            self.table.selectRow(index.row())
             self.show_details()
         elif chosen is act_folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
@@ -1020,7 +1180,7 @@ class MainWindow(QMainWindow):
                 pass
         columns = config.setting("table/columns")
         if isinstance(columns, list):
-            for i, width in enumerate(columns[:self.table.columnCount()]):
+            for i, width in enumerate(columns[:self.model.columnCount()]):
                 if i == 1:   # the title column stays stretched
                     continue
                 try:
@@ -1052,7 +1212,7 @@ class MainWindow(QMainWindow):
             "window/geometry": base64.b64encode(bytes(self.saveGeometry())).decode("ascii"),
             "window/state": base64.b64encode(bytes(self.saveState())).decode("ascii"),
             "splitter": self.splitter.sizes(),
-            "table/columns": [self.table.columnWidth(i) for i in range(self.table.columnCount())],
+            "table/columns": [self.table.columnWidth(i) for i in range(self.model.columnCount())],
         }
         if self.audio is not None:
             values["library/last_track"] = str(self.audio)
@@ -1115,7 +1275,7 @@ class MainWindow(QMainWindow):
             if not self.save():
                 return None
         elif choice == "discard":
-            self._set_dirty(False)
+            self._reload_lrc()
         elif choice == "skip":
             paths = [p for p in paths if p != self.audio]
             if not paths:
@@ -1318,49 +1478,121 @@ class MainWindow(QMainWindow):
     def load(self, audio: Path):
         self.audio = audio
         self.player.stop()
-        self._set_source()
+        self._pending_seek = None
+        self._pending_play = False
+        self._last_playback_error = ""
+        self.now.clear()
+        self._update_vocals_control(reset=True)
+        self._set_source(restore=False)
         self.track_label.setText(f"{audio.parent.parent.name} — {audio.stem}")
         self._reload_lrc()
 
     def _reload_if_current(self, path: Path):
         if path == self.audio and not self.dirty:
             self._reload_lrc()
+            self._update_vocals_control(reset=False)
 
     def _reload_lrc(self):
         # Japanese songs are edited in Japanese script; saving rebuilds the romaji version from it.
         lrc = japanese_path(self.audio) if japanese_path(self.audio).exists() else self.audio.with_suffix(".lrc")
         self.doc = parse_lrc(lrc.read_text(encoding="utf-8")) if lrc.exists() else None
+        self.undo_stack.clear()
         self._set_dirty(False)
+        self.now.clear()
         self._fill_lines()
 
-    def _set_source(self):
+    def _update_vocals_control(self, *, reset: bool) -> None:
+        source = vocal_source(self.audio) if self.audio is not None else None
+        self.vocals.blockSignals(True)
+        if reset:
+            self.vocals.setChecked(False)
+        elif source is None:
+            self.vocals.setChecked(False)
+        self.vocals.setEnabled(source is not None)
+        self.vocals.blockSignals(False)
+        self.vocals.setToolTip(
+            f"Play the isolated vocals cached for this track:\n{source}" if source is not None
+            else "No isolated vocals are cached for this track yet.\n"
+                 "Run the song through LyricLoom once to create them.")
+
+    def _set_source(self, restore: bool = True):
         if not self.audio:
             return
-        pos = self.player.position()
-        src = self.audio
+        source = self.audio
         if self.vocals.isChecked():
-            v = cache.work_dir(self.audio) / "vocals.wav"
-            src = v if v.exists() else self.audio
-        self.player.setSource(QUrl.fromLocalFile(str(src)))
-        self.player.setPosition(pos)
+            source = vocal_source(self.audio) or self.audio
+        if restore:
+            # setSource() reloads the file and loses the position; remember it until the new media
+            # is ready instead of seeking immediately (the loader discards that seek).
+            self._pending_seek = self.player.position()
+            self._pending_play = self.player.playbackState() == QMediaPlayer.PlayingState
+        self.player.setSource(QUrl.fromLocalFile(str(source)))
+
+    def _media_status(self, status):
+        if status in (QMediaPlayer.LoadedMedia, QMediaPlayer.BufferedMedia):
+            if self._pending_seek is None:
+                return
+            position, playing = self._pending_seek, self._pending_play
+            self._pending_seek = None
+            self._pending_play = False
+            self.player.setPosition(position)
+            if playing:
+                self.player.play()
+        elif status == QMediaPlayer.EndOfMedia:
+            self._pending_seek = None
+            self._pending_play = False
+            self.player.setPosition(0)
+            self.btn_play.setText("Play")
+        elif status == QMediaPlayer.InvalidMedia:
+            message = self.player.errorString() or "The media could not be loaded"
+            self._report_playback_error(message)
+
+    def _media_error(self, error, message: str):
+        if error == QMediaPlayer.NoError:
+            return
+        self._pending_seek = None
+        self._pending_play = False
+        self._report_playback_error(message or self.player.errorString() or "Unknown playback error")
+
+    def _report_playback_error(self, message: str) -> None:
+        if message == self._last_playback_error:
+            return
+        self._last_playback_error = message
+        self.statusBar().showMessage(f"Playback error: {message}", 12000)
+        LOG.warning("playback error for %s: %s", self.audio, message)
+
+    def _seek_changed(self, value: int):
+        # A click on the groove changes the value without emitting sliderMoved; a drag is handled
+        # on release by _seek_released, and the timer blocks its own updates.
+        if not self.seek.isSliderDown():
+            self.player.setPosition(value)
+
+    def _seek_released(self):
+        self.player.setPosition(self.seek.value())
 
     def toggle_play(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         else:
             self._stop_at = None
+            if self.player.mediaStatus() == QMediaPlayer.EndOfMedia:
+                self.player.setPosition(0)
             self.player.play()
 
     def _tick(self):
         t = self.player.position()
         self.btn_play.setText("Pause" if self.player.playbackState() == QMediaPlayer.PlayingState else "Play")
         if not self.seek.isSliderDown():
+            self.seek.blockSignals(True)
             self.seek.setValue(t)
+            self.seek.blockSignals(False)
         self.time_label.setText(format_ts(t))
         if self._stop_at is not None and t >= self._stop_at:
             self.player.pause()
             self._stop_at = None
         if not self.doc:
+            if self.now.text():
+                self.now.clear()
             return
         idx = max((i for i, l in enumerate(self.doc.lines) if l.start_ms is not None and l.start_ms <= t), default=-1)
         if idx != self._shown_line and self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -1373,6 +1605,8 @@ class MainWindow(QMainWindow):
             rest = line.text[len(sung):]
             esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;")
             self.now.setText(f"<b style='color:#2bb8c4'>{esc(sung)}</b>{esc(rest)}")
+        elif self.now.text():
+            self.now.clear()
 
     def _seek_to_line(self, item: QListWidgetItem):
         line = self.doc.lines[self.lines.row(item)]
@@ -1398,25 +1632,52 @@ class MainWindow(QMainWindow):
         if audio is None:
             QMessageBox.information(self, "Karaoke", "Select a track first.")
             return
+        start_ms = int(self.player.position()) if audio == self.audio else 0
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
-        lyrics = japanese_path(audio)
-        if not lyrics.exists():
-            lyrics = audio.with_suffix(".lrc")
-        row = rows[0] if rows else None
+        self._open_karaoke_window(audio, start_ms, rows[0] if rows else None)
+
+    def _open_karaoke_window(self, audio: Path, start_ms: int, row: TrackRow | None) -> None:
+        scripts = script_candidates(audio, config.japanese_script())
+        lyrics = default_script_path(audio, config.japanese_script())
         name = " — ".join(x for x in (row.artist, row.title) if x) if row is not None else None
         if self.karaoke_window is not None:
             self.karaoke_window.close()
-        self.karaoke_window = KaraokeWindow(audio, lyrics, display_name=name or None)
+        self.karaoke_window = KaraokeWindow(
+            audio, lyrics, display_name=name or None, start_ms=start_ms,
+            script_paths=scripts, on_next=self._karaoke_next, on_prev=self._karaoke_previous)
         self.karaoke_window.show()
+
+    def _karaoke_next(self):
+        self._karaoke_step(1)
+
+    def _karaoke_previous(self):
+        self._karaoke_step(-1)
+
+    def _karaoke_step(self, delta: int) -> None:
+        rows = self._visible_rows()
+        if not rows:
+            return
+        current = self.karaoke_window.audio if self.karaoke_window is not None else self.audio
+        paths = [r.path for r in rows]
+        index = paths.index(current) if current in paths else -1
+        target = paths[(index + delta) % len(paths)]
+        QTimer.singleShot(0, lambda path=target: self._karaoke_open_path(path))
+
+    def _karaoke_open_path(self, path: Path) -> None:
+        if not self._select_path(path):
+            return
+        if self.karaoke_window is not None:
+            self.karaoke_window.close()
+            self.karaoke_window = None
+        self.open_karaoke()
 
     # ---------- lyrics / editor ----------
     def _fill_lines(self):
         self.lines.blockSignals(True)
         self.lines.clear()
-        review = set()
+        review = set(review_lines(self.doc))
         if self.doc:
-            review = {int(x) for x in self.doc.meta.get("#review", "").split(",") if x.strip().isdigit()}
             for i, l in enumerate(self.doc.lines):
                 item = QListWidgetItem(f"{format_ts(l.start_ms or 0)}   {l.text}")
                 if i in review:
@@ -1447,15 +1708,29 @@ class MainWindow(QMainWindow):
             segs.append(Segment(self.words.item(r, 0).text(), start, end))
         return segs
 
+    def _push_doc(self, before: LrcDoc | None, after: LrcDoc | None, label: str,
+                  undo_line: int = -1, redo_line: int = -1, undo_word: int = -1, redo_word: int = -1) -> None:
+        self.undo_stack.push(_DocCommand(self, before, after, label, undo_line, redo_line,
+                                         undo_word, redo_word))
+
+    def _restore_doc(self, doc: LrcDoc | None, line: int = -1, word: int = -1) -> None:
+        self.doc = doc
+        self.now.clear()
+        self._fill_lines()
+        if line >= 0 and self.lines.count():
+            self.lines.setCurrentRow(min(line, self.lines.count() - 1))
+            if word >= 0 and self.words.rowCount():
+                self.words.selectRow(min(word, self.words.rowCount() - 1))
+
     def _apply(self, segs: list[Segment]):
         i = self.lines.currentRow()
+        if not self.doc or i < 0:
+            return
         total = self.player.duration() or max((s.end_ms or 0) for l in self.doc.lines for s in l.segments) + 1000
-        self.doc = apply_edits(self.doc, i, segs, total)
-        self._set_dirty(True)
         row = self.words.currentRow()
-        self._fill_lines()
-        self.lines.setCurrentRow(i)
-        self.words.selectRow(row)
+        before = self.doc
+        after = apply_edits(before, i, segs, total)
+        self._push_doc(before, after, "Edit word timing", i, i, row, row)
 
     def _word_edited(self, _item):
         segs = self._segments_from_table()
@@ -1480,13 +1755,6 @@ class MainWindow(QMainWindow):
         ends = [s.end_ms or 0 for l in self.doc.lines for s in l.segments] if self.doc else []
         return self.player.duration() or (max(ends, default=0) + 5000)
 
-    def _after_edit(self, line: int, word: int = -1):
-        self._set_dirty(True)
-        self._fill_lines()
-        self.lines.setCurrentRow(min(line, self.lines.count() - 1))
-        if word >= 0:
-            self.words.selectRow(min(word, self.words.rowCount() - 1))
-
     def add_word(self, text: str | None = None):
         i = self.lines.currentRow()
         if not self.doc or i < 0:
@@ -1496,48 +1764,104 @@ class MainWindow(QMainWindow):
             if not ok or not text.strip():
                 return
         after = self.words.currentRow()
-        self.doc = insert_word(self.doc, i, after, text, self._total())
-        self._after_edit(i, after + 1)
+        before = self.doc
+        result = insert_word(before, i, after, text, self._total())
+        self._push_doc(before, result, "Add word", i, i, after, after + 1)
 
     def delete_current_word(self):
         i, r = self.lines.currentRow(), self.words.currentRow()
         if not self.doc or i < 0 or r < 0:
             return
-        self.doc = delete_word(self.doc, i, r)
-        self._after_edit(i, r)
+        line = self.doc.lines[i]
+        deleting_line = len(line.segments) <= 1
+        if deleting_line:
+            answer = QMessageBox.question(
+                self, "Delete word",
+                "This line has only one word. Deleting it removes the whole line.\n\n"
+                f"{line.text}\n\nYou can undo this with Ctrl+Z. Continue?")
+            if answer != QMessageBox.Yes:
+                return
+        before = self.doc
+        result = delete_word(before, i, r)
+        label = "Delete line" if deleting_line else "Delete word"
+        self._push_doc(before, result, label, i, i, r, max(0, r - 1))
 
     def add_line(self, text: str | None = None):
-        if not self.doc:
-            self.doc = LrcDoc({}, [])
-        after = self.lines.currentRow() if self.doc.lines else -1
+        before = self.doc
+        base = before if before is not None else LrcDoc({}, [])
+        after_index = self.lines.currentRow() if base.lines else -1
         if text is None:
             text, ok = QInputDialog.getText(self, "Insert line", "Text of the new line (inserted after the selected one):")
             if not ok or not text.strip():
                 return
-        prev = self.doc.lines[after] if after >= 0 else None
+        prev = base.lines[after_index] if after_index >= 0 else None
         prev_end = max([s.end_ms or 0 for s in prev.segments] + [prev.start_ms or 0]) if prev else 0
-        nxt = self.doc.lines[after + 1].start_ms if after + 1 < len(self.doc.lines) else None
+        nxt = base.lines[after_index + 1].start_ms if after_index + 1 < len(base.lines) else None
         pos = self.player.position()
         start = pos if prev_end <= pos < (nxt or 10 ** 9) else prev_end + 100
         end = (nxt - 100) if nxt and nxt - 100 > start + 200 else start + 2000
-        self.doc = insert_line(self.doc, after, text, start, end, self._total())
-        self._after_edit(after + 1, 0)
+        result = insert_line(base, after_index, text, start, end, self._total())
+        self._push_doc(before, result, "Insert line", after_index, after_index + 1, -1, 0)
 
     def merge_current_line(self):
         i = self.lines.currentRow()
         if not self.doc or i <= 0:
             return
-        self.doc = merge_with_previous(self.doc, i)
-        self._after_edit(i - 1)
+        before = self.doc
+        result = merge_with_previous(before, i)
+        self._push_doc(before, result, "Merge line", i, i - 1)
 
     def delete_current_line(self):
         i = self.lines.currentRow()
         if not self.doc or i < 0:
             return
-        self.doc = delete_line(self.doc, i)
-        self._set_dirty(True)
-        self._fill_lines()
-        self.lines.setCurrentRow(min(i, self.lines.count() - 1))
+        line = self.doc.lines[i]
+        answer = QMessageBox.question(
+            self, "Delete line",
+            f"Delete this line?\n\n{line.text}\n\nYou can undo this with Ctrl+Z.")
+        if answer != QMessageBox.Yes:
+            return
+        before = self.doc
+        result = delete_line(before, i)
+        self._push_doc(before, result, "Delete line", i, i, -1, -1)
+
+    def accept_line(self):
+        i = self.lines.currentRow()
+        if not self.doc or i < 0:
+            return
+        before = self.doc
+        after = mark_line_reviewed(before, i)
+        if after is before:
+            self.statusBar().showMessage("This line is not flagged for review", 4000)
+            return
+        self._push_doc(before, after, "Accept line", i, i)
+        if self.save():
+            self.statusBar().showMessage("Line accepted", 4000)
+
+    def accept_all(self):
+        if not self.doc:
+            return
+        before = self.doc
+        after = clear_review_flags(before)
+        if after is before:
+            self.statusBar().showMessage("No review flags to clear", 4000)
+            return
+        self._push_doc(before, after, "Clear review flags")
+        if self.save():
+            self.statusBar().showMessage("Review flags cleared", 4000)
+
+    def step_review(self, delta: int):
+        flagged = review_lines(self.doc)
+        if not self.doc or not flagged:
+            self.statusBar().showMessage("No lines are flagged for review", 4000)
+            return
+        current = self.lines.currentRow()
+        if delta > 0:
+            target = next((i for i in flagged if i > current), flagged[0])
+        else:
+            target = next((i for i in reversed(flagged) if i < current), flagged[-1])
+        self.lines.setCurrentRow(target)
+        self.lines.scrollToItem(self.lines.item(target))
 
     def paste_lyrics(self):
         if not self.audio:
@@ -1545,14 +1869,23 @@ class MainWindow(QMainWindow):
         text, ok = QInputDialog.getMultiLineText(self, "Paste lyrics", "One line per lyric line:")
         if not ok or not text.strip():
             return
+        answer = QMessageBox.question(
+            self, "Paste lyrics",
+            "Replace the whole lyric with the pasted text and align it again?\n\n"
+            "The current .lrc is kept as a .bak copy. You can undo the edit with Ctrl+Z.")
+        if answer != QMessageBox.Yes:
+            return
         if not self._confirm_discard():
             return
         audio = self.audio
+        self._paste_before = self.doc
         self._cancel_background.clear()
         self.statusBar().showMessage("Aligning the pasted lyrics …")
         self._run(FuncWorker(lambda: runner.realign(audio, text, cancel=self._cancel_background)), self._realigned)
 
     def _realigned(self, res):
+        before = getattr(self, "_paste_before", None)
+        self._paste_before = None
         if res.status == "cancelled":
             self.statusBar().showMessage("Realign stopped", 5000)
             return
@@ -1562,6 +1895,8 @@ class MainWindow(QMainWindow):
         self._update_row(read_status(res.path))
         if res.path == self.audio:
             self._reload_lrc()
+            if self.doc is not None:
+                self._push_doc(before, self.doc, "Paste lyrics", 0, 0)
         self.statusBar().showMessage(f"Aligned: {res.status}, confidence {res.conf:.2f}", 6000)
 
     def save(self) -> bool:
@@ -1573,17 +1908,23 @@ class MainWindow(QMainWindow):
             # Keep dirty so the edits are not lost; the window stays open.
             self._show_io_error("Save lyrics", self.audio.with_suffix(".lrc"), exc)
             return False
+        self.undo_stack.setClean()
         self._set_dirty(False)
         try:
             self._update_row(read_status(self.audio))
         except OSError as exc:
             self._show_io_error("Read the saved lyrics", self.audio.with_suffix(".lrc"), exc)
+        if self.karaoke_window is not None and self.karaoke_window.audio == self.audio:
+            self.karaoke_window.reload_lyrics()
         self.statusBar().showMessage("Saved (previous .lrc kept as .bak)", 5000)
         return True
 
     def _set_dirty(self, dirty: bool):
         self.dirty = dirty
-        self._refresh_title()
+        try:
+            self._refresh_title()
+        except RuntimeError:   # the window can be deleted while a queued cleanChanged arrives
+            pass
 
     def _confirm_discard(self) -> bool:
         if not self.dirty:
@@ -1742,6 +2083,7 @@ def run(argv: list[str] | None = None):
     app.setApplicationDisplayName(config.APP_NAME)
     app.setOrganizationName(config.APP_NAME)
     app.setApplicationVersion(VERSION)
+    theme.apply_theme(app)
     icon = Path(__file__).resolve().parent.parent / "assets" / "icon.png"
     if icon.is_file():
         app.setWindowIcon(QIcon(str(icon)))

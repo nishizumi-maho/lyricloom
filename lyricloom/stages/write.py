@@ -53,6 +53,15 @@ def _replace(path: Path, doc: LrcDoc) -> None:
     os.replace(tmp, path)
 
 
+def _replace_bytes_with_backup(path: Path, data: bytes) -> None:
+    """Replaces `path` after copying the old file to the engine's .bak name."""
+    if path.exists():
+        shutil.copy2(path, _backup_path(path))
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
 def _is_japanese(doc: LrcDoc) -> bool:
     return any(_JAPANESE.search(l.text) for l in doc.lines)
 
@@ -87,12 +96,16 @@ def write_lyrics(audio: Path, doc: LrcDoc, lang: str | None = None) -> Path:
     return write_lrc(audio, romaji if config.japanese_script() == "romaji" else doc)
 
 
-def apply_script_preference(root: Path) -> int:
+def apply_script_preference(root: Path, *, script: str | None = None, dry_run: bool = False) -> int:
     """Puts the chosen script in the .lrc of every Japanese song under root; songs processed
-    before both scripts were kept get them now. Returns the number of .lrc files rewritten."""
+    before both scripts were kept get them now. Returns the number of .lrc files rewritten.
+
+    With `dry_run=True` nothing is written and the return value is how many files a real run would
+    rewrite, so the GUI can ask for confirmation with the exact count. The main .lrc gets the same
+    .bak copy as a save; the two variant files are derived and are replaced without one."""
     from ..lrc import parse_lrc
     from ..runner import AUDIO_EXT
-    want_romaji = config.japanese_script() == "romaji"
+    want_romaji = (script or config.japanese_script()) == "romaji"
     n = 0
     for lrc in root.rglob("*.lrc"):
         if lrc.name.endswith((".japanese.lrc", ".romaji.lrc", ".original.lrc")):
@@ -100,22 +113,26 @@ def apply_script_preference(root: Path) -> int:
         audio = next((lrc.with_suffix(e) for e in AUDIO_EXT if lrc.with_suffix(e).exists()), None)
         if audio is None:
             continue                       # not a song's lyric (e.g. a comparison file)
-        if not japanese_path(audio).exists():
+        japanese = japanese_path(audio)
+        romaji = romaji_path(audio)
+        if not japanese.exists():
             doc = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace"))
             if (doc.meta.get("#language") not in (None, "ja")
                     or "#engine" not in doc.meta or not is_ours(doc.meta.get("re"))
                     or not _is_japanese(doc)):
                 continue                   # not a LyricLoom Japanese lyric
-            _replace(japanese_path(audio), doc)
-            _replace(romaji_path(audio), to_romaji(doc))
-        chosen = (romaji_path if want_romaji else japanese_path)(audio).read_bytes()
+            if dry_run:
+                chosen = format_lrc(to_romaji(doc) if want_romaji else doc).encode("utf-8")
+            else:
+                _replace(japanese, doc)
+                _replace(romaji, to_romaji(doc))
+                chosen = (romaji if want_romaji else japanese).read_bytes()
+        else:
+            chosen = (romaji if want_romaji else japanese).read_bytes()
         if lrc.read_bytes() != chosen:
-            if lrc.exists():               # never lose a hand-edited main .lrc (R1-35)
-                shutil.copy2(lrc, _backup_path(lrc))
-            tmp = lrc.with_name(lrc.name + ".tmp")
-            tmp.write_bytes(chosen)
-            os.replace(tmp, lrc)
             n += 1
+            if not dry_run:
+                _replace_bytes_with_backup(lrc, chosen)
     return n
 
 

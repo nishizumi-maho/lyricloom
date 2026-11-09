@@ -71,13 +71,13 @@ def test_unavailable_library_shows_banner_and_keeps_cached_rows(app, tmp_path):
         assert not w.library_banner.isHidden()
         assert "unavailable" in w.library_banner_label.text().lower()
         assert str(library) in w.library_banner_label.text()
-        assert w.table.rowCount() == 1   # the cached row was not replaced by an empty table
+        assert w.proxy.rowCount() == 1   # the cached row was not replaced by an empty table
 
         library.mkdir(parents=True, exist_ok=True)
         _audio(library)
         w.btn_retry_library.click()
         _wait(app, lambda: "1 track" in w.statusBar().currentMessage())
-        assert w.library_banner.isHidden() and w.table.rowCount() == 1
+        assert w.library_banner.isHidden() and w.proxy.rowCount() == 1
     finally:
         w.dirty = False
         w.close()
@@ -109,7 +109,7 @@ def test_refresh_keeps_the_last_failure_details(app, tmp_path):
     audio = _audio(tmp_path)
     w = MainWindow(tmp_path)
     try:
-        _wait(app, lambda: w.table.rowCount() == 1)
+        _wait(app, lambda: w.proxy.rowCount() == 1)
         row = w.rows[0]
         row.status, row.error = "failed", "WorkerError: boom"
         row.device, row.fallback = "cpu", "no GPU"
