@@ -6,7 +6,7 @@ import pytest
 import soundfile as sf
 from mutagen.flac import FLAC
 
-from lyricloom import ENGINE_VERSION, cli, runner
+from lyricloom import ENGINE_VERSION, cli, config, models, runner
 from lyricloom.lrc import parse_lrc
 from lyricloom.model import Candidate, Line, Segment, Transcript, Word
 from lyricloom.stages.align import AlignResult
@@ -25,19 +25,29 @@ def _flac(path: Path) -> Path:
 def lib(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.config.WORK_ROOT", tmp_path / "work")
     monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", tmp_path / "Library")
-    calls = {"separate": 0}
+    calls = {"separate": 0, "transcribe": 0, "align": 0}
 
     def fake_separate(audio, work):
         calls["separate"] += 1
         return {"vocals": "v.wav", "vocals16k": "v16.wav", "model": "m", "device": "cpu"}
 
+    def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=()):
+        calls["transcribe"] += 1
+        return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
+
+    def fake_align(meta, work, chosen, tr, v, vf=None):
+        calls["align"] += 1
+        return AlignResult(
+            [Line(0, [Segment("eu ", 0, 300, 0.9), Segment("vou", 400, 700, 0.9)], 0.9)], 0.9, False)
+
     monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
     monkeypatch.setattr(runner, "separate", fake_separate)
-    monkeypatch.setattr(runner, "transcribe", lambda v, w, lang, prompt=None, name="whisper", extra=(): Transcript(
-        "pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)]))
+    monkeypatch.setattr(runner, "transcribe", fake_transcribe)
     monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: AlignResult(
-        [Line(0, [Segment("eu ", 0, 300, 0.9), Segment("vou", 400, 700, 0.9)], 0.9)], 0.9, False))
+    monkeypatch.setattr(runner, "align", fake_align)
+    # These tests replace the heavy stages with fakes; the dedicated preflight test below uses the
+    # real model check.
+    monkeypatch.setattr(runner.model_catalog, "ensure_ready", lambda *a, **k: None)
     return tmp_path / "Library", calls
 
 
@@ -49,6 +59,9 @@ def test_process_writes_lrc_with_source_and_engine(lib):
     doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
     assert doc.meta["#source"] == "letras conf:0.90"
     assert doc.meta["#engine"] == ENGINE_VERSION
+    assert "#models" in doc.meta
+    assert "transcribe=whisper-large-v3" in doc.meta["#models"]
+    assert "separate=separator-mel-band-roformer" in doc.meta["#models"]
     assert doc.lines[0].text == "eu vou"
 
 
@@ -285,3 +298,50 @@ def test_cli_processes_folder(lib, capsys):
     _flac(root / "Artist" / "a.flac")
     assert cli.main(["process", str(root)]) == 0
     assert "done" in capsys.readouterr().out
+
+
+def test_per_song_model_override_is_written_to_the_lrc_and_log(lib):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    res = runner.process(audio, models={"transcribe": "whisper-small"})
+    assert res.status == "done" and res.models["transcribe"] == "whisper-small"
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert "transcribe=whisper-small" in doc.meta["#models"]
+    assert "transcribe=whisper-small" in (runner.cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
+
+
+def test_changing_the_separator_model_recomputes_separation_and_transcription_but_not_lyrics(lib):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    assert calls == {"separate": 1, "transcribe": 1, "align": 1}
+    models.use("separate", "separator-bs-roformer-vocals")
+    runner.process(audio, force=True)
+    assert calls == {"separate": 2, "transcribe": 2, "align": 2}
+
+
+def test_changing_only_the_align_model_reuses_separation_and_transcription(lib, tmp_path):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    custom = tmp_path / "align.pt"
+    custom.write_bytes(b"a custom alignment checkpoint")
+    spec = models.add("align", str(custom))
+    models.use("align", spec.id)
+    runner.process(audio, force=True)
+    assert calls == {"separate": 1, "transcribe": 1, "align": 2}
+
+
+def test_a_missing_model_fails_the_track_before_the_stage_runs(tmp_path, monkeypatch):
+    root = tmp_path / "Library"
+    monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", root)
+    audio = _flac(root / "a.flac")
+    called = []
+    monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
+    monkeypatch.setattr(runner, "separate", lambda *a, **k: called.append("separate"))
+    res = runner.process(audio)
+    assert res.status == "failed"
+    assert "missing models" in res.error
+    assert "separator-mel-band-roformer" in res.error
+    assert "lyricloom models download" in res.error
+    assert called == []

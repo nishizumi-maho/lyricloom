@@ -16,16 +16,24 @@ def work_dir(audio: Path) -> Path:
     return d
 
 
-def load(audio: Path, stage: str, version: str) -> dict | None:
+def load(audio: Path, stage: str, version: str, inputs: dict | None = None) -> dict | None:
+    """Loads a cached stage.  When ``inputs`` is given, a cache written for a different model or
+    parameter set is treated as absent (the caller recomputes that stage and the ones after it)."""
     p = work_dir(audio) / f"{stage}.json"
     if not p.exists():
         return None
     data = json.loads(p.read_text(encoding="utf-8"))
     if data.pop("_version", None) != version:
         return None
+    stored = data.pop("_inputs", None)
+    if inputs is not None and stored != inputs:
+        return None
     return data
 
 
-def save(audio: Path, stage: str, version: str, data: dict) -> None:
+def save(audio: Path, stage: str, version: str, data: dict, inputs: dict | None = None) -> None:
     p = work_dir(audio) / f"{stage}.json"
-    p.write_text(json.dumps({**data, "_version": version}, ensure_ascii=False, indent=1), encoding="utf-8")
+    payload = {**data, "_version": version}
+    if inputs is not None:
+        payload["_inputs"] = inputs
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -20,6 +20,9 @@ def isolated_settings(tmp_path, monkeypatch):
     """The real settings file (chosen library) is never read or written by tests."""
     monkeypatch.setattr("lyricloom.config.SETTINGS_FILE", tmp_path / "test-settings.json")
     monkeypatch.setattr("lyricloom.config.WORK_ROOT", tmp_path / "work")   # caches and scan lists too
+    # A test machine may have the real models configured in settings.json.  Point every catalog
+    # path at an empty temp folder so a test never depends on (or reads) multi-gigabyte files.
+    monkeypatch.setattr("lyricloom.config.MODELS", tmp_path / "models")
 
 
 @pytest.fixture(autouse=True)

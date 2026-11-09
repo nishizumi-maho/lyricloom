@@ -356,7 +356,7 @@ lyricloom doctor
 
 ### Use another whisper.cpp build
 
-Put `whisper-cli` on `PATH` or in `~/.local/share/lyricloom/bin`. The model must be named `ggml-large-v3.bin` and live in the LyricLoom models folder unless you set `LYRICLOOM_WHISPER_MODEL` to a different file name. See [docs/models.md](models.md).
+Put `whisper-cli` on `PATH` or in `~/.local/share/lyricloom/bin`, or set the `whisper_cli` setting (or `LYRICLOOM_WHISPER_CLI`) to its full path. The default model is `ggml-large-v3.bin` in the LyricLoom models folder; choose another catalog model with `lyricloom models use transcribe <id>`. See [docs/models.md](models.md).
 
 ## CUDA and ROCm PyTorch
 

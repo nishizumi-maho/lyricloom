@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 from collections import Counter
 from pathlib import Path
 
-from . import VERSION, config, runner, runtime
+from . import VERSION, config, models, runner, runtime
+
+LEGACY_DOWNLOADS = ("all", "whisper", "separator", "mms", "mtl", "nltk")
 
 
 def _show(r: runner.TrackResult) -> None:
@@ -14,32 +15,131 @@ def _show(r: runner.TrackResult) -> None:
     print(f"{r.status:8} {detail:28} {r.path}", flush=True)
 
 
+def _print_models() -> None:
+    rows = models.all_specs()
+    print(f"{'stage':10} {'id':34} {'size':>9}  {'status':10} chosen for")
+    for spec in rows:
+        state = models.status(spec)
+        chosen = models.choices_for(spec)
+        if not chosen and spec.default:
+            chosen = ["default (implicit)"]
+        chosen_text = ", ".join(chosen)
+        marker = " *" if spec.default else "  "
+        print(f"{spec.stage:10} {spec.id + marker:34} {runtime.human_size(spec.total_size):>9}  "
+              f"{state:10} {chosen_text}")
+    if not any(spec.custom for spec in rows):
+        print("\n* catalog default. Add a custom model with `lyricloom models add <stage> <path>`.")
+
+
+def _download(args) -> int:
+    what = list(getattr(args, "what", []) or [])
+    if not what:
+        what = ["all"]
+    if what == ["all-defaults"] or what == ["all"]:
+        results = runtime.download_all()
+        for model_id, result in results.items():
+            print(f"{model_id:34} {result}")
+        return 0 if all(v in ("ready", "skipped") for v in results.values()) else 1
+    if any(name in LEGACY_DOWNLOADS for name in what):
+        results = {}
+        for name in what:
+            try:
+                if name in ("all", "whisper"):
+                    results["whisper"] = _dl(name, runtime.download_whisper)
+                if name in ("all", "separator"):
+                    results["separator"] = _dl(name, runtime.download_separator)
+                if name in ("all", "mms"):
+                    results["mms"] = _dl(name, runtime.download_mms)
+                if name in ("all", "mtl"):
+                    results["mtl"] = _dl(name, runtime.download_mtl)
+                if name in ("all", "nltk"):
+                    results["nltk"] = _dl(name, runtime.download_nltk)
+            except Exception as exc:  # noqa: BLE001 - one failed download does not abort the rest
+                results[name] = f"error: {exc}"
+        for name, result in results.items():
+            print(f"{name:34} {result}")
+        return 0 if all(v == "ready" for v in results.values()) else 1
+    failed = False
+    for model_id in what:
+        try:
+            runtime.download_model(model_id)
+            print(f"{model_id:34} ready")
+        except Exception as exc:  # noqa: BLE001 - report, continue with the remaining ids
+            failed = True
+            print(f"{model_id:34} error: {exc}")
+    return 1 if failed else 0
+
+
+def _dl(name: str, func) -> str:
+    func(lambda done, total: None)
+    return "ready"
+
+
+def _verify(args) -> int:
+    what = list(getattr(args, "what", []) or [])
+    specs = [models.find(model_id) for model_id in what] if what else models.all_specs()
+    if any(spec is None for spec in specs):
+        print("unknown model id; use `lyricloom models list`", file=sys.stderr)
+        return 2
+    bad = False
+    for spec in specs:
+        state = runtime.model_status(spec.id, verify=True)
+        bad = bad or state not in ("ready", "unverified")
+        print(f"{spec.id:34} {state}")
+    return 1 if bad else 0
+
+
+def _use(args) -> int:
+    what = list(getattr(args, "what", []) or [])
+    if len(what) != 2:
+        print("usage: lyricloom models use <stage> <id> [--lang <code>]", file=sys.stderr)
+        return 2
+    stage, model_id = what
+    try:
+        models.use(stage, model_id, lang=args.lang)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    target = f"language {args.lang!r}" if args.lang else "the default"
+    print(f"{stage} now uses {model_id} for {target}")
+    return 0
+
+
+def _add(args) -> int:
+    what = list(getattr(args, "what", []) or [])
+    if len(what) != 2:
+        print("usage: lyricloom models add <stage> <path|name> [--label <label>]", file=sys.stderr)
+        return 2
+    stage, source = what
+    try:
+        spec = models.add(stage, source, label=args.label)
+    except (ValueError, OSError, RuntimeError, ImportError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"added {spec.id} ({stage}, {runtime.human_size(spec.total_size)}); "
+          f"choose it with `lyricloom models use {stage} {spec.id}`")
+    return 0
+
+
 def _models(args) -> int:
-    if args.action == "status":
+    action = args.action
+    if action == "status":
         print(f"models directory: {config.MODELS}")
         for name, ok in runtime.status().items():
             print(f"  {name:10} {'ready' if ok else 'missing'}")
         print(f"  nltk       {'ready' if runtime._nltk_ready() else 'missing'}")
         print(f"  ffmpeg     {'ready' if runtime.check_ffmpeg() else 'missing'}")
         return 0
-    what = args.what
-    if what in ("all", "whisper"):
-        print("whisper model (about 3 GB)…", flush=True)
-        runtime.download_whisper(lambda done, total: None)
-    if what in ("all", "separator"):
-        print("vocal separator model (about 0.9 GB)…", flush=True)
-        runtime.download_separator()
-    if what in ("all", "mms"):
-        print("forced-alignment model (about 1.2 GB)…", flush=True)
-        runtime.download_mms()
-    if what in ("all", "mtl"):
-        print("English singing model (about 66 MB)…", flush=True)
-        runtime.download_mtl(lambda done, total: None)
-    if what in ("all", "nltk"):
-        print("NLTK data…", flush=True)
-        runtime.download_nltk()
-    print("done")
-    return 0
+    if action == "list":
+        _print_models()
+        return 0
+    if action == "download":
+        return _download(args)
+    if action == "verify":
+        return _verify(args)
+    if action in ("use", "add"):
+        return _use(args) if action == "use" else _add(args)
+    return 2
 
 
 def _doctor() -> int:
@@ -49,7 +149,7 @@ def _doctor() -> int:
     print(f"library        {config.library_root()}")
     print(f"vocals cache   {config.vocals_root()}")
     print(f"models         {config.MODELS}")
-    print(f"whisper-cli    {config.WHISPER_CLI} ({'ok' if Path(config.WHISPER_CLI).is_file() else 'missing'})")
+    print(f"whisper-cli    {config.whisper_cli()} ({'ok' if config.whisper_cli().is_file() else 'missing'})")
     print(f"ffmpeg         {'ok' if runtime.check_ffmpeg() else 'missing'}")
     print(f"separator      {'ok' if runtime.separator_status() else 'missing'}")
     print(f"mms            {'ok' if runtime.mms_status() else 'missing'}")
@@ -79,10 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--stage", choices=runner.STAGES, help="recompute this stage and the ones after it")
     p.add_argument("--no-cloud", action="store_true", help="never send audio to AssemblyAI")
 
-    m = sub.add_parser("models", help="check or download the optional models")
-    m.add_argument("action", choices=["status", "download"])
-    m.add_argument("what", nargs="?", default="all",
-                   choices=["all", "whisper", "separator", "mms", "mtl", "nltk"])
+    m = sub.add_parser("models", help="list, choose, verify or download the optional models")
+    m.add_argument("action", choices=["list", "status", "download", "verify", "use", "add"])
+    m.add_argument("what", nargs="*", default=[],
+                   help="model id(s), <stage> <id>, <stage> <path|name>, or an old download name")
+    m.add_argument("--lang", help="with `use`: write a per-language choice")
+    m.add_argument("--label", help="with `add`: a display label for the custom model")
 
     sub.add_parser("doctor", help="print paths and check the installation")
 

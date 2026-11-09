@@ -38,19 +38,21 @@ LyricLoom respects sites that block scripted requests (HTTP 401, 403 or 429). It
 
 ### Model downloads
 
-Large models are downloaded only when you ask for them: from **Help > Download models**, the first-run prompt, or the explicit `lyricloom models download ...` command. LyricLoom 2.0.0 checks GitHub Releases for updates in the background on startup unless you disable that in Settings; the check sends no library data and only fetches public release metadata. It does not download model files in the background without asking.
+Large models are downloaded only when you ask for them: from **Help > Download models**, the first-run prompt, or the explicit `lyricloom models download ...` command. LyricLoom 2.0.0 checks GitHub Releases for updates in the background on startup unless you disable that in Settings; the check sends no library data and only fetches public release metadata. Processing a song never downloads a model: if a stage's resolved model is missing, the track fails with a message naming the file and the download command.
 
 | Download | Host | What is requested |
 |---|---|---|
-| Whisper large-v3 | `huggingface.co` | Model file and, when available, the published file checksum. |
-| LyricsAlignment-MTL checkpoint | `github.com` | The checkpoint file from the upstream repository. |
-| Mel-Band RoFormer | The model host used by `audio-separator` | Separator weights and associated data. |
-| MMS_FA | PyTorch/torchaudio model host | The torchaudio MMS_FA checkpoint. |
-| NLTK corpora | NLTK data index | `cmudict`, `averaged_perceptron_tagger`, `punkt`. |
+| Whisper models | `huggingface.co` (a pinned commit URL) | Model file with its exact size and SHA-256 pinned in the source. |
+| LyricsAlignment-MTL checkpoint | `raw.githubusercontent.com` (a pinned commit) | The checkpoint file. |
+| Vocal separators | `github.com` release assets (audio-separator's registry) | Separator weights and their YAML/data files, downloaded by LyricLoom. |
+| MMS_FA | `dl.fbaipublicfiles.com` (torchaudio's model host) | `model.pt`, with a pinned size and SHA-256. |
+| NLTK corpora | `raw.githubusercontent.com` (a pinned commit) | The pinned `cmudict`, tagger, `punkt` and `punkt_tab` zips. |
+
+Every file is written to a `.part` file and checked against the pinned size and SHA-256 before it is moved into place. NLTK data may also be read from an existing local `NLTK_DATA` directory; in that case nothing is downloaded.
 
 These requests reveal your IP address and the fact that you are downloading a particular model file. They do not include your music or library.
 
-`lyricloom doctor` and `lyricloom models status` do not upload anything. `doctor` reads local paths and imports PyTorch.
+`lyricloom doctor`, `lyricloom models list` and `lyricloom models verify` do not upload anything. `doctor` reads local paths and imports PyTorch.
 
 ### Optional AssemblyAI
 

@@ -49,6 +49,7 @@ def _run(monkeypatch, lang, fail=False, enabled=True):
     monkeypatch.setattr(stage, "align_blocks", _fake_ctc(calls))
     monkeypatch.setattr(stage, "align_lines_mtl", _fake_mtl(calls, fail))
     monkeypatch.setattr("lyricloom.config.MTL_ENABLED", enabled)
+    monkeypatch.setattr(stage.models, "singing_ready", lambda lang=None: enabled)
     tr = Transcript(lang, [Word("texto", 1000, 1300, 0.9), Word("inventado", 1400, 1700, 0.9), Word("para", 1800, 2100, 0.9)])
     res = stage.align(META, Path("."), Candidate("netease", "texto inventado para"), tr, Path("v16.wav"), Path("v.wav"))
     return calls, res
@@ -73,6 +74,18 @@ def test_singing_model_failure_falls_back_to_ctc(monkeypatch):
 
 def test_singing_model_off_when_not_installed(monkeypatch):
     calls, _ = _run(monkeypatch, "en", enabled=False)
+    assert calls == ["ctc"]
+
+
+def test_english_does_not_start_mtl_when_its_checkpoint_is_missing(monkeypatch):
+    """R1-25: the vendored wrapper exists on every install, but without the checkpoint or NLTK
+    data English must go straight to CTC instead of starting a worker that cannot load."""
+    calls = []
+    monkeypatch.setattr(stage, "align_blocks", _fake_ctc(calls))
+    monkeypatch.setattr(stage, "align_lines_mtl", _fake_mtl(calls))
+    monkeypatch.setattr("lyricloom.config.MTL_ENABLED", True)
+    tr = Transcript("en", [Word("texto", 1000, 1300, 0.9)])
+    stage.align(META, Path("."), Candidate("netease", "texto"), tr, Path("v16.wav"), Path("v.wav"))
     assert calls == ["ctc"]
 
 

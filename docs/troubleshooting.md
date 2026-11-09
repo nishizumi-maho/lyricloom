@@ -94,15 +94,20 @@ It prints the `whisper-cli` path and whether the file exists, plus the models fo
 
 LyricLoom looks for `whisper-cli` in:
 
-1. The bundled `tools/bin` folder.
-2. `%LOCALAPPDATA%\LyricLoom\bin` on Windows, or `~/.local/share/lyricloom/bin` on Linux.
-3. Your `PATH`.
+1. The `whisper_cli` setting, or `LYRICLOOM_WHISPER_CLI`.
+2. The bundled `tools/bin` folder.
+3. A developer checkout's `tools/bin`.
+4. `%LOCALAPPDATA%\LyricLoom\bin` on Windows, or `~/.local/share/lyricloom/bin` on Linux.
+5. Your `PATH`.
 
-The model must be `<models>/ggml-large-v3.bin` unless you set `LYRICLOOM_WHISPER_MODEL` to another file name. The default is about 3 GB; a tiny placeholder file will not work.
+The default model is `<models>/ggml-large-v3.bin`. Choose another catalog model with
+`lyricloom models use transcribe <id>`; a tiny placeholder file will not work. The default model is
+about 3 GB.
 
 ### Fix it
 
 ```bash
+lyricloom models list
 lyricloom models download whisper
 lyricloom doctor
 ```

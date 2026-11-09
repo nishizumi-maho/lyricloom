@@ -19,20 +19,10 @@ FRAME_S = 256 / 22050 * 3
 
 def main() -> None:
     p = read_payload()
-    # g2p_en needs three small NLTK corpora; fetch them once if a fresh install is missing them.
-    try:
-        import nltk
-        for package, path in (("cmudict", "corpora/cmudict"),
-                              ("averaged_perceptron_tagger", "taggers/averaged_perceptron_tagger"),
-                              ("averaged_perceptron_tagger_eng", "taggers/averaged_perceptron_tagger_eng"),
-                              ("punkt", "tokenizers/punkt"),
-                              ("punkt_tab", "tokenizers/punkt_tab")):
-            try:
-                nltk.data.find(path)
-            except LookupError:
-                nltk.download(package, quiet=True)
-    except Exception:  # noqa: BLE001 - the model import below reports the real error
-        pass
+    # The corpora are a pinned catalog model downloaded by the app; never fetch them here.
+    nltk_dir = p.get("nltk_dir")
+    if nltk_dir:
+        os.environ["NLTK_DATA"] = str(nltk_dir) + os.pathsep + os.environ.get("NLTK_DATA", "")
     os.chdir(p["checkpoint_dir"])       # checkpoints are loaded by relative path
     # PyInstaller's frozen modules have no source file, and inflect (through g2p_en) decorates
     # functions with typeguard, which calls inspect.getsource() and fails in a frozen build.
