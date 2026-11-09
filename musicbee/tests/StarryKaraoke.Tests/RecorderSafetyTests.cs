@@ -161,5 +161,68 @@ namespace StarryKaraoke.Tests
                 Assert.Contains(".part.mp4", Path.GetFileName(partial));
             }
         }
+
+        private class ReplaceFails : FileOperations
+        {
+            private readonly System.Exception _error;
+            public ReplaceFails(System.Exception error) { _error = error; }
+            public override void Replace(string source, string destination, string backup) => throw _error;
+        }
+
+        [Theory]
+        [MemberData(nameof(UnsupportedReplaceErrors))]
+        public void FR_C_03_commit_falls_back_to_moves_when_file_replace_is_not_supported(System.Exception error)
+        {
+            using (var folder = new TempFolder())
+            {
+                var target = folder.File("video.mp4");
+                File.WriteAllText(target, "previous video");
+                var partial = OutputSafety.PartialPath(target);
+                File.WriteAllText(partial, "new video");
+
+                OutputSafety.Commit(partial, target, new ReplaceFails(error));
+
+                Assert.Equal("new video", File.ReadAllText(target));
+                Assert.False(File.Exists(partial));
+                Assert.Empty(Directory.GetFiles(folder.Path, "video.mp4.bak-*"));
+            }
+        }
+
+        public static TheoryData<System.Exception> UnsupportedReplaceErrors => new TheoryData<System.Exception>
+        {
+            new PlatformNotSupportedException("ReplaceFile is not supported on this volume"),
+            new IOException("The parameter is incorrect")
+        };
+
+        private sealed class MoveFails : FileOperations
+        {
+            private readonly string _partial;
+            public MoveFails(string partial) { _partial = partial; }
+            public override void Replace(string source, string destination, string backup) =>
+                throw new PlatformNotSupportedException("no ReplaceFile");
+            public override void Move(string source, string destination)
+            {
+                if (string.Equals(source, _partial, System.StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("the partial file could not be moved");
+                base.Move(source, destination);
+            }
+        }
+
+        [Fact]
+        public void FR_C_03_a_failed_fallback_move_restores_the_previous_video()
+        {
+            using (var folder = new TempFolder())
+            {
+                var target = folder.File("video.mp4");
+                File.WriteAllText(target, "previous video");
+                var partial = OutputSafety.PartialPath(target);
+                File.WriteAllText(partial, "new video");
+
+                Assert.Throws<IOException>(() => OutputSafety.Commit(partial, target, new MoveFails(Path.GetFullPath(partial))));
+
+                Assert.Equal("previous video", File.ReadAllText(target));
+                Assert.True(File.Exists(partial));
+            }
+        }
     }
 }

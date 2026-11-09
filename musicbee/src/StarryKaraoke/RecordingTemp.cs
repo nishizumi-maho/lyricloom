@@ -43,11 +43,22 @@ namespace MusicBeePlugin
         /// folders, and anything outside that folder, are never touched.</summary>
         public static int SweepStale(TimeSpan olderThan, string root = null)
         {
+            return Sweep(DateTime.UtcNow - olderThan, root);
+        }
+
+        /// <summary>FR-C-07: removes every recording folder and legacy lyrics/settings copy, whatever
+        /// its age. Only the same names the startup sweep recognises are touched.</summary>
+        public static int SweepAll(string root = null)
+        {
+            return Sweep(DateTime.MaxValue, root);
+        }
+
+        private static int Sweep(DateTime cutoff, string root)
+        {
             var baseDir = root ?? Root;
             try
             {
                 if (!Directory.Exists(baseDir)) return 0;
-                var cutoff = DateTime.UtcNow - olderThan;
                 var removed = 0;
                 foreach (var folder in Directory.GetDirectories(baseDir, RunPrefix + "*"))
                 {

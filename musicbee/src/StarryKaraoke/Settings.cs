@@ -178,8 +178,8 @@ namespace MusicBeePlugin
             var deleted = 0;
             var patterns = new[]
             {
-                fileName, fileName + ".bak", fileName + ".bad-*", fileName + ".*.tmp",
-                SongOffsetStore.FileName, SongOffsetStore.FileName + ".*.tmp"
+                fileName, fileName + ".bak", fileName + ".bad-*", fileName + ".tmp", fileName + ".*.tmp",
+                SongOffsetStore.FileName, SongOffsetStore.FileName + ".tmp", SongOffsetStore.FileName + ".*.tmp"
             };
             foreach (var pattern in patterns)
             {

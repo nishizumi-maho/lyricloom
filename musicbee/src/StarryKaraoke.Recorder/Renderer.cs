@@ -63,6 +63,11 @@ namespace StarryKaraoke.Recorder
                 OutputSafety.ValidateOutput(_job.Out, _job.Audio, _job.Lrc, _job.SettingsPath, _job.Ffmpeg);
                 if (!string.IsNullOrEmpty(_job.Dict)) RomajiCore.Romanizer.UseFirstExistingDictionary(_job.Dict);
                 var s = _job.Settings;
+                // FR-C-02: MusicBee's library duration can be shorter than the real file (VBR MP3
+                // with a bad Xing/LAME header). Probe the audio first; the frame count and the
+                // scene's own duration must cover every sample.
+                var probedMs = AudioProbe.ProbeMilliseconds(_job.Ffmpeg, _job.Audio, p => _jobObject?.Assign(p));
+                _job.DurationMs = VideoTiming.ChooseDurationMs(_job.DurationMs, probedMs);
                 var lines = Timeline.Build(Lrc.Parse(_job.Lyrics), _job.DurationMs, s.Japanese,
                                            x => { try { return RomajiCore.Romanizer.ToRomaji(x) ?? ""; } catch (Exception) { return ""; } });
                 ThrowIfCancelled();
@@ -72,8 +77,8 @@ namespace StarryKaraoke.Recorder
                 var startMs = 0.0;
                 if (s.VideoSkipIntro && Timeline.IntroSkipTarget(lines, s.IntroLeadMs) is double skip)
                     startMs = Math.Max(0, skip + s.LyricsOffsetMs);
-                startMs = Math.Min(startMs, Math.Max(0, _job.DurationMs - 1000));
-                var total = (int)Math.Ceiling((_job.DurationMs - startMs) / 1000.0 * fps);
+                startMs = VideoTiming.StartMs(_job.DurationMs, startMs);
+                var total = VideoTiming.FrameCount(_job.DurationMs, startMs, fps);
                 if (total <= 0) throw new ArgumentException("The video would have no frames. Check the intro-skip setting and the song duration.");
 
                 Status?.Invoke("Testing the video encoder...");
@@ -106,8 +111,11 @@ namespace StarryKaraoke.Recorder
                 var list = Path.Combine(work, "parts.txt");
                 File.WriteAllLines(list, parts.Select(p => "file '" + p.Replace("'", "'\\''") + "'"));
                 var seek = startMs > 0 ? "-ss " + (startMs / 1000).ToString("0.000", CultureInfo.InvariantCulture) + " " : "";
+                // No -shortest: the video is rendered to the real audio duration (plus the scene's
+                // outro), and -shortest would let a still-shorter video stream truncate the audio
+                // again. Audio and video are allowed to differ by the outro's few seconds.
                 RunFfmpeg($"-y -loglevel error -f concat -safe 0 -i {Q(list)} {seek}-i {Q(_job.Audio)} -map 0:v:0 -map 1:a:0 " +
-                          $"-c:v copy -c:a aac -b:a 256k -shortest -movflags +faststart -f mp4 {Q(partial)}");
+                          $"-c:v copy -c:a aac -b:a 256k -movflags +faststart -f mp4 {Q(partial)}");
                 ThrowIfCancelled();
 
                 // Never delete the target first: the partial file is complete and ffmpeg has exited,

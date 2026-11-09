@@ -123,6 +123,27 @@ namespace MusicBeePlugin
             }
         }
 
+        /// <summary>FR-C-03: File.Replace is unavailable on FAT32/exFAT and some network shares. Keep
+        /// the old file at the backup name until the new one is in place, and put it back if the move
+        /// fails.</summary>
+        private void MoveFallback(string tmp, string backup)
+        {
+            File.Move(_path, backup);
+            try
+            {
+                File.Move(tmp, _path);
+            }
+            catch
+            {
+                try
+                {
+                    if (!File.Exists(_path) && File.Exists(backup)) File.Move(backup, _path);
+                }
+                catch (Exception) { }
+                throw;
+            }
+        }
+
         /// <summary>Writes a temporary file and replaces the old one, so a crash mid-write leaves
         /// either the previous file or the new one.</summary>
         public void Save()
@@ -145,12 +166,21 @@ namespace MusicBeePlugin
                     using (var stream = File.Create(tmp)) serializer.WriteObject(stream, file);
                     if (File.Exists(_path))
                     {
-                        try { File.Replace(tmp, _path, null); }
-                        catch (Exception)
+                        var backup = _path + ".bak";
+                        try { if (File.Exists(backup)) File.Delete(backup); } catch (Exception) { }
+                        try
                         {
-                            File.Delete(_path);
-                            File.Move(tmp, _path);
+                            File.Replace(tmp, _path, backup, true);
                         }
+                        catch (PlatformNotSupportedException)
+                        {
+                            MoveFallback(tmp, backup);
+                        }
+                        catch (IOException)
+                        {
+                            MoveFallback(tmp, backup);
+                        }
+                        try { if (File.Exists(backup)) File.Delete(backup); } catch (Exception) { }
                     }
                     else
                     {

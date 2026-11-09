@@ -13,6 +13,10 @@ namespace MusicBeePlugin
     {
         public enum Layer { Sky, Glow, Text }
 
+        /// <summary>How long the "thanks for singing" ending is visible before the nominal end. The
+        /// recorder keeps it on screen after the audio ends (FR-C-02).</summary>
+        internal const double EndingLeadMs = 2500;
+
         private Settings _s;
         private List<KaraokeLine> _lines = new List<KaraokeLine>();
         private string _title = "";
@@ -713,7 +717,7 @@ namespace MusicBeePlugin
         private void DrawEnding(DrawingContext dc, Size size, double t)
         {
             if (!_s.PartyMode || _songMs <= 0 || !string.IsNullOrEmpty(_nextSong)) return;
-            if (t < _songMs - 2500) return;
+            if (t < _songMs - EndingLeadMs) return;
             var px = Math.Max(12, _basePx * 0.38);
             var pulse = (Math.Sin(_wallSec * 3) + 1) / 2;
             DrawCentered(dc, size, Strings.ThanksForSinging, px, Mix(_accent, _head, 0.35 + 0.5 * pulse),
