@@ -28,13 +28,15 @@ namespace MusicBeePlugin
         private readonly Button _playPause, _mute;
         private readonly Slider _volume;
         private readonly System.Windows.Threading.DispatcherTimer _hideTimer;
+        private readonly Action<Exception> _log;
         private double _positionMs, _durationMs;
         private bool _shown, _playing, _muteState;
         private bool _updatingVolume;
 
-        public TransportBar(PlayerControls controls, Color accent)
+        public TransportBar(PlayerControls controls, Color accent, Action<Exception> log = null)
         {
             _controls = controls;
+            _log = log;
             VerticalAlignment = VerticalAlignment.Bottom;
             Padding = new Thickness(28, 26, 28, 18);
             Opacity = 0;
@@ -42,18 +44,18 @@ namespace MusicBeePlugin
             Background = new LinearGradientBrush(Color.FromArgb(0, 6, 6, 16), Color.FromArgb(215, 6, 6, 16), 90);
 
             _seek = new SeekBar(accent) { Height = 22, Margin = new Thickness(10, 0, 10, 0) };
-            _seek.SeekRequested += f => { if (_durationMs > 0) _controls.Seek?.Invoke(f * _durationMs); };
+            _seek.SeekRequested += f => Safe.Run(() => { if (_durationMs > 0) _controls.Seek?.Invoke(f * _durationMs); }, _log);
             _volume = new Slider
             {
                 Minimum = 0, Maximum = 1, Value = 1, Width = 72, Height = 22, Focusable = false,
                 IsMoveToPointEnabled = true, ToolTip = "Volume", VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(2, 0, 2, 0)
             };
-            _volume.ValueChanged += (s, e) =>
+            _volume.ValueChanged += (s, e) => Safe.Run(() =>
             {
                 if (!_updatingVolume) _controls.SetVolume?.Invoke((float)e.NewValue);
-            };
-            _mute = IconButton("\uE767", "Mute (M)", 13, () => _controls.SetMute?.Invoke(!_muteState));
+            }, _log);
+            _mute = IconButton("\uE767", "Mute (M)", 13, () => _controls.SetMute?.Invoke(!_muteState), _log);
             var volumeRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             volumeRow.Children.Add(_mute);
             volumeRow.Children.Add(_volume);
@@ -67,13 +69,13 @@ namespace MusicBeePlugin
             seekRow.Children.Add(volumeRow);
             seekRow.Children.Add(_seek);
 
-            _playPause = IconButton("", "Play / pause (space)", 30, () => _controls.PlayPause?.Invoke());
+            _playPause = IconButton("", "Play / pause (space)", 30, () => _controls.PlayPause?.Invoke(), _log);
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 0) };
-            buttons.Children.Add(IconButton("", "Previous track", 20, () => _controls.Previous?.Invoke()));
-            buttons.Children.Add(IconButton("", "Back 10 s (←)", 20, () => Jump(-10000)));
+            buttons.Children.Add(IconButton("", "Previous track", 20, () => _controls.Previous?.Invoke(), _log));
+            buttons.Children.Add(IconButton("", "Back 10 s (←)", 20, () => Jump(-10000), _log));
             buttons.Children.Add(_playPause);
-            buttons.Children.Add(IconButton("", "Forward 10 s (→)", 20, () => Jump(10000)));
-            buttons.Children.Add(IconButton("", "Next track", 20, () => _controls.Next?.Invoke()));
+            buttons.Children.Add(IconButton("", "Forward 10 s (→)", 20, () => Jump(10000), _log));
+            buttons.Children.Add(IconButton("", "Next track", 20, () => _controls.Next?.Invoke(), _log));
 
             var stack = new StackPanel();
             stack.Children.Add(seekRow);
@@ -81,7 +83,7 @@ namespace MusicBeePlugin
             Child = stack;
 
             _hideTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(HideAfterSec) };
-            _hideTimer.Tick += (s, e) => { if (!IsMouseOver && !_seek.Dragging) Show(false); };
+            _hideTimer.Tick += (s, e) => Safe.Run(() => { if (!IsMouseOver && !_seek.Dragging) Show(false); }, _log);
         }
 
         public bool IsShown => _shown;
@@ -165,7 +167,7 @@ namespace MusicBeePlugin
             "  </ControlTemplate.Triggers>" +
             "</ControlTemplate>");
 
-        private static Button IconButton(string glyph, string tip, double size, Action click)
+        private static Button IconButton(string glyph, string tip, double size, Action click, Action<Exception> log)
         {
             var b = new Button
             {
@@ -177,7 +179,7 @@ namespace MusicBeePlugin
                     FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets")
                 }
             };
-            b.Click += (s, e) => click();
+            b.Click += (s, e) => Safe.Run(click, log);
             return b;
         }
 
