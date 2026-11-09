@@ -10,7 +10,10 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDia
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QProgressDialog, QPushButton, QVBoxLayout, QWidget)
 
-from .. import VERSION, config, updater
+from .. import VERSION, config, runtime, setup, updater
+
+ASK_BEFORE_UPLOAD = "assemblyai_ask_before_upload"
+_TEST_KEEP_ALIVE: list[tuple[QThread, _SetupCheck]] = []
 
 
 def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = False
@@ -50,6 +53,20 @@ def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = F
     return path, None
 
 
+class _SetupCheck(QObject):
+    """Runs ``setup.detect`` for the Settings dialog's Test button."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.done.emit(setup.detect())
+        except Exception as exc:  # noqa: BLE001 - shown in a message box
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
 class SettingsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -83,9 +100,6 @@ class SettingsDialog(QDialog):
 
         behaviour = QGroupBox("Behaviour")
         bform = QFormLayout(behaviour)
-        self.check_updates = QCheckBox("Check GitHub Releases for updates on startup")
-        self.check_updates.setChecked(data.get("check_updates") is True)
-        bform.addRow(self.check_updates)
         self.notify_finished = QCheckBox("Notify when a long queue finishes in the background")
         self.notify_finished.setChecked(bool(data.get("notify_queue_finished", True)))
         bform.addRow(self.notify_finished)
@@ -111,10 +125,137 @@ class SettingsDialog(QDialog):
         gform.addRow(note)
         layout.addWidget(gpu)
 
+        acceleration = QGroupBox("Acceleration")
+        aform = QFormLayout(acceleration)
+        self.acceleration_label = QLabel(self._acceleration_text())
+        self.acceleration_label.setWordWrap(True)
+        aform.addRow(self.acceleration_label)
+        arow = QHBoxLayout()
+        self.test_btn = QPushButton("Test")
+        self.test_btn.setToolTip("Check the CPU, GPUs, WSL and whisper-cli again")
+        self.test_btn.clicked.connect(self._test_acceleration)
+        self.change_accel_btn = QPushButton("Change…")
+        self.change_accel_btn.setToolTip("Open the setup assistant on its Acceleration page")
+        self.change_accel_btn.clicked.connect(self._change_acceleration)
+        arow.addWidget(self.test_btn)
+        arow.addWidget(self.change_accel_btn)
+        arow.addStretch(1)
+        aform.addRow(arow)
+        layout.addWidget(acceleration)
+
+        privacy = QGroupBox("Privacy")
+        pform = QFormLayout(privacy)
+        self.check_updates = QCheckBox("Check GitHub Releases for updates on startup")
+        self.check_updates.setChecked(data.get("check_updates") is True)
+        self.check_updates.setToolTip(
+            "When on, one request to api.github.com asks for public release metadata at startup.")
+        pform.addRow(self.check_updates)
+        self.cloud = QCheckBox("Allow uploading the isolated vocal to AssemblyAI")
+        self.cloud.setChecked(config.assemblyai_enabled())
+        self.cloud.setToolTip(
+            "Cloud transcription is off by default. When on, songs that need help may upload "
+            "their isolated vocal to AssemblyAI.")
+        pform.addRow(self.cloud)
+        self.key = QLineEdit()
+        self.key.setEchoMode(QLineEdit.Password)
+        self.key.setPlaceholderText(
+            "A key is set; type a new one to replace it" if config.has_assemblyai_key()
+            else "Paste your AssemblyAI API key")
+        self.remove_key_btn = QPushButton("Remove stored key")
+        self.remove_key_btn.setEnabled(config.has_assemblyai_key())
+        self.remove_key_btn.clicked.connect(self._remove_key)
+        self._remove_key_requested = False
+        pform.addRow("AssemblyAI key", self._with_button(self.key, self.remove_key_btn))
+        self.ask_upload = QCheckBox("Ask before uploading each queue")
+        self.ask_upload.setChecked(bool(data.get(ASK_BEFORE_UPLOAD, True)))
+        pform.addRow(self.ask_upload)
+        layout.addWidget(privacy)
+
+        self.assistant_page: str | None = None
+        self._test_thread: QThread | None = None
+        self._test_worker: _SetupCheck | None = None
+        self._test_progress: QProgressDialog | None = None
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _acceleration_text(self) -> str:
+        selected = (f"WSL {config.setting('wsl_distro') or 'auto'} · "
+                    f"{config.setting('wsl_python') or 'python3'}"
+                    if config.setting("wsl_gpu", False) else "CPU only")
+        whisper = config.whisper_cli()
+        state = "found" if whisper.is_file() else "missing"
+        return f"Separation/alignment: {selected}\nwhisper-cli: {whisper} ({state})"
+
+    def _change_acceleration(self) -> None:
+        self.assistant_page = "acceleration"
+        self._save()
+
+    def _remove_key(self) -> None:
+        self._remove_key_requested = True
+        self.key.clear()
+        self.key.setPlaceholderText("The stored key will be removed when you save")
+        self.remove_key_btn.setEnabled(False)
+
+    def _test_acceleration(self) -> None:
+        if self._test_thread is not None:
+            return
+        self._test_progress = QProgressDialog(
+            "Checking CPU, GPUs, WSL and whisper-cli…", "", 0, 0, self)
+        self._test_progress.setWindowTitle("Acceleration")
+        self._test_progress.setCancelButton(None)
+        self._test_progress.setAutoClose(False)
+        self._test_progress.setAutoReset(False)
+        self._test_progress.show()
+        thread = QThread()
+        worker = _SetupCheck()
+        _TEST_KEEP_ALIVE.append((thread, worker))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._test_done, Qt.QueuedConnection)
+        worker.failed.connect(self._test_failed, Qt.QueuedConnection)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._test_finished)
+        self._test_thread, self._test_worker = thread, worker
+        self.test_btn.setEnabled(False)
+        thread.start()
+
+    @Slot(object)
+    def _test_done(self, report) -> None:
+        recommendation = setup.recommend(report)
+        wsl = (f"WSL 2 · {', '.join(d.name for d in report.wsl.distros)}"
+               if report.wsl.version2 else (report.wsl.error or "WSL not available"))
+        disk = (runtime.human_size(report.disk_free_bytes)
+                if report.disk_free_bytes is not None else "unknown")
+        whisper = (report.whisper_cli.path if report.whisper_cli.present
+                   else (report.whisper_cli.error or "not found"))
+        text = (
+            f"CPU: {report.cpu_cores or 'unknown'} cores\n"
+            f"Memory: {runtime.human_size(report.ram_bytes) if report.ram_bytes else 'unknown'}\n"
+            f"Free disk: {disk}\n"
+            f"GPU: {', '.join(gpu.name for gpu in report.gpus) or 'none detected'}\n"
+            f"{wsl}\n"
+            f"whisper-cli: {whisper}\n\n"
+            f"Suggested: {recommendation.wsl_gpu_reason}\n"
+            f"{recommendation.whisper_backend_reason}")
+        QMessageBox.information(self, "Acceleration", text)
+
+    @Slot(str)
+    def _test_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "Acceleration", "The check failed:\n" + message)
+
+    @Slot()
+    def _test_finished(self) -> None:
+        if self._test_progress is not None:
+            self._test_progress.close()
+            self._test_progress = None
+        self._test_thread = None
+        self._test_worker = None
+        self.test_btn.setEnabled(True)
+        self.acceleration_label.setText(self._acceleration_text())
 
     @staticmethod
     def _with_button(edit: QLineEdit, button: QPushButton) -> QWidget:
@@ -144,12 +285,24 @@ class SettingsDialog(QDialog):
                 return
             values[field] = path
         try:
+            key = self.key.text().strip()
+            if key:
+                config.set_assemblyai_key(key)
+                self._remove_key_requested = False
+                self.key.clear()
+                self.key.setPlaceholderText("A key is set; type a new one to replace it")
+                self.remove_key_btn.setEnabled(True)
+            elif self._remove_key_requested:
+                config.set_assemblyai_key("")
+                self.remove_key_btn.setEnabled(False)
             config.update_settings({
                 "library": str(values["Music library"]),
                 "vocals": str(values["Vocals cache"]),
                 "work": str(values["Work cache"]),
                 "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
                 "check_updates": self.check_updates.isChecked(),
+                "assemblyai_enabled": self.cloud.isChecked(),
+                ASK_BEFORE_UPLOAD: self.ask_upload.isChecked(),
                 "notify_queue_finished": self.notify_finished.isChecked(),
                 "wsl_gpu": self.wsl.isChecked(),
                 "wsl_distro": self.distro.text().strip(),
@@ -161,6 +314,9 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(
                 self, "Settings",
                 f"Could not save the settings to {config.SETTINGS_FILE}:\n{exc.strerror or exc}")
+            return
+        except (RuntimeError, ValueError) as exc:
+            QMessageBox.critical(self, "AssemblyAI", str(exc))
             return
         self.accept()
 

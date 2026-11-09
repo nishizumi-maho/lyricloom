@@ -103,6 +103,8 @@ When it uses AssemblyAI, LyricLoom uploads the **isolated vocal track** as a 16 
 
 The request carries your API key in its `Authorization` header. AssemblyAI returns a transcript with word timings; LyricLoom stores that JSON in the track's work cache. A cached cloud transcript is reused without a second upload.
 
+The main window shows **Cloud transcription: on** in the status bar while the setting is enabled. When **Ask before uploading each queue** is on (the default), starting a queue asks whether to allow uploads for that queue; choosing **Process without cloud** passes `allow_cloud=False` to every track in that run. The same choice is in the setup assistant's Privacy page and in **Settings > Privacy**.
+
 Audio uploaded to AssemblyAI is subject to **AssemblyAI's terms and privacy policy**, not LyricLoom's. LyricLoom cannot control how long AssemblyAI retains it.
 
 The key is protected at rest:
@@ -164,7 +166,7 @@ Everything LyricLoom writes lives in the per-user data directory, except the `.l
 
 | Data | Why | Sensitive? |
 |---|---|---|
-| `settings.json` | Library path, vocals/work paths, Japanese script, update-check choice, cloud choice, optional WSL settings. | Contains local folder paths. |
+| `settings.json` | Library path, vocals/work paths, Japanese script, update-check choice, cloud choice and per-queue consent, setup completion, optional WSL settings. | Contains local folder paths. |
 | `scan-*.json` | Cached artist/title/status per track, so startup is instant. | Contains your library metadata. |
 | `work/<hash>/*.json` | Per-stage cache: lyric candidates, separation info, transcript, alignment. | Contains fetched lyrics and transcript text. |
 | `work/<hash>/vocals.wav`, `vocals16k.wav` | Player and aligner input. | Audio from your songs. |

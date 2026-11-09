@@ -46,6 +46,7 @@ from .model import (STAGE_LABELS, TrackRow, apply_edits, clear_review_flags, del
                     track_progress)
 from .models_window import MissingModelsDialog, ModelsWindow, PerSongModelsDialog
 from .paths import expand_audio_paths, validate_audio_file
+from .setup_assistant import PAGE_KEYS, SetupAssistant
 from .widgets import SeekSlider
 
 _TS = re.compile(r"^(\d+):(\d{1,2})(?:[.:](\d{1,3}))?$")
@@ -162,11 +163,12 @@ class QueueWorker(QObject):
     finished = Signal()
 
     def __init__(self, paths: list[Path] | list[QueueItem], force: bool, redo: bool = False,
-                 research: bool = False):
+                 research: bool = False, allow_cloud: bool | None = None):
         super().__init__()
         self._items = [p if isinstance(p, QueueItem) else QueueItem(Path(p)) for p in paths]
         self._force, self._redo = force, redo
         self._research = research
+        self._allow_cloud = allow_cloud
         self._stop_after = False
         self._cancel = threading.Event()
         self._pause = threading.Event()
@@ -214,12 +216,13 @@ class QueueWorker(QObject):
                     moved = runner.forget_sync(p)
                     res = runner.process(p, force=True, only_stage="align",
                                          on_stage=self.stage.emit, cancel=self._cancel,
-                                         models=item.models)
+                                         models=item.models, allow_cloud=self._allow_cloud)
                 elif self._research:
                     res = runner.research_lyrics(p, cancel=self._cancel)
                 else:
                     res = runner.process(p, force=self._force, on_stage=self.stage.emit,
-                                         cancel=self._cancel, models=item.models)
+                                         cancel=self._cancel, models=item.models,
+                                         allow_cloud=self._allow_cloud)
                 if res.missing and last_missing.get(p) != frozenset(s.id for s in res.missing):
                     # The stage refused to run because a model is absent. Put the previous word
                     # timing back, pause, and let the window offer the download; this track is
@@ -276,6 +279,9 @@ class MainWindow(QMainWindow):
                  startup: dict | None = None):
         super().__init__()
         self.root = Path(root or config.library_root())
+        self._startup = startup
+        self._setup_assistant: SetupAssistant | None = None
+        self._first_run_scheduled = False
         self.rows: list[TrackRow] = []
         self.audio: Path | None = None
         self.doc: LrcDoc | None = None
@@ -344,10 +350,25 @@ class MainWindow(QMainWindow):
             LOG.warning("single-instance server %s could not listen", self._ipc_server.name)
         if startup is not None:
             QTimer.singleShot(0, lambda: self._handle_external(startup))
-        else:
-            QTimer.singleShot(0, self._first_run)
         if updater.should_check_on_startup():
             QTimer.singleShot(4000, lambda: check_for_updates(self, silent=True))
+
+    def showEvent(self, event):
+        """Run the first-start setup once the window is actually visible.
+
+        Tests and embedded callers construct MainWindow without showing it; production calls
+        ``show()`` in ``run()``.  Deferring the assistant to this point keeps a headless window from
+        opening dialogs that nobody can see.
+        """
+        super().showEvent(event)
+        if self._first_run_scheduled:
+            return
+        self._first_run_scheduled = True
+        # An explicit root (tests, embedding) means the caller already chose the library; a normal
+        # start uses config.library_root() and is the case the assistant is for.  Calling
+        # _first_run() directly always opens it, which is also how the tests exercise the page.
+        if self._startup is None and config.library_root() == self.root:
+            QTimer.singleShot(0, self._first_run)
 
     def _build_menu(self):
         file_menu = self.menuBar().addMenu("&File")
@@ -402,6 +423,8 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(self.act_find)
 
         help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(QAction("&Setup assistant…", self,
+                                     triggered=lambda: self.open_setup_assistant()))
         help_menu.addAction(QAction("&Models…", self, triggered=lambda: self.open_models()))
         help_menu.addAction(QAction("Check for &updates…", self, triggered=lambda: check_for_updates(self)))
         help_menu.addAction(QAction("Open &data folder", self, triggered=self.open_data_folder))
@@ -416,6 +439,10 @@ class MainWindow(QMainWindow):
         self.search.selectAll()
 
     def _first_run(self):
+        """First start (or an upgrade from 2.0): the setup assistant, once."""
+        if not config.setting("setup_complete", False):
+            self.open_setup_assistant()
+            return
         if config.setting("library") or self.root != Path(config.DEFAULT_LIBRARY):
             return
         QMessageBox.information(
@@ -426,6 +453,37 @@ class MainWindow(QMainWindow):
             "models later in Help > Models.")
         self.choose_library()
         QTimer.singleShot(200, self._offer_models)
+
+    def open_setup_assistant(self, start_page: str | None = None) -> SetupAssistant:
+        """Opens (or re-raises) the setup assistant, optionally on one page."""
+        dialog = self._setup_assistant
+        if dialog is None:
+            dialog = SetupAssistant(self, start_page=start_page)
+            self._setup_assistant = dialog
+            dialog.finished.connect(self._setup_finished)
+        elif start_page is not None:
+            page_id = PAGE_KEYS.get(str(start_page).lower())
+            if page_id is not None:
+                dialog.setCurrentPage(page_id)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        return dialog
+
+    def _setup_finished(self, _result: int) -> None:
+        dialog, self._setup_assistant = self._setup_assistant, None
+        if dialog is not None:
+            dialog.deleteLater()
+        new_root = config.library_root()
+        if new_root != self.root:
+            self.root = new_root
+            self.rows = []
+            self._restored_last_track = True
+            self.refresh()
+        self._set_script_combo(config.japanese_script())
+        self._update_cloud_indicator()
+        if _result == QDialog.Accepted:
+            self.statusBar().showMessage("Setup complete.", 8000)
 
     def _offer_models(self):
         missing = runtime.status()
@@ -448,6 +506,7 @@ class MainWindow(QMainWindow):
             return
         self.root = config.library_root()
         self.rows = []
+        self._update_cloud_indicator()
         new_script = config.japanese_script()
         message = "Settings saved. Restart LyricLoom to apply cache/GPU changes."
         if new_script != previous_script:
@@ -473,6 +532,8 @@ class MainWindow(QMainWindow):
         self._set_script_combo(new_script)
         self.refresh()
         self.statusBar().showMessage(message, 8000)
+        if getattr(dialog, "assistant_page", None):
+            self.open_setup_assistant(dialog.assistant_page)
 
     def _set_script_combo(self, script: str) -> None:
         self.script.blockSignals(True)
@@ -804,8 +865,14 @@ class MainWindow(QMainWindow):
                          "fall back to the CPU. Transcription uses whisper.cpp. "
                          "Updated as songs are processed.")
         self.gpu.setToolTip(self._gpu_tip)
+        self.cloud = QLabel("")
+        self.cloud.setToolTip("Cloud transcription is on: songs that need help may upload their "
+                              "isolated vocal to AssemblyAI. Turn it off in Settings > Privacy.")
+        self.cloud.hide()
+        self.statusBar().addPermanentWidget(self.cloud)
         self.statusBar().addPermanentWidget(self.gpu)
         self.statusBar().addPermanentWidget(self.progress)
+        self._update_cloud_indicator()
         self._prog = None
         self.prog_timer = QTimer(self, interval=250, timeout=self._update_progress)
         self.btn_sel.clicked.connect(lambda: self.process([r.path for r in self._selected_rows()]))
@@ -1494,8 +1561,10 @@ class MainWindow(QMainWindow):
         self._queue_error = ""
         self._queue_results = []
         self._queue_started = time.monotonic()
+        allow_cloud = self._cloud_choice_for_queue()
         items = [QueueItem(path, models) for path in paths]
-        self._queue = QueueWorker(items, self.force.isChecked(), redo, research)
+        self._queue = QueueWorker(items, self.force.isChecked(), redo, research,
+                                  allow_cloud=allow_cloud)
         self._prog = {"done": 0, "total": len(paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
         q = self._queue
@@ -1544,6 +1613,41 @@ class MainWindow(QMainWindow):
             return "Device: vocals already cached"
         return (f"Device: ROCm (WSL {config.SEPARATOR_WSL_DISTRO})"
                 if config.SEPARATOR_WSL_ENABLED else "Device: CPU")
+
+    def _update_cloud_indicator(self) -> None:
+        """A permanent status-bar badge while cloud transcription is enabled (R2-29)."""
+        label = getattr(self, "cloud", None)
+        if label is None:
+            return
+        enabled = config.assemblyai_enabled()
+        label.setText("Cloud transcription: on" if enabled else "")
+        label.setStyleSheet("color: #8a4b00;" if enabled else "")
+        label.setVisible(enabled)
+
+    def _ask_cloud_for_queue(self) -> bool:
+        """Per-queue consent. Returns True when this queue may upload."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Cloud transcription")
+        box.setIcon(QMessageBox.Question)
+        box.setText("Allow uploads for this queue?")
+        box.setInformativeText(
+            "Cloud transcription is on. For songs that need help, LyricLoom would upload the "
+            "isolated vocal (16 kHz WAV), the language code and an artist/title prompt to "
+            "AssemblyAI. Local transcription still runs first.\n\n"
+            "Choose “Process without cloud” to keep this queue on this computer.")
+        allow = box.addButton("Allow uploads for this queue", QMessageBox.AcceptRole)
+        local = box.addButton("Process without cloud", QMessageBox.RejectRole)
+        box.setDefaultButton(local)
+        box.exec()
+        return box.clickedButton() is allow
+
+    def _cloud_choice_for_queue(self) -> bool | None:
+        """``None`` means the saved setting decides; True/False consent is fixed for this queue."""
+        if not config.assemblyai_enabled():
+            return None
+        if not config.ask_before_upload():
+            return None
+        return self._ask_cloud_for_queue()
 
     def _device_changed(self, res):
         """Shows where the last song was separated, so a silent CPU fallback is visible."""
@@ -2208,6 +2312,9 @@ class MainWindow(QMainWindow):
         if not self._confirm_discard():
             e.ignore()
             return
+        if self._setup_assistant is not None:
+            self._setup_assistant.reject()
+            self._setup_assistant = None
         if self._queue is not None:
             choice = self._ask_queue_shutdown()
             if choice == "keep":
