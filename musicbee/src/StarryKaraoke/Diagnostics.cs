@@ -69,6 +69,8 @@ namespace MusicBeePlugin
     /// Settings section, with Copy and Open log folder.</summary>
     internal sealed class DiagnosticsWindow : Window
     {
+        private readonly TextBox _box;
+
         public DiagnosticsWindow(string text, string logPath)
         {
             Title = "Starry Karaoke — Diagnostics";
@@ -78,7 +80,7 @@ namespace MusicBeePlugin
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
             var panel = new StackPanel { Margin = new Thickness(14) };
-            var box = new TextBox
+            _box = new TextBox
             {
                 Text = text ?? "",
                 IsReadOnly = true,
@@ -88,7 +90,7 @@ namespace MusicBeePlugin
                 MinHeight = 150,
                 MaxHeight = 420
             };
-            panel.Children.Add(box);
+            panel.Children.Add(_box);
 
             var buttons = new StackPanel
             {
@@ -99,7 +101,7 @@ namespace MusicBeePlugin
             var copy = new Button { Content = "Copy", Width = 92, Margin = new Thickness(0, 0, 8, 0) };
             copy.Click += (s, e) => Safe.Run(() =>
             {
-                Clipboard.SetText(box.Text);
+                Clipboard.SetText(_box.Text);
                 copy.Content = "Copied";
             }, null);
             var open = new Button { Content = "Open log folder", Width = 128, Margin = new Thickness(0, 0, 8, 0) };
@@ -116,5 +118,8 @@ namespace MusicBeePlugin
             panel.Children.Add(buttons);
             Content = panel;
         }
+
+        /// <summary>Fills the report after the background build finished (FR-C-06).</summary>
+        internal void SetText(string text) => _box.Text = text ?? "";
     }
 }

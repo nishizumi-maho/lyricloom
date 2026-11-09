@@ -45,6 +45,30 @@ namespace MusicBeePlugin
                 if (exists(path)) return path;
             return null;
         }
+
+        /// <summary>FR-C-06: reads the first sidecar with synced lyrics (or the first readable copy
+        /// when none is synced). This touches the file system, so the plugin calls it on the thread
+        /// pool, never on MusicBee's UI thread. The warning only names the encoding and the file
+        /// name; the lyric text itself is never logged.</summary>
+        public static string ReadLyrics(string audioPath, JapaneseMode mode, out string warning)
+        {
+            warning = null;
+            if (string.IsNullOrEmpty(audioPath)) return null;
+            string fallback = null;
+            foreach (var candidate in Candidates(audioPath, mode))
+            {
+                if (!File.Exists(candidate)) continue;
+                var decoded = LyricsFile.Read(candidate);
+                if (LyricsSelector.HasSyncedLyrics(decoded.Text))
+                {
+                    if (!string.IsNullOrEmpty(decoded.Warning))
+                        warning = "lyrics encoding: " + decoded.EncodingName + " for " + Path.GetFileName(candidate);
+                    return decoded.Text;
+                }
+                if (fallback == null) fallback = decoded.Text;
+            }
+            return fallback;
+        }
     }
 
     /// <summary>Decides whether a file-system event is for the playing song and is newer than the copy

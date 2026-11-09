@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -262,12 +263,12 @@ namespace MusicBeePlugin
             Row("ffmpeg.exe (empty = automatic)", ffRow);
 
             Section("Diagnostics");
-            string diagnosticsReportText = null;
-            try { diagnosticsReportText = _diagnostics?.Invoke(); }
-            catch (Exception e) { _log?.Invoke(e); }
+            // FR-C-06: building the report resolves ffmpeg and waits up to 3 s for `ffmpeg -version`.
+            // Do it on the pool and fill the text box when it is ready; opening Settings must never
+            // block MusicBee's UI thread on it.
             var diagnosticsText = new TextBox
             {
-                Text = diagnosticsReportText ?? "Diagnostics are not available in this window.",
+                Text = _diagnostics == null ? "Diagnostics are not available in this window." : "Checking the versions...",
                 IsReadOnly = true,
                 AcceptsReturn = true,
                 TextWrapping = TextWrapping.Wrap,
@@ -275,6 +276,23 @@ namespace MusicBeePlugin
                 MinHeight = 105,
                 MaxHeight = 160
             };
+            if (_diagnostics != null)
+            {
+                ThreadPool.QueueUserWorkItem(_ =>
+                {
+                    string report = null;
+                    try { report = _diagnostics(); }
+                    catch (Exception e) { _log?.Invoke(e); }
+                    try
+                    {
+                        Dispatcher.BeginInvoke((Action)(() =>
+                        {
+                            diagnosticsText.Text = report ?? "Diagnostics are not available in this window.";
+                        }));
+                    }
+                    catch (Exception) { }
+                });
+            }
             var diagnosticsButtons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 0) };
             var copyDiagnostics = new Button { Content = "Copy", Width = 84, Margin = new Thickness(0, 0, 8, 0) };
             copyDiagnostics.Click += (s, e) => Safe.Run(() =>
@@ -316,18 +334,40 @@ namespace MusicBeePlugin
 
         private void TestFfmpeg(string configured)
         {
-            var exe = FfmpegLocator.Resolve(configured, _edit.LyricLoomPath);
-            if (string.IsNullOrEmpty(exe))
+            // FR-C-06: finding ffmpeg and running `ffmpeg -version` both touch the disk/processes.
+            // Keep the UI responsive and show the result on the window's dispatcher.
+            var lyricLoom = _edit.LyricLoomPath;
+            ThreadPool.QueueUserWorkItem(_ =>
             {
-                MessageBox.Show(this,
-                    "ffmpeg was not found.\n\nInstall it with \"winget install Gyan.FFmpeg\", or use Browse... to pick ffmpeg.exe.",
-                    "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
-                return;
-            }
-            var version = FfmpegInfo.VersionLine(exe);
-            MessageBox.Show(this,
-                "ffmpeg found:\n" + exe + (version.Length > 0 ? "\n\n" + version : "\n\nThe file did not report a version."),
-                "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
+                string message;
+                try
+                {
+                    var exe = FfmpegLocator.Resolve(configured, lyricLoom);
+                    if (string.IsNullOrEmpty(exe))
+                    {
+                        message = "ffmpeg was not found.\n\nInstall it with \"winget install Gyan.FFmpeg\", or use Browse... to pick ffmpeg.exe.";
+                    }
+                    else
+                    {
+                        var version = FfmpegInfo.VersionLine(exe);
+                        message = "ffmpeg found:\n" + exe +
+                                  (version.Length > 0 ? "\n\n" + version : "\n\nThe file did not report a version.");
+                    }
+                }
+                catch (Exception e)
+                {
+                    message = "Could not test ffmpeg: " + e.Message;
+                }
+                try
+                {
+                    Dispatcher.BeginInvoke((Action)(() =>
+                    {
+                        if (!IsLoaded) return;
+                        MessageBox.Show(this, message, "Starry Karaoke", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }));
+                }
+                catch (Exception) { }
+            });
         }
 
         private void TestLyricLoom(string configured)
@@ -456,8 +496,11 @@ namespace MusicBeePlugin
             {
                 var c = Settings.ParseColor(get(), Colors.White);
                 using (var dlg = new System.Windows.Forms.ColorDialog { FullOpen = true, Color = System.Drawing.Color.FromArgb(c.R, c.G, c.B) })
-                    if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+                {
+                    var owner = DialogPlacement.Win32Owner(this);
+                    if ((owner != null ? dlg.ShowDialog(owner) : dlg.ShowDialog()) == System.Windows.Forms.DialogResult.OK)
                         hex.Text = Settings.ToHex(Color.FromRgb(dlg.Color.R, dlg.Color.G, dlg.Color.B));
+                }
             }, _log);
             hex.TextChanged += (s, e) => Safe.Run(() =>
             {

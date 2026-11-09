@@ -168,5 +168,36 @@ namespace StarryKaraoke.Tests
             t.Join();
             Assert.Null(failure);
         }
+
+        [Fact]
+        public void FR_C_06_the_settings_diagnostics_are_built_off_the_ui_thread()
+        {
+            Exception failure = null;
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    var uiThread = Thread.CurrentThread.ManagedThreadId;
+                    var workerThread = 0;
+                    using (var done = new ManualResetEvent(false))
+                    {
+                        var w = new SettingsWindow(new Settings(), _ => { }, null, () =>
+                        {
+                            workerThread = Thread.CurrentThread.ManagedThreadId;
+                            done.Set();
+                            return "diagnostics";
+                        });
+                        Assert.True(done.WaitOne(TimeSpan.FromSeconds(5)));
+                        Assert.NotEqual(uiThread, workerThread);
+                        w.Close();
+                    }
+                }
+                catch (Exception e) { failure = e; }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            t.Join();
+            Assert.Null(failure);
+        }
     }
 }
