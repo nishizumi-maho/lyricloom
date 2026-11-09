@@ -1,32 +1,25 @@
 """Standalone karaoke player: the starry-night view of one enhanced .lrc, no MusicBee needed."""
 from __future__ import annotations
 
-import html
 import math
 import random
-import unicodedata
-from bisect import bisect_right
 from pathlib import Path
 from typing import Callable
 
 import mutagen
 
-from PySide6.QtCore import QPointF, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QFont, QKeySequence, QLinearGradient, QPainter, QRadialGradient, QShortcut
+from PySide6.QtCore import QElapsedTimer, QPointF, Qt, QTimer, QUrl
+from PySide6.QtGui import QColor, QKeySequence, QLinearGradient, QPainter, QRadialGradient, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSizePolicy,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton,
                                QSlider, QVBoxLayout, QWidget)
 
 from .. import config
 from ..lrc import format_ts, parse_lrc
-from ..model import LrcDoc, Line, Segment
+from ..model import LrcDoc, Line
+from .lyric_view import LyricView
 from .media import default_script_path, script_candidates, vocal_source
 from .widgets import SeekSlider
-
-_FUTURE = "#657199"   # not sung yet
-_ACTIVE = "#ffd166"   # the word being sung now
-_PAST = "#8be9fd"     # already sung
-
 
 def _track_label(audio: Path) -> str:
     """Artist and title from tags, or the filename when the tags are missing."""
@@ -42,19 +35,12 @@ def _track_label(audio: Path) -> str:
     return audio.stem
 
 
-def _is_rtl(text: str) -> bool:
-    """Base direction from the first strong character, so Arabic and Hebrew lines read correctly."""
-    for ch in text:
-        direction = unicodedata.bidirectional(ch)
-        if direction in ("R", "AL"):
-            return True
-        if direction == "L":
-            return False
-    return False
-
-
 class _StarrySky(QWidget):
-    """The backdrop: a vertical night gradient and deterministic, gently twinkling stars."""
+    """The backdrop: a vertical night gradient and deterministic, gently twinkling stars.
+
+    The window's lyric view drives :meth:`advance` with the same frame delta, so the stars move at
+    the animation frame rate instead of a separate 10 fps timer.
+    """
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -63,16 +49,9 @@ class _StarrySky(QWidget):
         self._stars = [(rng.random(), rng.random(), rng.uniform(0.7, 2.1),
                         rng.uniform(0.0, math.tau), rng.uniform(0.35, 1.0)) for _ in range(90)]
         self._phase = 0.0
-        self._timer = QTimer(self, interval=100, timeout=self._tick)
 
-    def start(self):
-        self._timer.start()
-
-    def stop(self):
-        self._timer.stop()
-
-    def _tick(self):
-        self._phase += 0.09
+    def advance(self, _wall_seconds: float, dt: float) -> None:
+        self._phase += max(0.0, min(0.1, dt)) * 0.9
         self.update()
 
     def paintEvent(self, _event):
@@ -127,7 +106,8 @@ class KaraokeWindow(QMainWindow):
             self._script_paths.append(("Main (.lrc)", self.lyrics_path))
         self.doc: LrcDoc | None = None
         self._display_name = display_name or _track_label(self.audio)
-        self._lyric_key: tuple | None = None
+        self._sample_elapsed = QElapsedTimer()
+        self._sample_elapsed.start()
         self._autoplay = True
         self._pending_seek: int | None = max(0, int(start_ms))
         self._pending_play = True
@@ -168,27 +148,11 @@ class KaraokeWindow(QMainWindow):
         self.title_label.setStyleSheet("color: #8494c4; font-size: 11pt;")
         self.title_label.setAccessibleName("Track")
         layout.addWidget(self.title_label)
-        layout.addStretch(1)
 
-        self.current_line = QLabel()
-        self.current_line.setTextFormat(Qt.RichText)
-        self.current_line.setAlignment(Qt.AlignCenter)
-        self.current_line.setWordWrap(True)
-        self.current_line.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.current_line.setFont(QFont(self.font().family(), 38, QFont.DemiBold))
-        self.current_line.setStyleSheet("color: #eaf4ff; background: transparent;")
-        self.current_line.setAccessibleName("Current lyric line")
-        layout.addWidget(self.current_line)
-
-        self.next_line = QLabel()
-        self.next_line.setTextFormat(Qt.RichText)
-        self.next_line.setAlignment(Qt.AlignCenter)
-        self.next_line.setWordWrap(True)
-        self.next_line.setFont(QFont(self.font().family(), 18))
-        self.next_line.setStyleSheet("color: #6f7fa8; background: transparent;")
-        self.next_line.setAccessibleName("Next lyric line")
-        layout.addWidget(self.next_line)
-        layout.addStretch(2)
+        self.lyrics = LyricView(animate_when_paused=True)
+        self.lyrics.setAccessibleName("Lyric lines")
+        layout.addWidget(self.lyrics, 1)
+        self.lyrics.frameAdvanced.connect(self.sky.advance)
 
         panel = QWidget()
         panel.setObjectName("controls")
@@ -306,6 +270,7 @@ class KaraokeWindow(QMainWindow):
         self.vocals.toggled.connect(self._source_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._state_changed)
+        self.player.positionChanged.connect(self._position_changed)
         self.player.mediaStatusChanged.connect(self._media_status)
         self.player.errorOccurred.connect(self._media_error)
 
@@ -345,6 +310,17 @@ class KaraokeWindow(QMainWindow):
 
     def _state_changed(self, state):
         self.btn_play.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
+        self._sample_player()
+
+    def _position_changed(self, _position: int):
+        self._sample_player()
+
+    def _sample_player(self):
+        """Timestamp a player reading when the player is asked, not when a frame reads it."""
+        sampled_at = self._sample_elapsed.nsecsElapsed() / 1_000_000.0
+        position = self.player.position()
+        playing = self.player.playbackState() == QMediaPlayer.PlayingState
+        self.lyrics.sample(position, playing, sampled_at)
 
     def _duration_changed(self, duration: int):
         self.seek.setRange(0, max(0, duration))
@@ -371,34 +347,12 @@ class KaraokeWindow(QMainWindow):
         clock = f"{format_ts(position)} / {format_ts(self.player.duration())}"
         if clock != self.time_label.text():
             self.time_label.setText(clock)
-        self._refresh_lyrics(position)
+        self._sample_player()
 
     # ---------- lyrics ----------
     @staticmethod
     def _current_line_index(lines: list[Line], t_ms: int) -> int:
-        starts = [line.start_ms if line.start_ms is not None else 10 ** 18 for line in lines]
-        return bisect_right(starts, t_ms) - 1
-
-    @staticmethod
-    def _word_state(segment: Segment, t_ms: int, next_start_ms: int | None = None) -> str:
-        """future before the word, active while it sounds, past once its end has passed."""
-        if segment.start_ms is None:
-            return "past"   # line-only lyrics have no word timing; show them fully lit
-        if t_ms < segment.start_ms:
-            return "future"
-        end = segment.end_ms if segment.end_ms is not None else next_start_ms
-        return "past" if end is not None and t_ms >= end else "active"
-
-    @classmethod
-    def _line_html(cls, line: Line, t_ms: int, line_end_ms: int | None) -> str:
-        parts = []
-        for i, segment in enumerate(line.segments):
-            following = line.segments[i + 1].start_ms if i + 1 < len(line.segments) else line_end_ms
-            state = cls._word_state(segment, t_ms, following)
-            color = _ACTIVE if state == "active" else _PAST if state == "past" else _FUTURE
-            weight = " font-weight:700;" if state == "active" else ""
-            parts.append(f'<span style="color:{color};{weight}">{html.escape(segment.text)}</span>')
-        return "".join(parts)
+        return LyricView.line_index(lines, t_ms)
 
     def _load_lyrics(self):
         if not self.lyrics_path.is_file():
@@ -417,16 +371,16 @@ class KaraokeWindow(QMainWindow):
             self._show_message("No timed lines in the lyrics file",
                                f"{self.lyrics_path.name} has no [mm:ss] lines.")
             return
-        self._lyric_key = None
-        position = int(self.player.position()) if hasattr(self, "player") else 0
-        self._refresh_lyrics(position, force=True)
+        self.lyrics.set_doc(self.doc)
 
     def reload_lyrics(self) -> None:
         """Re-reads the current lyric file, for example after the main window saves an edit."""
         self._refresh_scripts()
         self._load_lyrics()
-        if self.doc is not None:
-            self._refresh_lyrics(int(self.player.position()), force=True)
+
+    def set_animation_divisor(self, divisor: int) -> None:
+        """Apply a frame-rate choice changed in Settings without reopening the window."""
+        self.lyrics.set_divisor(divisor)
 
     def _refresh_scripts(self) -> None:
         paths = script_candidates(self.audio, config.japanese_script())
@@ -455,38 +409,9 @@ class KaraokeWindow(QMainWindow):
             return
         self.lyrics_path = new_path
         self._load_lyrics()
-        if self.doc is not None:
-            self._refresh_lyrics(int(self.player.position()), force=True)
 
     def _show_message(self, headline: str, detail: str):
-        self.current_line.setText(f'<span style="color:#dfe8ff;">{html.escape(headline)}</span>')
-        self.next_line.setText(f'<span style="color:#7484ad;">{html.escape(detail)}</span>')
-
-    def _refresh_lyrics(self, t_ms: int, force: bool = False):
-        if not self.doc or not self.doc.lines:
-            return
-        index = self._current_line_index(self.doc.lines, t_ms)
-        shown = index if index >= 0 else 0   # before the first line, show it dim as an intro
-        line = self.doc.lines[shown]
-        following = self.doc.lines[shown + 1] if shown + 1 < len(self.doc.lines) else None
-        line_end = following.start_ms if following is not None else None
-        states = []
-        for i, segment in enumerate(line.segments):
-            nxt = line.segments[i + 1].start_ms if i + 1 < len(line.segments) else line_end
-            states.append(self._word_state(segment, t_ms, nxt))
-        key = (shown, tuple(states))
-        if not force and key == self._lyric_key:
-            return
-        self._lyric_key = key
-
-        self.current_line.setLayoutDirection(Qt.RightToLeft if _is_rtl(line.text) else Qt.LeftToRight)
-        self.current_line.setText(self._line_html(line, t_ms, line_end))
-        if following is not None:
-            self.next_line.setLayoutDirection(
-                Qt.RightToLeft if _is_rtl(following.text) else Qt.LeftToRight)
-            self.next_line.setText(f'<span style="color:#6f7fa8;">{html.escape(following.text)}</span>')
-        else:
-            self.next_line.clear()
+        self.lyrics.set_message(headline, detail)
 
     # ---------- keyboard ----------
     def _install_shortcuts(self):
@@ -540,7 +465,8 @@ class KaraokeWindow(QMainWindow):
     # ---------- window ----------
     def showEvent(self, event):
         super().showEvent(event)
-        self.sky.start()
+        self._sample_player()
+        self.lyrics.start()
         self._ui_timer.start()
         self.activateWindow()
         self.setFocus(Qt.OtherFocusReason)
@@ -555,13 +481,13 @@ class KaraokeWindow(QMainWindow):
             self._autoplay = False
 
     def hideEvent(self, event):
-        self.sky.stop()
+        self.lyrics.stop()
         self._ui_timer.stop()
         super().hideEvent(event)
 
     def closeEvent(self, event):
         self._ui_timer.stop()
-        self.sky.stop()
+        self.lyrics.stop()
         self._pending_seek = None
         self._pending_play = False
         self.player.stop()

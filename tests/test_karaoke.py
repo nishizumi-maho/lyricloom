@@ -1,5 +1,6 @@
 import os
 import time
+import wave
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -11,7 +12,6 @@ from lyricloom import config  # noqa: E402
 from lyricloom.app.karaoke import KaraokeWindow  # noqa: E402
 from lyricloom.app.media import default_script_path, script_candidates  # noqa: E402
 from lyricloom.lrc import parse_lrc  # noqa: E402
-from lyricloom.model import Line, Segment  # noqa: E402
 from lyricloom.stages.write import japanese_path, romaji_path  # noqa: E402
 
 LRC = ("[00:01.00]<00:01.00>eu <00:01.50>vou<00:02.00>\n"
@@ -20,6 +20,14 @@ LRC = ("[00:01.00]<00:01.00>eu <00:01.50>vou<00:02.00>\n"
 
 def _app():
     return QApplication.instance() or QApplication([])
+
+
+def _wait(app, condition, timeout=10.0):
+    end = time.time() + timeout
+    while not condition() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+    return condition()
 
 
 class FakePlayer:
@@ -72,30 +80,6 @@ def test_current_line_index():
     assert KaraokeWindow._current_line_index(lines, 2999) == 0
     assert KaraokeWindow._current_line_index(lines, 3000) == 1
     assert KaraokeWindow._current_line_index(lines, 99999) == 1
-
-
-def test_word_state():
-    word = Segment("vou", 1000, 2000)
-    assert KaraokeWindow._word_state(word, 999) == "future"
-    assert KaraokeWindow._word_state(word, 1000) == "active"
-    assert KaraokeWindow._word_state(word, 1999) == "active"
-    assert KaraokeWindow._word_state(word, 2000) == "past"
-    assert KaraokeWindow._word_state(Segment("line only", None, None), 0) == "past"
-
-
-def test_word_state_uses_the_next_word_when_end_is_missing():
-    word = Segment("novo", 3000, None)
-    assert KaraokeWindow._word_state(word, 3500, 4000) == "active"
-    assert KaraokeWindow._word_state(word, 4000, 4000) == "past"
-
-
-def test_line_html_escapes_lyrics():
-    line = Line(0, [Segment("<b>&", 0, 1000), Segment(" ok", 1000, 2000)])
-    markup = KaraokeWindow._line_html(line, 500, None)
-    assert "&lt;b&gt;&amp;" in markup
-    assert "<b>" not in markup
-    assert "#ffd166" in markup      # the first word is being sung
-    assert "#657199" in markup      # the second one is still dim
 
 
 def _audio(tmp_path, text="romaji line"):
@@ -282,5 +266,40 @@ def test_saving_in_the_main_window_reloads_an_open_karaoke_window(monkeypatch, t
     finally:
         window.karaoke_window = None
         window.dirty = False
+        window.close()
+        app.processEvents()
+
+
+def test_karaoke_window_plays_seeks_pauses_and_closes_a_silent_wav(tmp_path):
+    """Gate G4: the real window and player open a fixture LRC and a short silent WAV, play,
+    seek, pause and close without a playback error."""
+    app = _app()
+    audio = tmp_path / "Artist" / "Album" / "01 - Song.wav"
+    audio.parent.mkdir(parents=True)
+    with wave.open(str(audio), "wb") as handle:
+        handle.setnchannels(2)
+        handle.setsampwidth(2)
+        handle.setframerate(44100)
+        handle.writeframes(b"\x00\x00\x00\x00" * 88200)   # two silent seconds
+    lyrics = audio.with_suffix(".lrc")
+    lyrics.write_text("[00:00.20]<00:00.20>hello <00:00.60>world<00:01.00>\n"
+                      "[00:01.20]<00:01.20>second line<00:01.80>\n", encoding="utf-8")
+
+    window = KaraokeWindow(audio, lyrics, start_ms=0)
+    try:
+        # The WAV is silent and a headless CI machine may have no audio device: the real media
+        # pipeline (decode, position, seek, pause) is what this gate exercises.
+        window.player.setAudioOutput(None)
+        window.show()
+        assert _wait(app, lambda: window.player.playbackState() == QMediaPlayer.PlayingState, timeout=10)
+        window.player.setPosition(400)
+        _wait(app, lambda: window.player.position() >= 300, timeout=5)
+        window.player.pause()
+        _wait(app, lambda: window.player.playbackState() == QMediaPlayer.PausedState, timeout=5)
+        assert "Playback error" not in window.hint.text()
+        assert window.doc is not None and len(window.doc.lines) == 2
+        window.lyrics.advance(window.lyrics.elapsed_ms())
+        assert window.lyrics._lines and window.lyrics.current_line_text()
+    finally:
         window.close()
         app.processEvents()

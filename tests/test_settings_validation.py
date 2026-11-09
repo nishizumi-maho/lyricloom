@@ -117,3 +117,28 @@ def test_a_write_error_saving_settings_is_shown(app, tmp_path, monkeypatch):
     dialog._save()
     assert seen and "No space left on device" in seen[0][1]
     dialog.close()
+
+
+def test_smooth_animation_defaults_to_match_display_and_saves_a_divisor(app, tmp_path):
+    assert config.smooth_animation_divisor() == 1
+    library = tmp_path / "Library"
+    library.mkdir()
+    dialog = SettingsDialog()
+    try:
+        assert dialog.smooth.currentIndex() == 0
+        dialog.library.setText(str(library))
+        dialog.vocals.setText(str(tmp_path / "Vocals"))
+        dialog.work.setText(str(tmp_path / "Work"))
+        dialog.smooth.setCurrentIndex(1)
+        dialog._save()
+        assert config.smooth_animation_divisor() == 2
+        assert dialog.smooth.currentText() == "Half refresh"
+    finally:
+        dialog.close()
+
+    config.set_smooth_animation_divisor(3)
+    assert config.smooth_animation_divisor() == 3
+    config.set_setting("smooth_animation", "not a divisor")
+    assert config.smooth_animation_divisor() == 1
+    config.set_setting("smooth_animation", 99)
+    assert config.smooth_animation_divisor() == 1
