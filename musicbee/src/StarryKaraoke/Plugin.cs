@@ -509,8 +509,7 @@ namespace MusicBeePlugin
                 SetMute = m => OnPlayer(() => _mb.Player_SetMute(m))
             };
             var w = new KaraokeWindow(_settings,
-                                      () => (BitConverter.Int64BitsToDouble(Interlocked.Read(ref _polledPositionBits)),
-                                             _polledPlaying, _polledVolume, _polledMute),
+                                      () => PolledSampleSnapshot(),
                                       controls, showActivated: activate, log: LogException);
             ElementHost.EnableModelessKeyboardInterop(w);
             w.SettingsRequested += (s, e) => Safe.Run(OpenSettings, LogException);
@@ -580,12 +579,26 @@ namespace MusicBeePlugin
         // position and waits for that thread, so a position read from there deadlocks MusicBee (as when
         // going back in a song). A background timer reads it, and commands run on the thread pool.
         private System.Threading.Timer _pollTimer;
-        private volatile bool _polledPlaying;
-        // A double is not guaranteed atomic on 32-bit Windows, and MusicBee is a 32-bit process: keep
-        // the bits in a long and read/write them through Interlocked.
-        private long _polledPositionBits;
-        private float _polledVolume = 1f;
-        private bool _polledMute;
+        // The position, play state and sample timestamp must reach the window together: a torn
+        // read (new timestamp with the previous position) would make the clock extrapolate a
+        // whole poll interval. One immutable object swapped atomically is cheaper than a lock
+        // around a player call, which must never block the UI thread.
+        private sealed class PollSample
+        {
+            public double PositionMs, SampledAtMs;
+            public bool Playing;
+            public float Volume;
+            public bool Mute;
+        }
+        private PollSample _polledSample;
+
+        private (double PositionMs, bool Playing, float Volume, bool Mute, double SampledAtMs) PolledSampleSnapshot()
+        {
+            var sample = Interlocked.CompareExchange(ref _polledSample, null, null);
+            return sample == null
+                ? (0.0, false, 1f, false, 0.0)
+                : (sample.PositionMs, sample.Playing, sample.Volume, sample.Mute, sample.SampledAtMs);
+        }
 
         private void StartPolling()
         {
@@ -595,10 +608,15 @@ namespace MusicBeePlugin
                 if (_window == null || _shuttingDown) return;
                 try
                 {
-                    Interlocked.Exchange(ref _polledPositionBits, BitConverter.DoubleToInt64Bits(_mb.Player_GetPosition()));
-                    _polledPlaying = _mb.Player_GetPlayState() == PlayState.Playing;
-                    _polledVolume = _mb.Player_GetVolume();
-                    _polledMute = _mb.Player_GetMute();
+                    // Stamp the sample when the player is asked, not when a frame later reads it:
+                    // a 100 ms poll can be up to 100 ms old, and that latency is exactly what made
+                    // the old clock treat a stale reading as "now".
+                    var sample = new PollSample { SampledAtMs = PlaybackClock.TimestampMs() };
+                    sample.PositionMs = _mb.Player_GetPosition();
+                    sample.Playing = _mb.Player_GetPlayState() == PlayState.Playing;
+                    sample.Volume = _mb.Player_GetVolume();
+                    sample.Mute = _mb.Player_GetMute();
+                    Interlocked.Exchange(ref _polledSample, sample);
                 }
                 catch (Exception) { }
             }, null, 0, 100);
@@ -643,7 +661,7 @@ namespace MusicBeePlugin
             }
             var before = _settings.Japanese;
             var dlg = new SettingsWindow(_settings, preview => Safe.Run(() => _window?.ApplySettings(preview), LogException),
-                                         LogException, BuildDiagnosticsText);
+                                         LogException, BuildDiagnosticsText, _window?.MonitorHz ?? 0);
             // A topmost fullscreen karaoke window must not hide its own settings dialog.
             dlg.Topmost = _window != null && _window.IsFullscreen;
             ElementHost.EnableModelessKeyboardInterop(dlg);

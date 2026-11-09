@@ -157,7 +157,8 @@ namespace StarryKaraoke.Tests
                 Assert.Equal(AutoOpenLyrics.WordTimedOnly, s.AutoOpenLyrics);
                 Assert.Equal(UnsupportedSongAction.Keep, s.OnUnsupportedSong);
                 Assert.False(s.AutoOpenFocus);
-                Assert.Equal(60, s.WindowFps);
+                Assert.Equal(0, s.WindowFps);
+                Assert.Equal(1, s.WindowFpsDivisor);
                 Assert.True(s.FullscreenTopmost);
                 Assert.Equal(PartyModeOnStop.LeaveFullscreen, s.PartyModeOnStop);
             }
@@ -195,7 +196,7 @@ namespace StarryKaraoke.Tests
                     FullscreenMonitor = @"\\.\DISPLAY3",
                     FullscreenTopmost = false,
                     PartyModeOnStop = PartyModeOnStop.Close,
-                    WindowFps = 120
+                    WindowFpsDivisor = 2
                 }.Save(temp.Path);
 
                 var s = Settings.Load(temp.Path);
@@ -207,8 +208,28 @@ namespace StarryKaraoke.Tests
                 Assert.Equal(@"\\.\DISPLAY3", s.FullscreenMonitor);
                 Assert.False(s.FullscreenTopmost);
                 Assert.Equal(PartyModeOnStop.Close, s.PartyModeOnStop);
-                Assert.Equal(120, s.WindowFps);
+                Assert.Equal(2, s.WindowFpsDivisor);
+                Assert.Equal(0, s.WindowFps);
             }
+        }
+
+        [Theory]
+        [InlineData(60, 144, 2)]
+        [InlineData(30, 144, 3)]
+        [InlineData(120, 144, 1)]
+        [InlineData(60, 60, 1)]
+        [InlineData(30, 60, 2)]
+        public void A_legacy_fps_value_is_migrated_to_the_nearest_divisor_once(
+            int oldFps, int monitorHz, int expectedDivisor)
+        {
+            var s = new Settings { WindowFps = oldFps };
+            s.MigrateFrameRate(monitorHz);
+            Assert.Equal(expectedDivisor, s.WindowFpsDivisor);
+            Assert.Equal(0, s.WindowFps);
+
+            // Calling it again, or opening the settings window later, does not change the choice.
+            s.MigrateFrameRate(60);
+            Assert.Equal(expectedDivisor, s.WindowFpsDivisor);
         }
 
         [Fact]

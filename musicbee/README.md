@@ -85,10 +85,11 @@ values. **Defaults** resets everything except the window's position, size and mo
 - Lit colour, glow head, current line (unlit), other lines, glow, background top/bottom and title.
 - Stars on/off, the passing comet, the number of stars, a burst of stars at each line end, glow on lit
   lyrics, the current line growing, and the transition speed.
-- **Show title**, **Show progress bar**, **Fullscreen shows only the lyrics**, and **Window FPS**.
-- **Window FPS** is *Display refresh rate* or 30, 60, 120; the default is 60. *Display refresh rate*
-  follows the monitor the window is on. Rendering stops when the window is hidden, minimised or
-  completely covered by another window, and resumes when it is visible again.
+- **Show title**, **Show progress bar**, **Fullscreen shows only the lyrics**, and **Window frame rate**.
+- **Window frame rate** is *Match display*, *Half refresh* or *Third refresh*, with the resulting Hz
+  shown for the monitor the window is on. The default is *Match display*. Rendering stops when the
+  window is hidden, minimised or completely covered by another window, and resumes when it is
+  visible again.
 
 **Party mode**
 
@@ -136,8 +137,10 @@ Fullscreen fills exactly one monitor, including the taskbar area. Choose the mon
 or in the window menu; an empty monitor setting means the window's current monitor. Fullscreen can
 stay above other applications, and can show only the lyrics.
 
-The frame rate is a separate setting. 60 is a good default; 30 saves power, and 120 suits a
-high-refresh display. The plugin does not change MusicBee's or other plugins' frame rate.
+The frame rate is a separate setting: *Match display* (the default), *Half refresh* or *Third
+refresh*. Every rate is an integer divisor of the monitor's refresh rate, so 144 Hz offers 144, 72
+or 48 fps and never a juddering 60. A paused song ticks slowly at an exact divisor too. The plugin
+does not change MusicBee's or other plugins' frame rate.
 
 ## Per-song lyrics delay
 

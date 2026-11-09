@@ -55,6 +55,19 @@ namespace StarryKaraoke.Tests
             Assert.Equal(1.5, scene.PixelsPerDip);
         }
 
+        /// <summary>The sweep edge is cached per quarter pixel. Rounding must never move it by more
+        /// than half a bucket, so the moving edge stays visually continuous.</summary>
+        [Fact]
+        public void The_cached_gradient_edge_is_within_an_eighth_of_a_pixel()
+        {
+            for (var x = -5.0; x <= 5000; x += 0.013)
+            {
+                var snapped = KaraokeScene.LitBucket(x) / 4.0;
+                Assert.True(Math.Abs(snapped - x) <= 0.125 + 1e-9,
+                    $"edge {x} snapped to {snapped}");
+            }
+        }
+
         private static int CountEllipses(KaraokeScene scene, Size size, double t)
         {
             scene.Update(0.016, t, size);
