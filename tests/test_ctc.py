@@ -1,4 +1,5 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,7 +79,10 @@ def test_wsl_alignment_prefers_the_checkpoint_copy_inside_the_distro(monkeypatch
     spec = config.resolve_model("align")
     assert payload["model_candidates"][0] == \
         "/opt/lyricloom/models/torch/hub/checkpoints/model.pt"
-    assert payload["model_candidates"][-1].startswith("/mnt/")
+    fallback = payload["model_candidates"][-1]      # the copy in LyricLoom's own models folder
+    assert fallback.endswith("/torch/hub/checkpoints/model.pt") and fallback != payload["model_candidates"][0]
+    if sys.platform == "win32":
+        assert fallback.startswith("/mnt/")
     assert payload["model_path"] == payload["model_candidates"][-1]
     assert payload["model_size"] == spec.size
 

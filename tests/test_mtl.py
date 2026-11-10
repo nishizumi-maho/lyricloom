@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -130,7 +131,10 @@ def test_wsl_singing_model_prefers_the_checkpoint_copy_inside_the_distro(monkeyp
     payload = calls[0]["payload"]
     spec = config.resolve_model("singing", "en")
     assert payload["checkpoint_dirs"][0] == "/opt/lyricloom/models/mtl"
-    assert payload["checkpoint_dirs"][-1].startswith("/mnt/")
+    fallback = payload["checkpoint_dirs"][-1]       # the copy in LyricLoom's own models folder
+    assert fallback.endswith("/models/mtl") and fallback != payload["checkpoint_dirs"][0]
+    if sys.platform == "win32":
+        assert fallback.startswith("/mnt/")
     assert payload["checkpoint_dir"] == payload["checkpoint_dirs"][-1]
     assert payload["checkpoint_size"] == spec.size
 

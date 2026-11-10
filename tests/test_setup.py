@@ -108,6 +108,8 @@ def test_parse_wsl_distros_reads_state_version_and_default():
 
 
 def test_detect_collects_gpus_nvidia_details_and_wsl(monkeypatch):
+    # The Windows memory query cannot run on the Linux CI machine once IS_WINDOWS is forced.
+    monkeypatch.setattr(setup, "_ram_bytes", lambda: 32 * setup.GiB)
     monkeypatch.setattr(config, "IS_WINDOWS", True)
     monkeypatch.setattr(setup.shutil, "which", lambda name: {
         "nvidia-smi": r"C:\Windows\System32\nvidia-smi.exe",
@@ -137,7 +139,7 @@ def test_detect_collects_gpus_nvidia_details_and_wsl(monkeypatch):
     assert report.wsl.distros[0].name == "linux"
     assert report.os_name
     assert report.cpu_cores
-    assert report.ram_bytes
+    assert report.ram_bytes == 32 * setup.GiB
     assert report.disk_free_bytes
 
 
