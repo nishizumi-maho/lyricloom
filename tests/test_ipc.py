@@ -205,7 +205,10 @@ def test_remove_stale_keeps_the_name_of_a_live_instance(app):
     live = ipc.Server(name=name)
     assert live.listen()
     other = ipc.Server(name=name)
-    other.listen()   # on Windows Qt may allow a second pipe with the same name
+    if os.name == "nt":
+        other.listen()   # on Windows Qt may allow a second pipe with the same name
+    # (not on Linux: there listen() replaces the live socket file, and the app never calls it
+    # before a failed connect)
     try:
         assert other.remove_stale() is False
         reply = ipc.send({"cmd": "activate"}, name=name, timeout_ms=3000)
