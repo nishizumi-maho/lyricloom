@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
 from ...model import TrackMeta
-from .base import RawResult, check
+from .base import RawResult, check, get_allowed, host_matches, is_https_url
 
 name = "utaten"
 _LINK = re.compile(r'href="(/lyric/[a-z]{2}\d+/)"')
+
+
+def allowed_page(url: str) -> bool:
+    """Only https utaten.com pages may be fetched from its own search results."""
+    return is_https_url(url) and host_matches(urlparse(url).hostname, "utaten.com")
 
 
 def parse_search(html_text: str) -> list[str]:
@@ -38,7 +44,7 @@ def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
     out = []
     for path in parse_search(r.text)[:3]:
         url = "https://utaten.com" + path
-        title, artist, text = parse_page(check(client.get(url)).text)
+        title, artist, text = parse_page(get_allowed(client, url, allowed_page).text)
         if text:
             out.append(RawResult(title, artist, None, text, None, url))
     return out

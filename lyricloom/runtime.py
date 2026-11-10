@@ -1,8 +1,9 @@
 """Downloads of the optional large models and the small NLTK data used by the singing model.
 
-The app never downloads anything silently: the Models dialog (or ``lyricloom models``) lists what is
-missing and starts only the downloads the user asks for. Files are written to a ``.part`` file and
-moved into place only after their size/checksum is verified.
+The engine never downloads anything while processing a song: the Models dialog (or ``lyricloom
+models download``) lists what is missing and starts only the downloads the user asks for.  Every
+file goes through :func:`lyricloom.downloads.download_verified`: HTTPS only, a resumable ``.part``
+file, and an exact size + SHA-256 check before the atomic move.
 """
 from __future__ import annotations
 
@@ -11,18 +12,17 @@ import shutil
 from pathlib import Path
 from typing import Callable
 
-import httpx
-
-from . import config
-from .workers import run_worker
+from . import config, models
+from .downloads import DownloadCancelled, DownloadError, ChecksumMismatch
 
 Progress = Callable[[int, int], None]  # bytes done, bytes total (total may be 0)
 
+# Compatibility names for code that imported the old constants from this module.
 WHISPER_REPO = "ggerganov/whisper.cpp"
 WHISPER_NAME = "ggml-large-v3.bin"
-WHISPER_SHA256 = "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2"
-MTL_URL = "https://github.com/jhuang448/LyricsAlignment-MTL/raw/main/checkpoints/checkpoint_MTL"
-MTL_SHA256 = "826559e7e810bf8f90223d8fd5c66525c01ad4dd9cdc19d019f39f784e7ed3c1"
+WHISPER_SHA256 = models.get("whisper-large-v3").sha256
+MTL_URL = models.get("singing-mtl").url
+MTL_SHA256 = models.get("singing-mtl").sha256
 MTL_MIN_BYTES = 60_000_000
 
 NLTK_PACKAGES = {"cmudict": "corpora/cmudict",
@@ -40,52 +40,30 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _download(url: str, dest: Path, progress: Progress | None = None, expected: str | None = None) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".part")
-    with httpx.stream("GET", url, follow_redirects=True, timeout=60) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        done = 0
-        with tmp.open("wb") as f:
-            for chunk in r.iter_bytes(1 << 20):
-                f.write(chunk)
-                done += len(chunk)
-                if progress:
-                    progress(done, total)
-    if expected and sha256(tmp).lower() != expected.lower():
-        tmp.unlink(missing_ok=True)
-        raise RuntimeError(f"checksum mismatch for {dest.name}")
-    tmp.replace(dest)
-    return dest
+def _status(stage: str) -> str:
+    return models.status(config.resolve_model(stage))
 
 
-def whisper_expected_sha256() -> str:
-    """The checksum Hugging Face publishes for the model (large-v3 can be updated rarely)."""
-    try:
-        tree = httpx.get(f"https://huggingface.co/api/models/{WHISPER_REPO}/tree/main", timeout=30).json()
-        return next(f["lfs"]["oid"] for f in tree if f["path"] == WHISPER_NAME)
-    except Exception:  # noqa: BLE001 - fall back to the checksum pinned above
-        return WHISPER_SHA256
+def _available(stage: str) -> bool:
+    """A model that processing may use: a verified file or one whose pinned size matches and that
+    has no sidecar yet (FR-A-07)."""
+    return _status(stage) in ("ready", "unverified")
 
 
 def whisper_status() -> bool:
-    return config.WHISPER_MODEL.is_file() and config.WHISPER_MODEL.stat().st_size > 1_000_000_000
+    return _available("transcribe")
 
 
 def separator_status() -> bool:
-    return (config.SEPARATOR_MODEL_DIR / config.SEPARATOR_MODEL).is_file()
+    return _available("separate")
 
 
 def mtl_status() -> bool:
-    return config.MTL_CHECKPOINT.is_file() and config.MTL_CHECKPOINT.stat().st_size > MTL_MIN_BYTES
+    return _available("singing")
 
 
 def mms_status() -> bool:
-    # torchaudio stores the checkpoint under TORCH_HOME/hub/checkpoints. The exact filename is
-    # owned by torchaudio; a directory with any checkpoint is a useful heuristic for the UI.
-    root = config.MODELS / "torch" / "hub" / "checkpoints"
-    return root.is_dir() and any(p.suffix.lower() in (".pth", ".pt") for p in root.iterdir())
+    return _available("align")
 
 
 def status() -> dict[str, bool]:
@@ -93,44 +71,76 @@ def status() -> dict[str, bool]:
             "mtl": mtl_status(), "mms": mms_status()}
 
 
-def download_whisper(progress: Progress | None = None) -> Path:
-    want = whisper_expected_sha256()
-    dest = config.WHISPER_MODEL
-    if dest.is_file() and sha256(dest) == want:
-        if progress:
-            progress(1, 1)
-        return dest
-    return _download(f"https://huggingface.co/{WHISPER_REPO}/resolve/main/{WHISPER_NAME}",
-                     dest, progress, want)
+def download_spec(spec: models.ModelSpec, progress: Progress | None = None,
+                  cancel=None) -> list[Path]:
+    return models.download(spec, progress=progress, cancel=cancel)
 
 
-def download_mtl(progress: Progress | None = None) -> Path:
-    if mtl_status():
-        if progress:
-            progress(1, 1)
-        return config.MTL_CHECKPOINT
-    return _download(MTL_URL, config.MTL_CHECKPOINT, progress, MTL_SHA256)
+def repair(spec: models.ModelSpec, progress: Progress | None = None, cancel=None) -> list[Path]:
+    return models.repair(spec, progress=progress, cancel=cancel)
 
 
-def download_separator() -> None:
-    """audio-separator knows the URL and checksum of its own model registry."""
-    run_worker("lyricloom.workers.download", {"kind": "separator"}, timeout_s=3600)
+def download_model(model_id: str, progress: Progress | None = None, cancel=None) -> list[Path]:
+    spec = models.find(model_id)
+    if spec is None:
+        raise ValueError(f"unknown model {model_id!r}; use `lyricloom models list`")
+    return download_spec(spec, progress=progress, cancel=cancel)
 
 
-def download_mms() -> None:
-    run_worker("lyricloom.workers.download", {"kind": "mms"}, timeout_s=3600)
+def _download_for(stage: str, model_id: str | None) -> models.ModelSpec:
+    """The selected model for ``stage``; an unknown explicit id is an error, never a silent
+    fallback to the default (FR-A-09)."""
+    if not model_id:
+        return config.resolve_model(stage)
+    spec = models.find(model_id)
+    if spec is None:
+        raise ValueError(f"unknown model {model_id!r}; use `lyricloom models list`")
+    return spec
 
 
-def download_nltk() -> None:
-    run_worker("lyricloom.workers.download", {"kind": "nltk"}, timeout_s=600)
+def download_whisper(progress: Progress | None = None, model_id: str | None = None) -> Path:
+    return download_spec(_download_for("transcribe", model_id), progress=progress)[0]
 
 
-def download_all(progress: Progress | None = None) -> None:
-    download_whisper(progress)
-    download_separator()
-    download_mms()
-    download_mtl(progress)
-    download_nltk()
+def download_separator(progress: Progress | None = None, model_id: str | None = None) -> Path:
+    return download_spec(_download_for("separate", model_id), progress=progress)[0]
+
+
+def download_mms(progress: Progress | None = None, model_id: str | None = None) -> Path:
+    return download_spec(_download_for("align", model_id), progress=progress)[0]
+
+
+def download_mtl(progress: Progress | None = None, model_id: str | None = None) -> Path:
+    return download_spec(_download_for("singing", model_id), progress=progress)[0]
+
+
+def download_nltk(progress: Progress | None = None) -> list[Path]:
+    return download_spec(models.get("singing-nltk-data"), progress=progress)
+
+
+def download_all(progress: Progress | None = None, cancel=None) -> dict[str, str]:
+    """Downloads every default model.  One failure does not stop the remaining downloads (R3-28).
+
+    Returns ``{model_id: "ready" | "error: ..."}`` so the caller can show a per-model summary.
+    """
+    results: dict[str, str] = {}
+    for spec in models.default_models():
+        try:
+            download_spec(spec, progress=progress, cancel=cancel)
+            results[spec.id] = "ready"
+        except DownloadCancelled:
+            results[spec.id] = "cancelled"
+            break
+        except (DownloadError, ChecksumMismatch, OSError, RuntimeError) as exc:
+            results[spec.id] = f"error: {exc}"
+    return results
+
+
+def model_status(model_id: str, verify: bool = False) -> str:
+    spec = models.find(model_id)
+    if spec is None:
+        raise ValueError(f"unknown model {model_id!r}; use `lyricloom models list`")
+    return models.verify(spec) if verify else models.status(spec)
 
 
 def human_size(n: int) -> str:
@@ -151,17 +161,4 @@ def check_ffmpeg() -> bool:
 
 
 def _nltk_ready() -> bool:
-    try:
-        import nltk
-
-        def has(path: str) -> bool:
-            try:
-                nltk.data.find(path)
-                return True
-            except LookupError:
-                return False
-
-        return has("corpora/cmudict") and (
-            has("taggers/averaged_perceptron_tagger") or has("taggers/averaged_perceptron_tagger_eng"))
-    except Exception:  # noqa: BLE001
-        return False
+    return models.nltk_ready()

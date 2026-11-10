@@ -2,24 +2,83 @@
 stays focused on the library and the editor."""
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
+import logging
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QProgressDialog, QPushButton, QVBoxLayout, QWidget)
 
-from .. import VERSION, config, runtime, updater
+from .. import VERSION, config, runtime, setup, updater
 
-MODEL_ROWS = (
-    ("whisper", "Whisper large-v3", "3.1 GB", "Transcribes vocals when no lyric is found."),
-    ("separator", "Mel-Band RoFormer", "0.9 GB", "Separates vocals from the instrumental."),
-    ("mms", "MMS forced alignment", "1.2 GB", "Word timing for non-English lyrics."),
-    ("mtl", "English singing model", "66 MB", "Better word timing for English songs."),
-)
+ASK_BEFORE_UPLOAD = "assemblyai_ask_before_upload"
+_TEST_KEEP_ALIVE: list[tuple[QThread, _SetupCheck]] = []
+LOG = logging.getLogger(__name__)
+
+
+def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = False
+                    ) -> tuple[Path | None, str | None]:
+    """Checks one folder field. Returns (path, None) or (None, message naming the field).
+
+    An empty field is rejected before Path("") turns into "." (the process working directory), and
+    the folder must be usable now: exist (or be creatable), be a directory and accept a write.
+    """
+    raw = text.strip()
+    if not raw:
+        return None, f"{field}: choose a folder (the field is empty)."
+    if raw in (".", ".."):
+        return None, f"{field}: choose a real folder, not {raw!r}."
+    path = Path(raw).expanduser()
+    try:
+        path = path.resolve()
+    except OSError as exc:
+        return None, f"{field}: cannot use {path}:\n{exc.strerror or exc}"
+    if path.parent == path:
+        return None, f"{field}: choose a folder inside a drive, not the drive root ({path})."
+    if not path.exists():
+        if not create:
+            return None, f"{field}: the folder does not exist:\n{path}"
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return None, f"{field}: cannot create {path}:\n{exc.strerror or exc}"
+    if not path.is_dir():
+        return None, f"{field}: this is a file, not a folder:\n{path}"
+    probe = path / ".lyricloom-write-test"
+    try:
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return None, f"{field}: the folder is not writable:\n{path}\n{exc.strerror or exc}"
+    return path, None
+
+
+class _SetupCheck(QObject):
+    """Runs ``setup.detect`` for the Settings dialog's Test button."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.done.emit(setup.detect())
+        except Exception as exc:  # noqa: BLE001 - shown in a message box
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+def join_test_threads(timeout_ms: int = 5000) -> None:
+    """Joins acceleration-test threads that outlived the dialog, with a bounded wait (FRB-06)."""
+    for thread, _worker in list(_TEST_KEEP_ALIVE):
+        try:
+            if thread.isRunning():
+                thread.quit()
+                if not thread.wait(timeout_ms):
+                    LOG.warning("the acceleration test did not stop within %d ms", timeout_ms)
+        except RuntimeError:
+            pass
 
 
 class SettingsDialog(QDialog):
@@ -55,10 +114,23 @@ class SettingsDialog(QDialog):
 
         behaviour = QGroupBox("Behaviour")
         bform = QFormLayout(behaviour)
-        self.check_updates = QCheckBox("Check GitHub Releases for updates on startup")
-        self.check_updates.setChecked(bool(data.get("check_updates", True)))
-        bform.addRow(self.check_updates)
+        self.notify_finished = QCheckBox("Notify when a long queue finishes in the background")
+        self.notify_finished.setChecked(bool(data.get("notify_queue_finished", True)))
+        bform.addRow(self.notify_finished)
         layout.addWidget(behaviour)
+
+        animation = QGroupBox("Animation")
+        aform = QFormLayout(animation)
+        self.smooth = QComboBox()
+        self.smooth.addItems(["Match display (default)", "Half refresh", "Third refresh"])
+        self.smooth.setCurrentIndex(config.smooth_animation_divisor() - 1)
+        self.smooth.setToolTip("Lower rates are exact integer divisors of the display refresh rate")
+        aform.addRow("Smooth animation", self.smooth)
+        animation_note = QLabel("The karaoke view and the main lyric view animate at the display's "
+                                "refresh rate; lower choices stay exact divisors so motion never judders.")
+        animation_note.setWordWrap(True)
+        aform.addRow(animation_note)
+        layout.addWidget(animation)
 
         gpu = QGroupBox("GPU through WSL (Windows + AMD ROCm)")
         gform = QFormLayout(gpu)
@@ -80,10 +152,149 @@ class SettingsDialog(QDialog):
         gform.addRow(note)
         layout.addWidget(gpu)
 
+        acceleration = QGroupBox("Acceleration")
+        aform = QFormLayout(acceleration)
+        self.acceleration_label = QLabel(self._acceleration_text())
+        self.acceleration_label.setWordWrap(True)
+        aform.addRow(self.acceleration_label)
+        arow = QHBoxLayout()
+        self.test_btn = QPushButton("Test")
+        self.test_btn.setToolTip("Check the CPU, GPUs, WSL and whisper-cli again")
+        self.test_btn.clicked.connect(self._test_acceleration)
+        self.change_accel_btn = QPushButton("Change…")
+        self.change_accel_btn.setToolTip("Open the setup assistant on its Acceleration page")
+        self.change_accel_btn.clicked.connect(self._change_acceleration)
+        arow.addWidget(self.test_btn)
+        arow.addWidget(self.change_accel_btn)
+        arow.addStretch(1)
+        aform.addRow(arow)
+        layout.addWidget(acceleration)
+
+        privacy = QGroupBox("Privacy")
+        pform = QFormLayout(privacy)
+        self.check_updates = QCheckBox("Check GitHub Releases for updates at startup and every 24 hours")
+        self.check_updates.setChecked(updater.check_enabled())
+        self.check_updates.setToolTip(
+            "When on, one request to api.github.com asks for public release metadata at startup "
+            "and every 24 hours. Nothing about you or your library is sent.")
+        pform.addRow(self.check_updates)
+        self.update_install = QComboBox()
+        for label, mode in (("Install automatically when LyricLoom closes", "auto"),
+                            ("Ask before installing", "ask"),
+                            ("Only notify me", "notify")):
+            self.update_install.addItem(label, mode)
+        self.update_install.setCurrentIndex(max(0, self.update_install.findData(updater.install_mode())))
+        self.update_install.setToolTip(
+            "Automatic: download a verified update in the background and install it silently when "
+            "LyricLoom closes. Ask: download and install only after you click Install now. Notify: "
+            "only show that a new release exists.")
+        pform.addRow("When an update is found", self.update_install)
+        self.cloud = QCheckBox("Allow uploading the isolated vocal to AssemblyAI")
+        self.cloud.setChecked(config.assemblyai_enabled())
+        self.cloud.setToolTip(
+            "Cloud transcription is off by default. When on, songs that need help may upload "
+            "their isolated vocal to AssemblyAI.")
+        pform.addRow(self.cloud)
+        self.key = QLineEdit()
+        self.key.setEchoMode(QLineEdit.Password)
+        self.key.setPlaceholderText(
+            "A key is set; type a new one to replace it" if config.has_assemblyai_key()
+            else "Paste your AssemblyAI API key")
+        self.remove_key_btn = QPushButton("Remove stored key")
+        self.remove_key_btn.setEnabled(config.has_assemblyai_key())
+        self.remove_key_btn.clicked.connect(self._remove_key)
+        self._remove_key_requested = False
+        pform.addRow("AssemblyAI key", self._with_button(self.key, self.remove_key_btn))
+        self.ask_upload = QCheckBox("Ask before uploading each queue")
+        self.ask_upload.setChecked(bool(data.get(ASK_BEFORE_UPLOAD, True)))
+        pform.addRow(self.ask_upload)
+        layout.addWidget(privacy)
+
+        self.assistant_page: str | None = None
+        self._test_thread: QThread | None = None
+        self._test_worker: _SetupCheck | None = None
+        self._test_progress: QProgressDialog | None = None
+
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _acceleration_text(self) -> str:
+        selected = (f"WSL {config.setting('wsl_distro') or 'auto'} · "
+                    f"{config.setting('wsl_python') or 'python3'}"
+                    if config.setting("wsl_gpu", False) else "CPU only")
+        whisper = config.whisper_cli()
+        state = "found" if whisper.is_file() else "missing"
+        return f"Separation/alignment: {selected}\nwhisper-cli: {whisper} ({state})"
+
+    def _change_acceleration(self) -> None:
+        self.assistant_page = "acceleration"
+        self._save()
+
+    def _remove_key(self) -> None:
+        self._remove_key_requested = True
+        self.key.clear()
+        self.key.setPlaceholderText("The stored key will be removed when you save")
+        self.remove_key_btn.setEnabled(False)
+
+    def _test_acceleration(self) -> None:
+        if self._test_thread is not None:
+            return
+        self._test_progress = QProgressDialog(
+            "Checking CPU, GPUs, WSL and whisper-cli…", "", 0, 0, self)
+        self._test_progress.setWindowTitle("Acceleration")
+        self._test_progress.setCancelButton(None)
+        self._test_progress.setAutoClose(False)
+        self._test_progress.setAutoReset(False)
+        self._test_progress.show()
+        thread = QThread()
+        worker = _SetupCheck()
+        _TEST_KEEP_ALIVE.append((thread, worker))
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._test_done, Qt.QueuedConnection)
+        worker.failed.connect(self._test_failed, Qt.QueuedConnection)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._test_finished)
+        self._test_thread, self._test_worker = thread, worker
+        self.test_btn.setEnabled(False)
+        thread.start()
+
+    @Slot(object)
+    def _test_done(self, report) -> None:
+        recommendation = setup.recommend(report)
+        wsl = (f"WSL 2 · {', '.join(d.name for d in report.wsl.distros)}"
+               if report.wsl.version2 else (report.wsl.error or "WSL not available"))
+        disk = (runtime.human_size(report.disk_free_bytes)
+                if report.disk_free_bytes is not None else "unknown")
+        whisper = (report.whisper_cli.path if report.whisper_cli.present
+                   else (report.whisper_cli.error or "not found"))
+        text = (
+            f"CPU: {report.cpu_cores or 'unknown'} cores\n"
+            f"Memory: {runtime.human_size(report.ram_bytes) if report.ram_bytes else 'unknown'}\n"
+            f"Free disk: {disk}\n"
+            f"GPU: {', '.join(gpu.name for gpu in report.gpus) or 'none detected'}\n"
+            f"{wsl}\n"
+            f"whisper-cli: {whisper}\n\n"
+            f"Suggested: {recommendation.wsl_gpu_reason}\n"
+            f"{recommendation.whisper_backend_reason}")
+        QMessageBox.information(self, "Acceleration", text)
+
+    @Slot(str)
+    def _test_failed(self, message: str) -> None:
+        QMessageBox.warning(self, "Acceleration", "The check failed:\n" + message)
+
+    @Slot()
+    def _test_finished(self) -> None:
+        if self._test_progress is not None:
+            self._test_progress.close()
+            self._test_progress = None
+        self._test_thread = None
+        self._test_worker = None
+        self.test_btn.setEnabled(True)
+        self.acceleration_label.setText(self._acceleration_text())
 
     @staticmethod
     def _with_button(edit: QLineEdit, button: QPushButton) -> QWidget:
@@ -100,168 +311,55 @@ class SettingsDialog(QDialog):
             edit.setText(folder)
 
     def _save(self):
-        library = Path(self.library.text().strip()).expanduser()
-        vocals = Path(self.vocals.text().strip()).expanduser()
-        work = Path(self.work.text().strip() or config.WORK_ROOT).expanduser()
-        if not library.is_dir():
-            QMessageBox.warning(self, "Library", f"The library folder does not exist:\n{library}")
-            return
-        if not str(vocals):
-            QMessageBox.warning(self, "Vocals cache", "Choose a folder for the cached vocals.")
-            return
-        config.update_settings({
-            "library": str(library),
-            "vocals": str(vocals),
-            "work": str(work),
-            "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
-            "check_updates": self.check_updates.isChecked(),
-            "wsl_gpu": self.wsl.isChecked(),
-            "wsl_distro": self.distro.text().strip(),
-            "wsl_python": self.wsl_python.text().strip() or "python3",
-            "wsl_torch_home": self.torch_home.text().strip() or "/opt/lyricloom/models/torch",
-            "wsl_hsa_override": self.hsa.text().strip(),
-        })
-        self.accept()
-
-
-class ModelWorker(QObject):
-    message = Signal(str)
-    progress = Signal(int, int)
-    done = Signal()
-    failed = Signal(str)
-
-    @Slot()
-    def run(self):
+        values = {}
+        for field, edit, must_exist, create in (
+                ("Music library", self.library, True, False),
+                ("Vocals cache", self.vocals, False, True),
+                ("Work cache", self.work, False, True)):
+            path, error = validate_folder(field, edit.text(), must_exist=must_exist, create=create)
+            if error:
+                QMessageBox.warning(self, field, error)
+                edit.setFocus()
+                edit.selectAll()
+                return
+            values[field] = path
         try:
-            missing = runtime.status()
-            if not missing["whisper"]:
-                self.message.emit("Downloading the Whisper model (about 3.1 GB)…")
-                runtime.download_whisper(self.progress.emit)
-            if not missing["separator"]:
-                self.message.emit("Downloading the vocal separator (about 0.9 GB)…")
-                self.progress.emit(0, 0)
-                runtime.download_separator()
-            if not missing["mms"]:
-                self.message.emit("Downloading the forced-alignment model (about 1.2 GB)…")
-                self.progress.emit(0, 0)
-                runtime.download_mms()
-            if not missing["mtl"]:
-                self.message.emit("Downloading the English singing model (about 66 MB)…")
-                runtime.download_mtl(self.progress.emit)
-            if not runtime._nltk_ready():
-                self.message.emit("Downloading the NLTK data used by the singing model…")
-                self.progress.emit(0, 0)
-                runtime.download_nltk()
-            self.done.emit()
-        except Exception as exc:  # noqa: BLE001 - shown in the dialog, never crashes the app
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
-
-
-class ModelsDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
-        super().__init__(parent)
-        self.setWindowTitle("LyricLoom models")
-        self.setMinimumWidth(620)
-        self._thread: QThread | None = None
-        self._worker: ModelWorker | None = None
-        layout = QVBoxLayout(self)
-        intro = QLabel("Models are downloaded once and kept in the LyricLoom data folder. "
-                       "They are not bundled in the installer because they total about 5 GB.")
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-        self.rows: dict[str, QLabel] = {}
-        form = QFormLayout()
-        for key, name, size, why in MODEL_ROWS:
-            label = QLabel("…")
-            label.setToolTip(why)
-            self.rows[key] = label
-            form.addRow(f"{name} ({size})", label)
-        layout.addLayout(form)
-        self.status = QLabel("")
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        self.progress = QProgressDialog("Preparing…", "", 0, 100, self)
-        self.progress.setWindowTitle("Downloading models")
-        self.progress.setCancelButton(None)
-        self.progress.setAutoClose(False)
-        self.progress.setAutoReset(False)
-        self.progress.hide()
-        layout.addWidget(self.progress)
-        buttons = QHBoxLayout()
-        self.open_btn = QPushButton("Open models folder")
-        self.open_btn.clicked.connect(self._open_folder)
-        self.download_btn = QPushButton("Download missing models")
-        self.download_btn.clicked.connect(self._download)
-        self.close_btn = QPushButton("Close")
-        self.close_btn.clicked.connect(self.accept)
-        buttons.addWidget(self.open_btn)
-        buttons.addStretch(1)
-        buttons.addWidget(self.download_btn)
-        buttons.addWidget(self.close_btn)
-        layout.addLayout(buttons)
-        self.refresh()
-
-    def refresh(self):
-        state = runtime.status()
-        for key, label in self.rows.items():
-            label.setText("Ready" if state.get(key) else "Missing")
-            label.setStyleSheet("" if state.get(key) else "color: #c06000;")
-        self.download_btn.setEnabled(not all(state.values()) or not runtime._nltk_ready())
-
-    def _open_folder(self):
-        config.MODELS.mkdir(parents=True, exist_ok=True)
-        if sys.platform == "win32":
-            os.startfile(config.MODELS)  # type: ignore[attr-defined]
-        else:
-            subprocess.Popen(["xdg-open", str(config.MODELS)])
-
-    def _download(self):
-        if self._thread is not None:
+            key = self.key.text().strip()
+            if key:
+                config.set_assemblyai_key(key)
+                self._remove_key_requested = False
+                self.key.clear()
+                self.key.setPlaceholderText("A key is set; type a new one to replace it")
+                self.remove_key_btn.setEnabled(True)
+            elif self._remove_key_requested:
+                config.set_assemblyai_key("")
+                self.remove_key_btn.setEnabled(False)
+            config.update_settings({
+                "library": str(values["Music library"]),
+                "vocals": str(values["Vocals cache"]),
+                "work": str(values["Work cache"]),
+                "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
+                "check_updates": self.check_updates.isChecked(),
+                "assemblyai_enabled": self.cloud.isChecked(),
+                ASK_BEFORE_UPLOAD: self.ask_upload.isChecked(),
+                "update_install": self.update_install.currentData(),
+                "notify_queue_finished": self.notify_finished.isChecked(),
+                "smooth_animation": self.smooth.currentIndex() + 1,
+                "wsl_gpu": self.wsl.isChecked(),
+                "wsl_distro": self.distro.text().strip(),
+                "wsl_python": self.wsl_python.text().strip() or "python3",
+                "wsl_torch_home": self.torch_home.text().strip() or "/opt/lyricloom/models/torch",
+                "wsl_hsa_override": self.hsa.text().strip(),
+            })
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Settings",
+                f"Could not save the settings to {config.SETTINGS_FILE}:\n{exc.strerror or exc}")
             return
-        self.download_btn.setEnabled(False)
-        self.close_btn.setEnabled(False)
-        self.progress.setRange(0, 0)
-        self.progress.show()
-        thread = QThread(self)
-        worker = ModelWorker()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.message.connect(self.status.setText)
-        worker.progress.connect(self._progress)
-        worker.done.connect(self._finished)
-        worker.failed.connect(self._failed)
-        worker.done.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(self._thread_done)
-        self._thread, self._worker = thread, worker
-        thread.start()
-
-    def _progress(self, done: int, total: int):
-        if total:
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(min(1000, int(done * 1000 / total)))
-        else:
-            self.progress.setRange(0, 0)
-
-    def _finished(self):
-        self.status.setText("All requested models are ready.")
-        self.refresh()
-
-    def _failed(self, message: str):
-        QMessageBox.critical(self, "Model download failed", message + "\n\nSee docs/models.md for offline installation.")
-
-    def _thread_done(self):
-        self._thread = None
-        self._worker = None
-        self.progress.hide()
-        self.download_btn.setEnabled(True)
-        self.close_btn.setEnabled(True)
-
-    def closeEvent(self, event):
-        if self._thread is not None:
-            event.ignore()
+        except (RuntimeError, ValueError) as exc:
+            QMessageBox.critical(self, "AssemblyAI", str(exc))
             return
-        super().closeEvent(event)
+        self.accept()
 
 
 class _UpdateCheck(QObject):
@@ -281,90 +379,321 @@ class _UpdateDownload(QObject):
     done = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, info: updater.UpdateInfo):
+    def __init__(self, info: updater.UpdateInfo, cancel: threading.Event):
         super().__init__()
         self.info = info
+        self.cancel = cancel
 
     @Slot()
     def run(self):
         try:
-            self.done.emit(updater.download(self.info, self.progress.emit))
+            self.done.emit(updater.download(self.info, self.progress.emit, cancel=self.cancel))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+class UpdateController(QObject):
+    """Owns the update threads and receives their signals in the GUI thread.
+
+    Workers emit from their own thread. Qt only queues a signal to a receiver that lives in the GUI
+    thread and has a slot; connecting to a plain Python closure runs it in the emitting thread, which
+    is how the old code touched QMessageBox/QProgressDialog from a worker.
+    """
+
+    def __init__(self, window: QWidget):
+        super().__init__(window)
+        self._window = window
+        self._silent = False
+        self._threads: list[QThread] = []
+        self._check_thread: QThread | None = None
+        self._check_worker: _UpdateCheck | None = None
+        self._download_thread: QThread | None = None
+        self._download_worker: _UpdateDownload | None = None
+        self._progress: QProgressDialog | None = None
+        self._cancel = threading.Event()
+        self._download_automatic = False
+        self._download_info: updater.UpdateInfo | None = None
+        self._info: updater.UpdateInfo | None = None
+        self._downloaded: Path | None = None
+
+    def _bar(self):
+        return getattr(self._window, "update_bar", None)
+
+    def _status(self, message: str, timeout: int = 12000) -> None:
+        status = getattr(self._window, "statusBar", None)
+        if status is not None:
+            bar = status() if callable(status) else status
+            if bar is not None:
+                bar.showMessage(message, timeout)
+
+    def check(self, silent: bool = False) -> None:
+        if self._check_thread is not None:
+            return
+        thread = QThread(self)
+        worker = _UpdateCheck()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        # Queued explicitly: a worker signal must never run widget code in the worker thread.
+        worker.done.connect(self.check_done, Qt.QueuedConnection)
+        worker.failed.connect(self.check_failed, Qt.QueuedConnection)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._check_finished)
+        self._silent = silent
+        self._check_thread = thread
+        self._check_worker = worker   # keep it alive until the thread starts and finishes
+        self._threads.append(thread)
+        thread.start()
+
+    def download(self, info: updater.UpdateInfo, *, automatic: bool = False) -> bool:
+        """Start a verified download. Returns False when one is already running."""
+        if self._download_thread is not None:
+            return False
+        self._cancel.clear()
+        self._download_automatic = automatic
+        self._download_info = info
+        if not automatic:
+            self._progress = QProgressDialog(f"Downloading LyricLoom {info.version}…", "", 0, 0,
+                                             self._window)
+            self._progress.setWindowTitle("Updating LyricLoom")
+            self._progress.setCancelButton(None)
+            self._progress.setAutoClose(False)
+            self._progress.setAutoReset(False)
+            self._progress.show()
+        thread = QThread(self)
+        worker = _UpdateDownload(info, self._cancel)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self.progress, Qt.QueuedConnection)
+        worker.done.connect(self.download_done, Qt.QueuedConnection)
+        worker.failed.connect(self.download_failed, Qt.QueuedConnection)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._download_finished)
+        self._download_thread = thread
+        self._download_worker = worker
+        self._threads.append(thread)
+        thread.start()
+        return True
+
+    def _check_finished(self) -> None:
+        self._check_thread = None
+        self._check_worker = None
+
+    def _download_finished(self) -> None:
+        self._download_thread = None
+        self._download_worker = None
+
+    @Slot(object)
+    def check_done(self, info) -> None:
+        if info is None:
+            if not self._silent:
+                QMessageBox.information(self._window, "Updates",
+                                        f"You have the latest version (LyricLoom {VERSION}).")
+            return
+        if updater.is_skipped(info.version):
+            if not self._silent:
+                QMessageBox.information(
+                    self._window, "Updates",
+                    f"LyricLoom {info.version} is available, but you chose to skip this version. "
+                    "You will be offered newer versions when they are released.")
+            return
+        if self._info is not None and self._info.version == info.version and self._downloaded is not None:
+            self._show_notice()   # already downloaded; a re-check must not fetch it again
+            return
+        self._info = info
+        self._downloaded = None
+        if self._silent:
+            self._status(f"Update {info.version} is available", 12000)
+        if not updater.installer_available():
+            self._show_notice()
+            return
+        if updater.install_mode() == "auto":
+            self._status(f"Downloading LyricLoom {info.version} …")
+            if self.download(info, automatic=True):
+                return
+        self._show_notice()
+
+    def _show_notice(self) -> None:
+        """Show (or refresh) the non-modal banner for the current release."""
+        info = self._info
+        if info is None:
+            return
+        action_text = None
+        mode = updater.install_mode()
+        if updater.installer_available():
+            if mode == "auto" and self._downloaded is not None:
+                action_text = "Restart now"
+            elif mode == "ask":
+                action_text = "Install now"   # also after a postponed install of the download
+        bar = self._bar()
+        if bar is None:
+            if not self._silent:
+                QMessageBox.information(
+                    self._window, "Update available",
+                    f"LyricLoom {info.version} is available.\n\n"
+                    f"{info.notes or 'See the release page for details.'}")
+            return
+        bar.show_update(
+            info,
+            action_text=action_text,
+            show_tarball=not updater.installer_available() and not config.IS_WINDOWS,
+            on_action=self._notice_action,
+            on_later=self._notice_later,
+            on_skip=self._notice_skip,
+        )
+
+    def _notice_action(self) -> None:
+        """The banner's mode-specific action: install a ready download or start an ask download."""
+        if self._info is None:
+            return
+        if self._downloaded is not None:
+            if updater.install_mode() == "ask":
+                self._begin_install(silent=False, relaunch=False)
+            else:
+                self._begin_install(silent=True, relaunch=True)
+        elif updater.install_mode() == "ask":
+            self._status(f"Downloading LyricLoom {self._info.version} …")
+            if not self.download(self._info, automatic=False):
+                QMessageBox.warning(self._window, "Updates", "An update download is already running.")
+
+    def _notice_later(self) -> None:
+        if self._downloaded is not None and updater.install_mode() == "auto":
+            self._status("Update postponed; it will be installed when LyricLoom closes", 8000)
+        else:
+            self._status("Update postponed", 8000)
+
+    def _notice_skip(self) -> None:
+        info = self._info
+        if info is None:
+            return
+        if self._download_thread is not None:
+            self._cancel.set()   # a running download of the skipped release stops between chunks
+        try:
+            updater.skip_version(info.version)
+        except OSError as exc:
+            QMessageBox.warning(self._window, "Updates",
+                                f"Could not remember the skipped version:\n{exc}")
+        path = self.take_downloaded_update()
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        self._status(f"LyricLoom {info.version} will not be offered again", 8000)
+
+    def take_downloaded_update(self, path: Path | None = None, *,
+                               auto_only: bool = False) -> Path | None:
+        """Hand a verified download to the caller once; never returns the same file twice."""
+        if self._downloaded is None:
+            return None
+        if auto_only and updater.install_mode() != "auto":
+            return None
+        if path is not None and Path(path) != self._downloaded:
+            return None
+        result, self._downloaded = self._downloaded, None
+        return result
+
+    @property
+    def downloaded_info(self) -> updater.UpdateInfo | None:
+        """The release of the verified download that is still waiting to be installed."""
+        return self._info if self._downloaded is not None else None
+
+    def install_postponed(self) -> None:
+        """MainWindow's close was vetoed after "Restart now"/"Install now": offer it again."""
+        self._notice_later()
+        self._show_notice()
+
+    def _begin_install(self, *, silent: bool, relaunch: bool) -> bool:
+        """Hand the install request to MainWindow, which closes and starts Setup last.
+
+        Setup is never started here: a prompt during the close can still start a queue or veto
+        the close, so only MainWindow's close knows when the install may really begin.
+        """
+        path = self._downloaded
+        prepare = getattr(self._window, "prepare_update", None)
+        if path is None or prepare is None:
+            return False
+        prepare(path, info=self._info, silent=silent, relaunch=relaunch)
+        return True
+
+    @Slot(str)
+    def check_failed(self, message: str) -> None:
+        if not self._silent:
+            QMessageBox.warning(self._window, "Updates", "Could not check for updates:\n" + message)
+
+    @Slot(int, int)
+    def progress(self, done: int, total: int) -> None:
+        if self._progress is None:
+            return
+        if total:
+            self._progress.setRange(0, 1000)
+            self._progress.setValue(min(1000, int(done * 1000 / total)))
+
+    @Slot(object)
+    def download_done(self, path) -> None:
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+        automatic, self._download_automatic = self._download_automatic, False
+        downloaded_info, self._download_info = self._download_info, None
+        if (self._info is not None and downloaded_info is not None
+                and downloaded_info.version != self._info.version):
+            # A check found a different release while this download ran; never install the
+            # verified file as if it belonged to the new version (it will be cleaned on restart).
+            return
+        release = downloaded_info or self._info
+        if release is not None and updater.is_skipped(release.version):
+            # "Skip this version" was clicked while the download ran: never arm or install it.
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass   # never trusted again: the next start deletes what this process left
+            return
+        self._downloaded = Path(path)
+        if automatic:
+            self._show_notice()
+            if self._info is not None:
+                self._status(f"LyricLoom {self._info.version} is ready; restart to install", 12000)
+            return
+        self._begin_install(silent=False, relaunch=False)
+
+    @Slot(str)
+    def download_failed(self, message: str) -> None:
+        if self._progress is not None:
+            self._progress.close()
+            self._progress = None
+        automatic, self._download_automatic = self._download_automatic, False
+        self._download_info = None
+        if self._cancel.is_set():
+            return   # shutting down: the user asked for the download to stop
+        if automatic:
+            self._status("Could not download the update: " + message, 12000)
+            self._show_notice()   # still offer the release page and the notes
+            return
+        QMessageBox.critical(self._window, "Update failed", message)
+
+    def shutdown(self) -> None:
+        """Stop the update threads when the window closes. Never terminates a thread."""
+        self._cancel.set()
+        for thread in list(self._threads):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(3000)
+
+    def wait_for_threads(self) -> None:
+        """Joins update threads that outlived the event loop (a blocking network call)."""
+        for thread in list(self._threads):
+            if thread.isRunning():
+                thread.quit()
+                thread.wait()
 
 
 def check_for_updates(parent: QWidget, silent: bool = False) -> None:
     """Check GitHub in a worker thread. `silent` is the startup path: no dialog when there is
     nothing new or the network is down."""
-    thread = QThread(parent)
-    worker = _UpdateCheck()
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-
-    def finish(info):
-        thread.quit()
-        if info is None:
-            if not silent:
-                QMessageBox.information(parent, "Updates", f"LyricLoom {VERSION} is up to date.")
-            return
-        if silent:
-            parent.statusBar().showMessage(f"Update {info.version} is available (Help > Check for updates)", 12000)
-            return
-        answer = QMessageBox.question(
-            parent, "Update available",
-            f"LyricLoom {info.version} is available (you have {VERSION}).\n\n"
-            f"{(info.notes or 'See the release page for details.')[:1800]}\n\nDownload and install now?")
-        if answer == QMessageBox.Yes:
-            _download_and_install(parent, info)
-
-    def failed(message):
-        thread.quit()
-        if not silent:
-            QMessageBox.warning(parent, "Updates", "Could not check for updates:\n" + message)
-
-    worker.done.connect(finish)
-    worker.failed.connect(failed)
-    thread.finished.connect(lambda: (worker.deleteLater(), thread.deleteLater()))
-    parent._update_thread = thread   # keep both alive while the request runs
-    parent._update_worker = worker
-    thread.start()
-
-
-def _download_and_install(parent: QWidget, info: updater.UpdateInfo) -> None:
-    progress = QProgressDialog(f"Downloading LyricLoom {info.version}…", "", 0, 0, parent)
-    progress.setWindowTitle("Updating LyricLoom")
-    progress.setCancelButton(None)
-    progress.setAutoClose(False)
-    progress.setAutoReset(False)
-    thread = QThread(parent)
-    worker = _UpdateDownload(info)
-    worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-
-    def update(done, total):
-        if total:
-            progress.setRange(0, 1000)
-            progress.setValue(min(1000, int(done * 1000 / total)))
-
-    def finish(path):
-        thread.quit()
-        progress.close()
-        try:
-            updater.launch_installer(path)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(parent, "Update", "Could not start the installer:\n" + str(exc))
-            return
-        QApplication.quit()
-
-    def failed(message):
-        thread.quit()
-        progress.close()
-        QMessageBox.critical(parent, "Update failed", message)
-
-    worker.progress.connect(update)
-    worker.done.connect(finish)
-    worker.failed.connect(failed)
-    thread.finished.connect(lambda: (worker.deleteLater(), thread.deleteLater()))
-    parent._update_dl_thread = thread
-    parent._update_dl_worker = worker
-    thread.start()
+    controller = getattr(parent, "_update_controller", None)
+    if controller is None:
+        controller = UpdateController(parent)
+        parent._update_controller = controller
+    controller.check(silent=silent)

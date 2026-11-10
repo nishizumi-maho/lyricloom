@@ -25,7 +25,7 @@ def test_mismatched_word_count_is_an_error():
 
 
 def _fake_ctc(calls):
-    def fake(vocals16k, blocks, seg_tokens):
+    def fake(vocals16k, blocks, seg_tokens, cancel=None):
         calls.append("ctc")
         t, out = 1000, []
         for block in seg_tokens:
@@ -36,7 +36,7 @@ def _fake_ctc(calls):
 
 
 def _fake_mtl(calls, fail=False):
-    def fake(vocals, seg_texts):
+    def fake(vocals, seg_texts, cancel=None):
         calls.append("mtl")
         if fail:
             raise WorkerError("lyricloom.workers.align_mtl", "boom")
@@ -49,6 +49,7 @@ def _run(monkeypatch, lang, fail=False, enabled=True):
     monkeypatch.setattr(stage, "align_blocks", _fake_ctc(calls))
     monkeypatch.setattr(stage, "align_lines_mtl", _fake_mtl(calls, fail))
     monkeypatch.setattr("lyricloom.config.MTL_ENABLED", enabled)
+    monkeypatch.setattr(stage.models, "singing_ready", lambda lang=None: enabled)
     tr = Transcript(lang, [Word("texto", 1000, 1300, 0.9), Word("inventado", 1400, 1700, 0.9), Word("para", 1800, 2100, 0.9)])
     res = stage.align(META, Path("."), Candidate("netease", "texto inventado para"), tr, Path("v16.wav"), Path("v.wav"))
     return calls, res
@@ -73,6 +74,18 @@ def test_singing_model_failure_falls_back_to_ctc(monkeypatch):
 
 def test_singing_model_off_when_not_installed(monkeypatch):
     calls, _ = _run(monkeypatch, "en", enabled=False)
+    assert calls == ["ctc"]
+
+
+def test_english_does_not_start_mtl_when_its_checkpoint_is_missing(monkeypatch):
+    """R1-25: the vendored wrapper exists on every install, but without the checkpoint or NLTK
+    data English must go straight to CTC instead of starting a worker that cannot load."""
+    calls = []
+    monkeypatch.setattr(stage, "align_blocks", _fake_ctc(calls))
+    monkeypatch.setattr(stage, "align_lines_mtl", _fake_mtl(calls))
+    monkeypatch.setattr("lyricloom.config.MTL_ENABLED", True)
+    tr = Transcript("en", [Word("texto", 1000, 1300, 0.9)])
+    stage.align(META, Path("."), Candidate("netease", "texto"), tr, Path("v16.wav"), Path("v.wav"))
     assert calls == ["ctc"]
 
 
@@ -103,6 +116,25 @@ def test_singing_model_runs_in_wsl_on_the_gpu(monkeypatch):
     assert (out[0][0].start_ms, out[0][0].end_ms) == (1000, 1400)
 
 
+def test_wsl_singing_model_prefers_the_checkpoint_copy_inside_the_distro(monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"words": [["texto", 1000, 1400]]}
+
+    monkeypatch.setattr(mtl, "run_worker", fake)
+    monkeypatch.setattr(config, "MTL_WSL_ENABLED", True)
+    monkeypatch.setattr(config, "MTL_WSL_CHECKPOINT", "/opt/lyricloom/models/mtl")
+    mtl.align_lines_mtl(Path(r"C:\work\vocals.wav"), [["Texto, "]])
+    payload = calls[0]["payload"]
+    spec = config.resolve_model("singing", "en")
+    assert payload["checkpoint_dirs"][0] == "/opt/lyricloom/models/mtl"
+    assert payload["checkpoint_dirs"][-1].startswith("/mnt/")
+    assert payload["checkpoint_dir"] == payload["checkpoint_dirs"][-1]
+    assert payload["checkpoint_size"] == spec.size
+
+
 def test_singing_model_falls_back_to_its_own_venv(monkeypatch):
     calls = []
 
@@ -119,3 +151,31 @@ def test_singing_model_falls_back_to_its_own_venv(monkeypatch):
     assert calls[1]["python"] == str(config.MTL_PYTHON)
     assert calls[1]["payload"].get("cuda") is None    # the Windows venv stays on its CPU
 
+
+def test_singing_model_unc_path_uses_the_local_fallback(monkeypatch):
+    calls = []
+
+    def fake(module, payload, python=None, wsl=None, wsl_env=None, **kw):
+        calls.append({"payload": payload, "wsl": wsl, "python": python})
+        return {"words": [["texto", 1000, 1400]]}
+
+    monkeypatch.setattr(mtl, "run_worker", fake)
+    monkeypatch.setattr(config, "MTL_WSL_ENABLED", True)
+    out = mtl.align_lines_mtl(Path(r"\\server\share\vocals.wav"), [["Texto, "]])
+    assert [c["wsl"] for c in calls] == [None]
+    assert (out[0][0].start_ms, out[0][0].end_ms) == (1000, 1400)
+
+
+
+def test_mtl_worker_uses_the_bundled_code_when_the_configured_folder_is_missing(tmp_path):
+    """A WSL environment built by the setup assistant has the lyricloom package (with the vendored
+    LyricsAlignment-MTL code) but no separate /opt/lyricloom/mtl folder; the worker must still find
+    wrapper.py instead of failing back to the CPU."""
+    from lyricloom.workers import align_mtl as worker
+
+    vendored = Path(worker._mtl_repo(str(tmp_path / "missing")))
+    assert (vendored / "wrapper.py").is_file() and vendored.name == "mtl"
+    configured = tmp_path / "mtl"
+    configured.mkdir()
+    (configured / "wrapper.py").write_text("# user copy\n", encoding="utf-8")
+    assert worker._mtl_repo(str(configured)) == str(configured)

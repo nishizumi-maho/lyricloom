@@ -2,11 +2,13 @@
 
 Portuguese/English use Universal-3.5 Pro (their most capable model, which also takes a context
 prompt); Japanese is not supported by it, so Japanese uses Universal-2. Word times come back in ms.
-The API key is read from the git-ignored file `assemblyai.key` in the project root, or from the
-ASSEMBLYAI_API_KEY environment variable."""
+The API key is read from ``assemblyai.key`` in LyricLoom's data directory (encrypted with Windows
+DPAPI, mode 0600 elsewhere) or from the ASSEMBLYAI_API_KEY environment variable. Cloud
+transcription also needs the separate ``assemblyai_enabled`` setting and a per-run allowance."""
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -17,6 +19,8 @@ import httpx
 from .. import config
 from ..model import Transcript, Word
 
+log = logging.getLogger(__name__)
+
 API = "https://api.assemblyai.com/v2"
 PRO_LANGS = {"pt", "en", "es", "fr", "de", "it"}
 POLL_S = 3
@@ -24,12 +28,9 @@ TIMEOUT_S = 15 * 60
 
 
 def api_key() -> str:
-    key = os.environ.get("ASSEMBLYAI_API_KEY", "").strip()
-    path = config.ASSEMBLYAI_KEY_FILE
-    if not key and path.exists():
-        key = path.read_text(encoding="utf-8").strip()
+    key = config.read_assemblyai_key()
     if not key:
-        raise RuntimeError("no AssemblyAI key: set ASSEMBLYAI_API_KEY or create assemblyai.key")
+        raise RuntimeError("no AssemblyAI key: add one in the app or set ASSEMBLYAI_API_KEY")
     return key
 
 
@@ -57,11 +58,37 @@ def parse_transcript(data: dict) -> Transcript:
     return Transcript(data.get("language_code") or "", words)
 
 
+def _discard_saved(path: Path) -> None:
+    """Moves a corrupt cache aside so a later run can upload again instead of failing forever."""
+    target = path.with_name(path.name + ".corrupt")
+    n = 1
+    while target.exists():
+        target = path.with_name(f"{path.name}.corrupt{n}")
+        n += 1
+    try:
+        os.replace(path, target)
+    except OSError:
+        pass
+
+
+def _reuse_saved(path: Path) -> Transcript | None:
+    """The cached transcript, or None after setting a corrupt one aside (FR-A-08)."""
+    try:
+        return parse_transcript(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        log.warning("discarding the corrupt AssemblyAI cache %s (%s); a later run can upload "
+                    "again", path, type(exc).__name__)
+        _discard_saved(path)
+        return None
+
+
 def transcribe_assemblyai(wav: Path, work: Path, lang: str, context: str | None = None,
                           name: str = "assemblyai", reuse: bool = True) -> Transcript:
     saved = work / f"{name}.json"
     if reuse and saved.exists():   # already transcribed: no new upload, no new charge
-        return parse_transcript(json.loads(saved.read_text(encoding="utf-8")))
+        cached = _reuse_saved(saved)
+        if cached is not None:
+            return cached
     headers = {"authorization": api_key()}
     with httpx.Client(timeout=120) as c:
         with wav.open("rb") as f:
@@ -83,5 +110,7 @@ def transcribe_assemblyai(wav: Path, work: Path, lang: str, context: str | None 
                 raise TimeoutError(f"AssemblyAI transcript {tid} not ready after {TIMEOUT_S} s")
             time.sleep(POLL_S)
     work.mkdir(parents=True, exist_ok=True)
-    (work / f"{name}.json").write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp = saved.with_name(saved.name + ".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, saved)
     return parse_transcript(data)

@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 APP_NAME = "LyricLoom"
@@ -91,6 +92,17 @@ def set_setting(key: str, value) -> None:
     _save_setting(key, value)
 
 
+def _flag(value) -> bool:
+    """A JSON boolean setting, tolerating 0/1 and common string spellings."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def library_root() -> Path:
     """The library chosen in the app (shared with the command line), else LIBRARY_ROOT."""
     chosen = _settings().get("library")
@@ -134,24 +146,93 @@ def set_japanese_script(script: str) -> None:
     _save_setting("japanese_script", script)
 
 
+def smooth_animation_divisor() -> int:
+    """Frame-rate choice for the lyric animation: 1 = match display, 2 = half, 3 = third.
+
+    A lower rate is always an integer divisor of the monitor refresh rate; a non-divisor such as
+    60 on a 144 Hz display alternates between two and three refreshes and judders.
+    """
+    value = _settings().get("smooth_animation", 1)
+    if isinstance(value, str):
+        return {"display": 1, "half": 2, "third": 3}.get(value.strip().lower(), 1)
+    try:
+        divisor = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return divisor if divisor in (1, 2, 3) else 1
+
+
+def set_smooth_animation_divisor(divisor: int) -> None:
+    """Store the frame-rate choice (1, 2 or 3; anything else means match display)."""
+    try:
+        value = int(divisor)
+    except (TypeError, ValueError):
+        value = 1
+    _save_setting("smooth_animation", value if value in (1, 2, 3) else 1)
+
+
 def migrate_legacy_settings() -> bool:
-    """Copies settings from the pre-rename LyricsBoca data directory once. Returns True when a
-    migration happened, so the caller can tell the user where the new data lives."""
+    """Migrates settings and the data folders from the pre-rename LyricsBoca directory once.
+
+    Returns True when something was migrated, so the caller can tell the user where the new data
+    lives. A portable or test profile (``LYRICLOOM_DATA_DIR`` / ``LYRICLOOM_MODELS``) is never
+    migrated, because it explicitly manages its own files."""
+    if os.environ.get("LYRICLOOM_DATA_DIR") or os.environ.get("LYRICLOOM_MODELS"):
+        return False
     if SETTINGS_FILE != APP_DATA / "settings.json":
         return False   # tests and portable profiles manage their own settings
-    if SETTINGS_FILE.exists():
-        return False
     if not IS_WINDOWS:
         return False
-    old = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LyricsBoca" / "settings.json"
-    if not old.is_file():
+    old = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LyricsBoca"
+    if not old.is_dir():
         return False
-    try:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(old, SETTINGS_FILE)
-        return True
-    except OSError:
-        return False
+    APP_DATA.mkdir(parents=True, exist_ok=True)
+    changed = False
+    moved: set[str] = set()
+    old_settings = old / "settings.json"
+    if not SETTINGS_FILE.exists() and old_settings.is_file():
+        try:
+            SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(old_settings, SETTINGS_FILE)
+            changed = True
+        except OSError:
+            return False
+    # Move rather than copy: models alone can be several gigabytes and both folders are normally
+    # on the same drive. An existing destination is never overwritten.
+    for name in ("models", "vocals", "work"):
+        source, destination = old / name, APP_DATA / name
+        if source.is_dir() and not destination.exists():
+            try:
+                shutil.move(str(source), str(destination))
+                moved.add(name)
+                changed = True
+            except OSError:
+                pass
+    old_key, new_key = old / "assemblyai.key", APP_DATA / "assemblyai.key"
+    if old_key.is_file() and not new_key.exists():
+        try:
+            shutil.move(str(old_key), str(new_key))
+            changed = True
+        except OSError:
+            pass
+    if changed and moved and SETTINGS_FILE.exists():
+        # The copied settings still name the old folders; point the moved ones at the new location.
+        updates: dict[str, str] = {}
+        data = _settings()
+        for key in ("vocals", "work", "models"):
+            value = data.get(key)
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                relative = Path(value).expanduser().relative_to(old)
+            except ValueError:
+                continue
+            if not relative.parts or relative.parts[0] not in moved:
+                continue
+            updates[key] = str(APP_DATA / relative)
+        if updates:
+            update_settings(updates)
+    return changed
 
 
 # --------------------------------------------------------------------------- models and tools
@@ -175,27 +256,118 @@ def models_root() -> Path:
 
 
 MODELS = models_root()
+# Kept for compatibility with older code and installs.  New code resolves a model through
+# `models.catalog`/`resolve_model`, which understands the model_choices setting and custom models.
 WHISPER_MODEL_NAME = os.environ.get("LYRICLOOM_WHISPER_MODEL", "ggml-large-v3.bin")
 WHISPER_MODEL = MODELS / WHISPER_MODEL_NAME
 
 
-def _tool(name: str) -> Path | None:
-    """A bundled or installed helper binary, with the platform suffix."""
+def refresh_folder_constants() -> None:
+    """Re-reads the module path constants after ``migrate_legacy_settings`` rewrote the settings.
+
+    The constants are computed at import time, before the migration in ``run()`` can move the
+    old folders and rewrite the ``work``/``models`` settings.  Without this refresh the migrated
+    session keeps using the old (now missing) folders (FRB-14).  Every consumer reads these
+    attributes at call time, so replacing them is enough.
+    """
+    global WORK_ROOT, MODELS, WHISPER_MODEL
+    WORK_ROOT = work_root()
+    MODELS = models_root()
+    WHISPER_MODEL = MODELS / WHISPER_MODEL_NAME
+
+
+def whisper_cli_candidates() -> list[Path]:
+    """Every path checked for whisper-cli, in precedence order (the error message lists them)."""
     suffix = ".exe" if IS_WINDOWS else ""
-    candidates = [
-        RESOURCE_ROOT / "tools" / "bin" / f"{name}{suffix}",
-        PROJECT_ROOT / "tools" / "bin" / f"{name}{suffix}",
-        APP_DATA / "bin" / f"{name}{suffix}",
+    explicit = os.environ.get("LYRICLOOM_WHISPER_CLI") or _settings().get("whisper_cli")
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(str(explicit)).expanduser())
+    candidates += [
+        RESOURCE_ROOT / "tools" / "bin" / f"whisper-cli{suffix}",
+        PROJECT_ROOT / "tools" / "bin" / f"whisper-cli{suffix}",
+        APP_DATA / "bin" / f"whisper-cli{suffix}",
     ]
-    for candidate in candidates:
+    found = shutil.which("whisper-cli")
+    if found:
+        candidates.append(Path(found))
+    return candidates
+
+
+def whisper_cli() -> Path:
+    """The whisper.cpp binary to run.
+
+    Precedence: the ``whisper_cli`` setting (or ``LYRICLOOM_WHISPER_CLI``) > the bundled copy >
+    a developer checkout's copy > the per-user bin folder > ``PATH``.  The configured candidate is
+    returned even when missing, so the error message can name what the user set.
+    """
+    suffix = ".exe" if IS_WINDOWS else ""
+    explicit = os.environ.get("LYRICLOOM_WHISPER_CLI") or _settings().get("whisper_cli")
+    if explicit:
+        return Path(str(explicit)).expanduser()
+    for candidate in whisper_cli_candidates():
         if candidate.is_file():
             return candidate
-    found = shutil.which(name)
-    return Path(found) if found else None
+    return RESOURCE_ROOT / "tools" / "bin" / f"whisper-cli{suffix}"
 
 
-WHISPER_CLI = _tool("whisper-cli") or (
-    RESOURCE_ROOT / "tools" / "bin" / ("whisper-cli.exe" if IS_WINDOWS else "whisper-cli"))
+# --------------------------------------------------------------------------- model choices
+
+# The model used by each stage for the track being processed (a per-track override from the CLI
+# or the app's "Process with other models..." action).  A thread-local keeps concurrent folder
+# runs from leaking a choice into another track.
+_ACTIVE_MODELS = threading.local()
+_ACTIVE_LANGUAGE = threading.local()
+
+
+def set_active_models(overrides: dict[str, str] | None) -> None:
+    _ACTIVE_MODELS.overrides = dict(overrides or {})
+
+
+def clear_active_models() -> None:
+    _ACTIVE_MODELS.overrides = {}
+
+
+def active_models() -> dict[str, str]:
+    return dict(getattr(_ACTIVE_MODELS, "overrides", {}) or {})
+
+
+def set_active_language(lang: str | None) -> None:
+    """The track's tag language, so stage helpers without a language argument (separation) can
+    resolve a per-language model choice."""
+    _ACTIVE_LANGUAGE.lang = lang
+
+
+def active_language() -> str | None:
+    return getattr(_ACTIVE_LANGUAGE, "lang", None)
+
+
+def clear_active_language() -> None:
+    _ACTIVE_LANGUAGE.lang = None
+
+
+def model_choices() -> dict:
+    value = _settings().get("model_choices")
+    return value if isinstance(value, dict) else {}
+
+
+def resolve_model(stage: str, lang: str | None = None,
+                  models: dict[str, str] | None = None):
+    """The :class:`lyricloom.models.ModelSpec` a stage should use for ``lang``.
+
+    Precedence: per-run ``models`` override > language choice > default choice > catalog default.
+    Unknown or invalid ids are logged and skipped; this function always returns a model.
+    """
+    from . import models as catalog
+
+    merged = {**active_models(), **(models or {})}
+    return catalog.resolve(stage, lang=lang if lang is not None else active_language(),
+                           overrides=merged, choices=model_choices())
+
+
+# Resolved at import for compatibility; transcribe() asks whisper_cli() at stage start so a setting
+# changed in the app takes effect without restarting.
+WHISPER_CLI = whisper_cli()
 
 # Mel-Band RoFormer with one of the highest published vocals SDRs in audio-separator.
 SEPARATOR_MODEL = "vocals_mel_band_roformer.ckpt"
@@ -204,11 +376,23 @@ SEPARATOR_MODEL_DIR = MODELS / "separator"
 # the CPU. The WSL/ROCm path below is independent of this.
 SEPARATOR_DEVICE = os.environ.get("LYRICLOOM_SEPARATOR_DEVICE", "auto")
 SEPARATOR_OVERLAP = int(os.environ.get("LYRICLOOM_SEPARATOR_OVERLAP", "2"))
-CPU_THREADS = max(1, int(os.environ.get("LYRICLOOM_CPU_THREADS", (os.cpu_count() or 4) // 4)))
+# Worker thread pools: all logical CPUs but two (the GUI and the rest of the machine need some),
+# capped at 16 so a huge server does not oversubscribe memory bandwidth.  LYRICLOOM_CPU_THREADS
+# overrides the result for every stage (R1-20).
+_cpu_default = min(16, max(1, (os.cpu_count() or 4) - 2))
+CPU_THREADS = max(1, int(os.environ.get("LYRICLOOM_CPU_THREADS", _cpu_default)))
 SEPARATOR_PYTHON = sys.executable
 
 
 # --------------------------------------------------------------------------- WSL / ROCm (Windows)
+
+def _decode_wsl_output(data: bytes) -> str:
+    """Decodes ``wsl.exe`` output.  Piped WSL output is UTF-16 on Windows; tests and some tools
+    emit UTF-8 instead."""
+    if b"\x00" in data:
+        return data.decode("utf-16-le", "replace")
+    return data.decode("utf-8-sig", "replace")
+
 
 def _wsl_distros() -> list[str]:
     if not IS_WINDOWS or shutil.which("wsl.exe") is None:
@@ -216,7 +400,7 @@ def _wsl_distros() -> list[str]:
     try:
         out = subprocess.run(["wsl.exe", "-l", "-q"], capture_output=True, timeout=8,
                              stdin=subprocess.DEVNULL)
-        text = out.stdout.decode("utf-16-le", "replace") if b"\x00" in out.stdout else out.stdout.decode("utf-8", "replace")
+        text = _decode_wsl_output(out.stdout)
         return [line.strip().replace("\x00", "") for line in text.splitlines() if line.strip()]
     except (OSError, subprocess.SubprocessError):
         return []
@@ -292,19 +476,157 @@ MTL_WSL_ENV = dict(ALIGN_WSL_ENV)
 
 # --------------------------------------------------------------------------- optional cloud
 
-# Optional AssemblyAI transcription (cloud). Off unless the user pastes a key; the key never lives
-# in the repository.
+# Optional AssemblyAI transcription (cloud). A key alone does not turn it on: cloud transcription
+# is an explicit setting (`assemblyai_enabled`, default false) and every run can also refuse it
+# through `runner.process(..., allow_cloud=...)`. The key never lives in the repository.
 ASSEMBLYAI_KEY_FILE = APP_DATA / "assemblyai.key"
-ASSEMBLYAI_ENABLED = ASSEMBLYAI_KEY_FILE.exists() or bool(os.environ.get("ASSEMBLYAI_API_KEY"))
+_DPAPI_MAGIC = b"DPAPI1\n"
+
+
+def assemblyai_enabled() -> bool:
+    """Whether the user turned cloud transcription on in Settings (default: off)."""
+    return _flag(_settings().get("assemblyai_enabled", False))
+
+
+def set_assemblyai_enabled(value: bool) -> None:
+    """Stores the cloud-transcription choice. The key is stored separately."""
+    _save_setting("assemblyai_enabled", bool(value))
+
+
+def ask_before_upload() -> bool:
+    """Whether a queue asks for cloud-upload consent first (default: yes)."""
+    return _flag(_settings().get("assemblyai_ask_before_upload", True))
+
+
+def set_ask_before_upload(value: bool) -> None:
+    _save_setting("assemblyai_ask_before_upload", bool(value))
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """CryptProtectData/CryptUnprotectData for the current Windows user, through ctypes."""
+    if not IS_WINDOWS:
+        raise OSError("Windows DPAPI is not available on this platform")
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_ubyte))]
+
+    def blob(value: bytes):
+        buffer = (ctypes.c_ubyte * len(value)).from_buffer_copy(value)
+        return DataBlob(len(value), buffer), buffer
+
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    source, keepalive = blob(data)   # noqa: F841 - keepalive owns the source buffer
+    result = DataBlob()
+    if protect:
+        function = crypt32.CryptProtectData
+        function.argtypes = [ctypes.POINTER(DataBlob), wintypes.LPCWSTR, ctypes.POINTER(DataBlob),
+                             ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(DataBlob)]
+        args = (ctypes.byref(source), "LyricLoom AssemblyAI key", None, None, None, 0x1,
+                ctypes.byref(result))
+    else:
+        function = crypt32.CryptUnprotectData
+        function.argtypes = [ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.POINTER(DataBlob),
+                             ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD,
+                             ctypes.POINTER(DataBlob)]
+        args = (ctypes.byref(source), None, None, None, None, 0x1, ctypes.byref(result))
+    function.restype = wintypes.BOOL
+    if not function(*args):
+        code = ctypes.get_last_error()
+        raise OSError(code, "CryptProtectData failed" if protect else "CryptUnprotectData failed")
+    try:
+        return ctypes.string_at(result.pbData, result.cbData)
+    finally:
+        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+        kernel32.LocalFree.restype = ctypes.c_void_p
+        kernel32.LocalFree(ctypes.cast(result.pbData, ctypes.c_void_p))
+
+
+def _write_key_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if IS_WINDOWS:
+        try:
+            protected = _dpapi(text.encode("utf-8"), protect=True)
+        except OSError as exc:
+            raise RuntimeError(f"could not encrypt the AssemblyAI key for this Windows user: {exc}") from exc
+        path.write_bytes(_DPAPI_MAGIC + protected)
+        return
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as file:
+        file.write(text)
+    os.chmod(path, 0o600)
+
+
+def _read_key_text(path: Path) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"could not read the AssemblyAI key file: {exc}") from exc
+    if raw.startswith(_DPAPI_MAGIC):
+        if not IS_WINDOWS:
+            raise RuntimeError("the AssemblyAI key was encrypted with Windows DPAPI and cannot be read "
+                               "on this platform; add the key again")
+        try:
+            return _dpapi(raw[len(_DPAPI_MAGIC):], protect=False).decode("utf-8").strip()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise RuntimeError("the AssemblyAI key could not be decrypted for this Windows user; "
+                               "add the key again") from exc
+    text = raw.decode("utf-8", "replace").strip()
+    if text:
+        _write_key_text(path, text)   # migrate a plain-text key on first read
+    return text
+
+
+def read_assemblyai_key() -> str:
+    """The AssemblyAI key from the environment or the data file, decrypted/migrated as needed."""
+    path = ASSEMBLYAI_KEY_FILE
+    environment_key = os.environ.get("ASSEMBLYAI_API_KEY", "").strip()
+    file_key = ""
+    if path.is_file():
+        try:
+            file_key = _read_key_text(path)   # also migrates a plain-text file on first read
+        except Exception:
+            if not environment_key:
+                raise
+    if environment_key:
+        return environment_key
+    if file_key and not IS_WINDOWS:
+        try:
+            if os.stat(path).st_mode & 0o077:
+                os.chmod(path, 0o600)
+        except OSError:
+            pass
+    return file_key
+
+
+def has_assemblyai_key() -> bool:
+    """Whether a key is configured, without decrypting or exposing it."""
+    return bool(os.environ.get("ASSEMBLYAI_API_KEY", "").strip()) or ASSEMBLYAI_KEY_FILE.is_file()
+
+
+def redact_assemblyai_key(text: str) -> str:
+    """Removes a configured key from text that is about to be logged or shown to the user."""
+    try:
+        key = read_assemblyai_key()
+    except Exception:  # noqa: BLE001 - a broken key file must not break logging
+        return text
+    return text.replace(key, "***") if key else text
 
 
 def set_assemblyai_key(key: str) -> None:
-    """Stores (or, when empty, removes) the AssemblyAI key."""
-    global ASSEMBLYAI_ENABLED
+    """Stores (or, when empty, removes) the AssemblyAI key.
+
+    Having a key does **not** enable cloud transcription; `assemblyai_enabled` is a separate
+    setting, so an environment-provided key can never be mistaken for consent."""
     key = key.strip()
     if key:
-        ASSEMBLYAI_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ASSEMBLYAI_KEY_FILE.write_text(key, encoding="utf-8")
-    elif ASSEMBLYAI_KEY_FILE.exists():
-        ASSEMBLYAI_KEY_FILE.unlink()
-    ASSEMBLYAI_ENABLED = bool(key) or bool(os.environ.get("ASSEMBLYAI_API_KEY"))
+        _write_key_text(ASSEMBLYAI_KEY_FILE, key)
+    else:
+        ASSEMBLYAI_KEY_FILE.unlink(missing_ok=True)

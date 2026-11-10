@@ -46,3 +46,11 @@ def test_refrain_consensus_leaves_different_verses_alone():
     lines = _lines("essas linhas são de teste", "essas trilhas são de teste")
     out = [" ".join(w.text for w in l) for l in refrain_consensus(lines, "pt")]
     assert out == ["essas linhas são de teste", "essas trilhas são de teste"]
+
+
+def test_rover_does_not_match_words_whose_reading_is_empty():
+    """Chinese/Korean words romanize to ""; that must not make every word identical (R1-02)."""
+    primary = Transcript("zh", [Word("孤", 0, 300, 0.9), Word("勇", 300, 600, 0.9)])
+    other = Transcript("zh", [Word("者", 0, 300, 0.8), Word("也", 300, 600, 0.8)])
+    out = rover([primary, other], "zh")
+    assert [w.text for w in out.words] == ["孤", "勇"]

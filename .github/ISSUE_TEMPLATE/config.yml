@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Starry Karaoke (MusicBee plugin)
-    url: https://github.com/nishizumi-maho/MusicBee-StarryKaraoke/issues
-    about: Problems with the MusicBee plugin, not with LyricLoom's .lrc output.
+  - name: Bug report or feature request
+    url: https://github.com/nishizumi-maho/lyricloom/issues/new/choose
+    about: Use the product choice in the bug template for the LyricLoom app or the Starry Karaoke MusicBee plugin.
   - name: Security report
     url: https://github.com/nishizumi-maho/lyricloom/security/advisories/new
     about: Please report vulnerabilities privately.

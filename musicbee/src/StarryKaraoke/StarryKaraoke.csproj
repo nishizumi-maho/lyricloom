@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>mb_StarryKaraoke</AssemblyName>
+    <RootNamespace>MusicBeePlugin</RootNamespace>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Version>1.3.0</Version>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Romaji engine (same sources as Desktop Lyrics' RomajiCore, so both plugins can share one
+         RomajiCore.dll). The IPAdic dictionary is looked up in Plugins\RomajiLyrics\IpaDic. -->
+    <ProjectReference Include="..\..\external\RomajiCore\RomajiCore.csproj" />
+    <PackageReference Include="LibNMeCab" Version="0.10.2" />
+    <PackageReference Include="LibNMeCab.IpaDicBin" Version="0.10.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="StarryKaraoke.Tests" />
+    <InternalsVisibleTo Include="Preview" />
+    <InternalsVisibleTo Include="SmoothSeries" />
+    <InternalsVisibleTo Include="StarryKaraoke.Recorder" />
+  </ItemGroup>
+</Project>

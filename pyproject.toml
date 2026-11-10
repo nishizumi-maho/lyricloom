@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lyricloom"
-version = "2.0.0"
+version = "2.1.0"
 description = "Word-by-word synced .lrc lyrics from official lyrics, aligned against isolated vocals."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
@@ -25,7 +25,7 @@ classifiers = [
 dependencies = [
     "torch==2.4.1",
     "torchaudio==2.4.1",
-    "audio-separator[cpu]>=0.40",
+    "audio-separator[cpu]==0.47.1",
     "imageio-ffmpeg",
     "mutagen",
     "fugashi",

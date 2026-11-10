@@ -172,6 +172,47 @@ if whisper_cli is None:
 for path in whisper_files:
     datas.append((str(path), "tools/bin"))
 
+# --------------------------------------------------------------------------- setup engine assets
+# A frozen build sets up WSL itself: the script and a wheel of this exact version are bundled under
+# _internal/wsl/.  scripts/build-windows.ps1 builds the wheel with
+#   python -m pip wheel --no-deps . -w build\wsl
+# before PyInstaller runs.  A source checkout builds nothing.
+WSL_DIR = ROOT / "packaging" / "wsl"
+WSL_BUILD = ROOT / "build" / "wsl"
+WSL_SCRIPT = WSL_DIR / "setup-lyricloom-wsl.sh"
+if not WSL_SCRIPT.is_file():
+    raise SystemExit(f"the WSL setup script is missing: {WSL_SCRIPT}")
+datas.append((str(WSL_SCRIPT), "wsl"))
+wsl_wheels = sorted(WSL_BUILD.glob("lyricloom-*.whl"))
+if wsl_wheels:
+    datas.append((str(wsl_wheels[-1]), "wsl"))
+elif IS_WINDOWS:
+    raise SystemExit(
+        "build/wsl/ has no LyricLoom wheel.\n"
+        "Build it first with: python -m pip wheel --no-deps . -w build\\wsl"
+    )
+# The probe is sent to WSL interpreters on stdin, so it must exist as a source file too.
+PROBE_SCRIPT = ROOT / "lyricloom" / "workers" / "probe_gpu.py"
+if not PROBE_SCRIPT.is_file():
+    raise SystemExit(f"the WSL GPU probe is missing: {PROBE_SCRIPT}")
+datas.append((str(PROBE_SCRIPT), "lyricloom/workers"))
+hiddenimports += ["lyricloom.setup"]
+
+# --------------------------------------------------------------------------- MusicBee plugin
+# The setup assistant copies the bundled Starry Karaoke plugin into MusicBee's per-user Plugins
+# folder.  scripts/build-windows.ps1 builds dist\MusicBeePlugin before PyInstaller runs.  A Linux
+# build has no MusicBee, but a developer running the spec directly on Windows without the plugin
+# should get a clear error instead of a build that cannot offer the page.
+MUSICBEE_PLUGIN = ROOT / "dist" / "MusicBeePlugin"
+if MUSICBEE_PLUGIN.is_dir():
+    add_tree(MUSICBEE_PLUGIN, "musicbee")
+elif IS_WINDOWS:
+    raise SystemExit(
+        "dist/MusicBeePlugin is missing.\n"
+        "Run scripts/build-windows.ps1 (it builds the Starry Karaoke plugin before PyInstaller), "
+        "or copy the plugin staging folder there first."
+    )
+
 # --------------------------------------------------------------------------- Analysis and executables
 entry_script = ROOT / "packaging" / "pyinstaller" / "entry.py"
 icon = str(ICON_FILE) if ICON_FILE.is_file() else None

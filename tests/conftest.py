@@ -1,12 +1,21 @@
+import os
+import uuid
+
 import pytest
+
+# The single-instance server name normally derives from the user's real data folder. A test run must
+# never deliver commands to (or answer for) a LyricLoom the user is running, nor to another test run
+# on the same machine, so every pytest session gets its own name.
+os.environ["LYRICLOOM_INSTANCE_NAME"] = f"LyricLoom-test-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 @pytest.fixture(autouse=True)
 def no_cloud_transcription(tmp_path, monkeypatch):
-    """Tests never reach AssemblyAI: a real key in assemblyai.key would otherwise turn it on.
-    Tests that need it turn it back on with a fake in place of the network call."""
-    monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_ENABLED", False)
+    """Tests never reach AssemblyAI: an isolated settings file keeps cloud transcription off, and
+    a real key in the user's data folder is never read. Tests that need it turn it back on with a
+    fake in place of the network call."""
     monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_KEY_FILE", tmp_path / "test-assemblyai.key")
+    monkeypatch.delenv("ASSEMBLYAI_API_KEY", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +29,15 @@ def isolated_settings(tmp_path, monkeypatch):
     """The real settings file (chosen library) is never read or written by tests."""
     monkeypatch.setattr("lyricloom.config.SETTINGS_FILE", tmp_path / "test-settings.json")
     monkeypatch.setattr("lyricloom.config.WORK_ROOT", tmp_path / "work")   # caches and scan lists too
+    # A test machine may have the real models configured in settings.json.  Point every catalog
+    # path at an empty temp folder so a test never depends on (or reads) multi-gigabyte files.
+    monkeypatch.setattr("lyricloom.config.MODELS", tmp_path / "models")
+
+
+@pytest.fixture(autouse=True)
+def isolated_update_dir(tmp_path, monkeypatch):
+    """A test never deletes or writes the real temporary update folder of a running LyricLoom."""
+    monkeypatch.setattr("lyricloom.updater.UPDATE_DIR", tmp_path / "updates")
 
 
 @pytest.fixture(autouse=True)
@@ -30,3 +48,11 @@ def isolated_vocals(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.config.SEPARATOR_WSL_ENABLED", False)
     monkeypatch.setattr("lyricloom.config.ALIGN_WSL_ENABLED", False)
     monkeypatch.setattr("lyricloom.config.MTL_WSL_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_whisper_model(monkeypatch):
+    """A 2.0 user's LYRICLOOM_WHISPER_MODEL must not change which model a test resolves."""
+    monkeypatch.delenv("LYRICLOOM_WHISPER_MODEL", raising=False)
+    from lyricloom import models
+    models._COMPAT_LOGGED.clear()
