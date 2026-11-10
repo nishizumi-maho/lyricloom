@@ -26,15 +26,30 @@ def _time_at(line: Line, offset: int, at_end: bool = False) -> float | None:
     return None
 
 
+def _word_timed(line: Line) -> bool:
+    return any(s.start_ms is not None and s.end_ms is not None for s in line.segments)
+
+
 def merge_presync(ours: list[Line], presync: list[Line], max_mean_diff_ms: int = 150) -> list[Line]:
     out = []
     for line in ours:
         key = _norm(line.text)
         same = [p for p in presync if _norm(p.text) == key and p.start_ms is not None]
-        if not key or not same or line.start_ms is None:
+        if not key or not same:
             out.append(line)
             continue
-        pre = min(same, key=lambda p: abs(p.start_ms - line.start_ms))
+        pre = min(same, key=lambda p: abs(p.start_ms - (line.start_ms or 0)))
+        if not _word_timed(pre):
+            # A plain LRC source has line timing only.  Use it where it agrees with our line
+            # start; word starts stay as CTC/MTL heard them (R1-13).
+            if line.start_ms is not None and abs(pre.start_ms - line.start_ms) <= max_mean_diff_ms:
+                out.append(Line(pre.start_ms, line.segments, max(line.conf, 0.9)))
+            else:
+                out.append(line)
+            continue
+        if line.start_ms is None:
+            out.append(line)
+            continue
         diffs, retimed, pos = [], [], 0
         for s in line.segments:
             a, b = _time_at(pre, pos), _time_at(pre, pos + len(s.text), at_end=True)

@@ -1,4 +1,7 @@
 import hashlib
+import json
+import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -6,9 +9,9 @@ import pytest
 import soundfile as sf
 from mutagen.flac import FLAC
 
-from lyricloom import ENGINE_VERSION, cli, runner
+from lyricloom import ENGINE_VERSION, cli, config, models, runner
 from lyricloom.lrc import parse_lrc
-from lyricloom.model import Candidate, Line, Segment, Transcript, Word
+from lyricloom.model import Candidate, Line, Segment, TrackMeta, Transcript, Word
 from lyricloom.stages.align import AlignResult
 
 
@@ -25,19 +28,33 @@ def _flac(path: Path) -> Path:
 def lib(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.config.WORK_ROOT", tmp_path / "work")
     monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", tmp_path / "Library")
-    calls = {"separate": 0}
+    calls = {"separate": 0, "transcribe": 0, "align": 0}
 
-    def fake_separate(audio, work):
+    def fake_separate(audio, work, cancel=None):
         calls["separate"] += 1
-        return {"vocals": "v.wav", "vocals16k": "v16.wav", "model": "m", "device": "cpu"}
+        work.mkdir(parents=True, exist_ok=True)
+        vocals, vocals16k = work / "vocals.wav", work / "vocals16k.wav"
+        sf.write(str(vocals), np.zeros(44100, dtype="float32"), 44100, format="WAV")
+        sf.write(str(vocals16k), np.zeros(16000, dtype="float32"), 16000, format="WAV")
+        return {"vocals": str(vocals), "vocals16k": str(vocals16k), "model": "m", "device": "cpu"}
+
+    def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
+        calls["transcribe"] += 1
+        return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
+
+    def fake_align(meta, work, chosen, tr, v, vf=None, cancel=None):
+        calls["align"] += 1
+        return AlignResult(
+            [Line(0, [Segment("eu ", 0, 300, 0.9), Segment("vou", 400, 700, 0.9)], 0.9)], 0.9, False)
 
     monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
     monkeypatch.setattr(runner, "separate", fake_separate)
-    monkeypatch.setattr(runner, "transcribe", lambda v, w, lang, prompt=None, name="whisper", extra=(): Transcript(
-        "pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)]))
+    monkeypatch.setattr(runner, "transcribe", fake_transcribe)
     monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: AlignResult(
-        [Line(0, [Segment("eu ", 0, 300, 0.9), Segment("vou", 400, 700, 0.9)], 0.9)], 0.9, False))
+    monkeypatch.setattr(runner, "align", fake_align)
+    # These tests replace the heavy stages with fakes; the dedicated preflight test below uses the
+    # real model check.
+    monkeypatch.setattr(runner.model_catalog, "ensure_ready", lambda *a, **k: None)
     return tmp_path / "Library", calls
 
 
@@ -49,6 +66,9 @@ def test_process_writes_lrc_with_source_and_engine(lib):
     doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
     assert doc.meta["#source"] == "letras conf:0.90"
     assert doc.meta["#engine"] == ENGINE_VERSION
+    assert "#models" in doc.meta
+    assert "transcribe=whisper-large-v3" in doc.meta["#models"]
+    assert "separate=separator-mel-band-roformer" in doc.meta["#models"]
     assert doc.lines[0].text == "eu vou"
 
 
@@ -100,7 +120,7 @@ def test_stage_cache_reused(lib):
 def _count_transcribe(monkeypatch):
     calls = []
 
-    def fake(v, w, lang, prompt=None, name="whisper", extra=()):
+    def fake(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
         calls.append({"wav": str(v), "prompt": prompt, "name": name, "extra": list(extra)})
         return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
 
@@ -141,7 +161,7 @@ def _aai(monkeypatch, enabled=True):
         return SUNG
 
     monkeypatch.setattr(runner, "transcribe_assemblyai", fake)
-    monkeypatch.setattr("lyricloom.config.ASSEMBLYAI_ENABLED", enabled)
+    monkeypatch.setattr("lyricloom.config.assemblyai_enabled", lambda: enabled)
     return calls
 
 
@@ -174,9 +194,11 @@ def test_assemblyai_votes_in_transcription_only_songs(lib, monkeypatch):
     voters = {}
     real_rover = runner.rover
     monkeypatch.setattr(runner, "rover", lambda ts, lang: voters.setdefault("n", len(ts)) and real_rover(ts, lang))
-    runner.process(_flac(root / "a.flac"))
+    res = runner.process(_flac(root / "a.flac"))
     assert voters["n"] == 4
     assert [c["name"] for c in calls] == ["assemblyai_vocals"]
+    assert res.cloud is True
+    assert "cloud transcription used: AssemblyAI" in _track_log(root / "a.flac")
 
 
 def test_no_assemblyai_when_disabled(lib, monkeypatch):
@@ -186,6 +208,22 @@ def test_no_assemblyai_when_disabled(lib, monkeypatch):
     monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
     runner.process(_flac(root / "a.flac"))
     assert calls == []
+
+
+def test_allow_cloud_false_never_calls_the_client(lib, monkeypatch):
+    root, _ = lib
+    calls = _aai(monkeypatch, enabled=True)
+    monkeypatch.setattr(runner, "search_all", lambda meta: [])
+    monkeypatch.setattr(runner, "to_mono16k", lambda src, dst: None)
+    res = runner.process(_flac(root / "a.flac"), allow_cloud=False)
+    assert calls == []
+    assert res.cloud is False
+
+
+def _track_log(audio: Path) -> str:
+    from lyricloom import cache
+
+    return (cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
 
 
 def test_hallucination_without_lyrics_or_assemblyai_fails_instead_of_writing_garbage(lib, monkeypatch):
@@ -216,10 +254,137 @@ def test_stages_are_reported_in_order(lib):
 
 def test_low_confidence_lines_are_listed_in_the_lrc(lib, monkeypatch):
     root, _ = lib
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: AlignResult(
+    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None, cancel=None: AlignResult(
         [Line(0, [Segment("a", 0, 300)], 0.9), Line(500, [Segment("b", 500, 800)], 0.4)], 0.7, True))
     runner.process(_flac(root / "a.flac"))
     assert parse_lrc((root / "a.lrc").read_text(encoding="utf-8")).meta["#review"] == "1"
+
+
+def _strip_inputs(audio: Path, *stages: str) -> None:
+    """Turn stage caches into the shape 2.0 wrote: no `_inputs` fingerprint."""
+    for stage in stages:
+        path = runner.cache.work_dir(audio) / f"{stage}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("_inputs", None)
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_legacy_stage_caches_keep_pasted_lyrics_realign_working(lib):
+    """A song finished by 2.0 has no model fingerprints in its caches; Redo/pasted realign must
+    reuse separation and transcription instead of asking the user to process the track again."""
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    _strip_inputs(audio, "separate", "transcribe")
+    before = dict(calls)
+    res = runner.realign(audio, "minha letra\ncolada aqui")
+    assert res.status == "done" and res.source == "manual"
+    assert calls["separate"] == before["separate"]
+    assert calls["transcribe"] == before["transcribe"]
+    # The reused caches were rewritten with the current fingerprint.
+    for stage in ("separate", "transcribe"):
+        data = json.loads((runner.cache.work_dir(audio) / f"{stage}.json").read_text(encoding="utf-8"))
+        assert "_inputs" in data
+
+
+def test_legacy_stage_cache_is_not_reused_for_a_per_run_override(lib):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    _strip_inputs(audio, "separate", "transcribe")
+    runner.process(audio, force=True, models={"separate": "separator-bs-roformer-vocals"})
+    assert calls["separate"] == 2
+
+
+def test_legacy_transcribe_cache_is_accepted_only_for_the_2_0_model(monkeypatch):
+    """FR-A-01: a 2.0 cache made with LYRICLOOM_WHISPER_MODEL=medium must not be relabelled as
+    large-v3 (or vice versa) when 2.1 resolves a different model."""
+    medium, large = models.get("whisper-medium"), models.get("whisper-large-v3")
+    monkeypatch.setenv("LYRICLOOM_WHISPER_MODEL", "whisper-medium")
+    assert runner._legacy_cache_ok("transcribe", [medium]) is True
+    assert runner._legacy_cache_ok("transcribe", [large]) is False
+    monkeypatch.delenv("LYRICLOOM_WHISPER_MODEL")
+    assert runner._legacy_cache_ok("transcribe", [large]) is True
+    assert runner._legacy_cache_ok("transcribe", [medium]) is False
+
+
+def _cached_separate(audio: Path) -> dict:
+    return json.loads((runner.cache.work_dir(audio) / "separate.json").read_text(encoding="utf-8"))
+
+
+def test_a_missing_cached_separation_file_is_recomputed(lib):
+    """FR-A-02: a cache that points at deleted wav files must not wedge the track forever."""
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    assert calls["separate"] == 1
+    Path(_cached_separate(audio)["vocals16k"]).unlink()
+
+    assert runner.process(audio, force=True).status == "done"
+    assert calls["separate"] == 2
+    assert "recomputing" in (runner.cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
+
+
+def test_realign_recomputes_a_separation_with_deleted_files(lib):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    Path(_cached_separate(audio)["vocals"]).unlink()
+
+    assert runner.realign(audio, "outra letra").status == "done"
+    assert calls["separate"] == 2
+
+
+def test_english_with_the_singing_model_does_not_require_mms(lib, monkeypatch):
+    """FR-A-04: MMS_FA is the English fallback; a ready singing model is enough."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    checked = []
+    monkeypatch.setattr(runner.model_catalog, "ensure_ready",
+                        lambda specs, **kwargs: checked.extend(spec.id for spec in specs))
+    monkeypatch.setattr(runner.model_catalog, "singing_ready", lambda lang=None: True)
+    monkeypatch.setattr(runner, "transcribe", lambda *a, **k: Transcript(
+        "en", [Word("hello", 0, 300, 0.9), Word("world", 400, 700, 0.9)]))
+    runner.process(audio)
+    assert "align-mms-fa" not in checked
+
+
+def test_other_languages_still_require_the_align_model(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    checked = []
+    monkeypatch.setattr(runner.model_catalog, "ensure_ready",
+                        lambda specs, **kwargs: checked.extend(spec.id for spec in specs))
+    monkeypatch.setattr(runner.model_catalog, "singing_ready", lambda lang=None: True)
+    runner.process(audio)   # the fixture's fake transcript is Portuguese
+    assert "align-mms-fa" in checked
+
+
+def test_title_and_artist_cannot_break_the_lrc_tags(lib, monkeypatch):
+    """FR-A-06: a newline or ] in a tag must not create phantom lyric lines."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    meta = TrackMeta(audio, "Artist; X]Y", "Line one\n[00:02.00]phantom]", "", 10.0, "pt")
+    monkeypatch.setattr(runner, "probe", lambda path: meta)
+    runner.process(audio)
+
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert doc.meta["ar"] == "Artist; X Y"   # a semicolon is harmless inside [ar:]
+    assert "\n" not in doc.meta["ti"] and "]" not in doc.meta["ti"]
+    assert len(doc.lines) == 1
+    original = parse_lrc((root / "a.original.lrc").read_text(encoding="utf-8"))
+    assert "\n" not in original.meta["ti"] and "]" not in original.meta["ti"]
+
+
+def test_cli_process_returns_two_when_nothing_is_scanned(lib, capsys):
+    """FR-A-11: pointing process at an excluded path is an error, not silent success."""
+    root, _ = lib
+    stem = root / "a.vocals.flac"
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    stem.write_bytes(b"")
+    assert cli.main(["process", str(stem)]) == 2
+    err = capsys.readouterr().err
+    assert "no audio files" in err and "vocals" in err and "excluded" in err
 
 
 def test_realign_with_pasted_text_reuses_the_audio_stages(lib, monkeypatch):
@@ -227,8 +392,10 @@ def test_realign_with_pasted_text_reuses_the_audio_stages(lib, monkeypatch):
     audio = _flac(root / "a.flac")
     runner.process(audio)
     texts = []
-    monkeypatch.setattr(runner, "align", lambda meta, work, chosen, tr, v, vf=None: texts.append(chosen.text) or AlignResult(
-        [Line(0, [Segment("x", 0, 300, 0.9)], 0.9)], 0.9, False))
+    monkeypatch.setattr(
+        runner, "align",
+        lambda meta, work, chosen, tr, v, vf=None, cancel=None: texts.append(chosen.text) or AlignResult(
+            [Line(0, [Segment("x", 0, 300, 0.9)], 0.9)], 0.9, False))
     res = runner.realign(audio, "minha letra\ncolada aqui")
     assert texts == ["minha letra\ncolada aqui"]
     assert res.source == "manual" and calls["separate"] == 1
@@ -265,6 +432,40 @@ def test_transcript_lines_have_a_max_length():
     assert max(len(l.split()) for l in runner._transcript_candidate(tr).text.splitlines()) <= 10
 
 
+def test_find_audio_prunes_a_directory_that_is_a_link_or_junction(tmp_path, monkeypatch):
+    root = tmp_path / "library"
+    album = root / "album"
+    album.mkdir(parents=True)
+    song = album / "song.flac"
+    song.write_bytes(b"x")
+    loop = album / "loop"
+    loop.mkdir()
+    (loop / "copied.flac").write_bytes(b"x")
+    real = runner._is_link_or_junction
+    monkeypatch.setattr(runner, "_is_link_or_junction",
+                        lambda path: Path(path).name == "loop" or real(path))
+    assert runner.find_audio(root) == [song]
+
+
+def test_find_audio_does_not_descend_into_a_windows_junction(tmp_path):
+    if os.name != "nt":
+        pytest.skip("junctions are Windows-only")
+    root = tmp_path / "library"
+    album = root / "album"
+    album.mkdir(parents=True)
+    song = album / "song.flac"
+    song.write_bytes(b"x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "copied.flac").write_bytes(b"x")
+    junction = root / "linked"
+    created = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(elsewhere)],
+                             capture_output=True, text=True)
+    if created.returncode != 0:
+        pytest.skip(f"could not create a junction: {created.stderr or created.stdout}")
+    assert runner.find_audio(root) == [song]
+
+
 def test_runner_failed_track_does_not_stop_folder(lib):
     root, _ = lib
     (root / "a_bad.flac").parent.mkdir(parents=True, exist_ok=True)
@@ -285,3 +486,167 @@ def test_cli_processes_folder(lib, capsys):
     _flac(root / "Artist" / "a.flac")
     assert cli.main(["process", str(root)]) == 0
     assert "done" in capsys.readouterr().out
+
+
+def test_per_song_model_override_is_written_to_the_lrc_and_log(lib):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    res = runner.process(audio, models={"transcribe": "whisper-small"})
+    assert res.status == "done" and res.models["transcribe"] == "whisper-small"
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert "transcribe=whisper-small" in doc.meta["#models"]
+    assert "transcribe=whisper-small" in (runner.cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
+
+
+def test_changing_the_separator_model_recomputes_separation_and_transcription_but_not_lyrics(lib):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    assert calls == {"separate": 1, "transcribe": 1, "align": 1}
+    models.use("separate", "separator-bs-roformer-vocals")
+    runner.process(audio, force=True)
+    assert calls == {"separate": 2, "transcribe": 2, "align": 2}
+
+
+def test_changing_only_the_align_model_reuses_separation_and_transcription(lib, tmp_path):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    custom = tmp_path / "align.pt"
+    custom.write_bytes(b"a custom alignment checkpoint")
+    spec = models.add("align", str(custom))
+    models.use("align", spec.id)
+    runner.process(audio, force=True)
+    assert calls == {"separate": 1, "transcribe": 1, "align": 2}
+
+
+def test_a_missing_model_fails_the_track_before_the_stage_runs(tmp_path, monkeypatch):
+    root = tmp_path / "Library"
+    monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", root)
+    audio = _flac(root / "a.flac")
+    called = []
+    monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
+    monkeypatch.setattr(runner, "separate", lambda *a, **k: called.append("separate"))
+    res = runner.process(audio)
+    assert res.status == "failed"
+    assert "missing models" in res.error
+    assert "separator-mel-band-roformer" in res.error
+    assert "lyricloom models download" in res.error
+    assert [spec.id for spec in res.missing] == ["separator-mel-band-roformer"]
+    assert called == []
+
+
+def test_an_empty_lyric_search_is_not_cached_and_the_next_run_retries(lib, monkeypatch):
+    """R1-08: a first run offline must not pin the track to Whisper text forever."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    calls = []
+
+    def search(meta):
+        calls.append(meta.title)
+        return [] if len(calls) == 1 else [Candidate("letras", "eu vou", score=0.9)]
+
+    monkeypatch.setattr(runner, "search_all", search)
+    first = runner.process(audio)
+    assert first.status == "review" and first.source == "transcription"
+    assert not (runner.cache.work_dir(audio) / "lyrics.json").exists()
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert doc.meta["#lyrics"] == "search-empty"
+
+    second = runner.process(audio)      # the #lyrics tag makes _already_done retry
+    assert second.source == "letras" and second.status == "done"
+    assert len(calls) == 2
+
+
+def test_research_lyrics_reruns_the_search(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    monkeypatch.setattr(runner, "search_all", lambda meta: [])
+    runner.process(audio)
+    seen = []
+    monkeypatch.setattr(runner, "search_all",
+                        lambda meta: seen.append(meta.title) or [Candidate("letras", "eu vou", score=0.9)])
+    heavy = []
+    real_separate, real_transcribe = runner.separate, runner.transcribe
+    monkeypatch.setattr(runner, "separate", lambda *a, **k: heavy.append("separate") or real_separate(*a, **k))
+    monkeypatch.setattr(runner, "transcribe", lambda *a, **k: heavy.append("transcribe") or real_transcribe(*a, **k))
+    result = runner.research_lyrics(audio)
+    assert seen and result.source == "letras"
+    assert heavy == []   # searching again reuses the separation and transcription caches
+
+
+def test_a_hallucinated_transcript_forces_review_and_is_reported(lib, monkeypatch):
+    """R1-09: a hallucinated anchor must surface in TrackResult.notes and in the .lrc."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    monkeypatch.setattr(runner, "transcribe", lambda *a, **k: CREDITS)
+    monkeypatch.setattr(runner, "search_all", lambda meta: [Candidate("letras", "eu vou", score=0.9)])
+    res = runner.process(audio)
+    assert res.status == "review"
+    assert res.notes and "hallucinated" in res.notes[0]
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert "hallucinated" in doc.meta["#warning"]
+    assert doc.meta["#review"] == "0"   # every line of the only line is marked for review
+
+
+def test_a_second_process_is_skipped_while_the_track_lock_is_held(lib):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    lock = runner.cache.acquire(audio)
+    assert lock is not None
+    try:
+        res = runner.process(audio)
+        assert res.status == "skipped" and "already being processed" in res.error
+    finally:
+        lock.release()
+    assert runner.process(audio).status == "done"
+
+
+def test_find_audio_skips_kept_vocals_and_work_cache(tmp_path, monkeypatch):
+    library = tmp_path / "Library"
+    monkeypatch.setattr("lyricloom.config.LIBRARY_ROOT", library)
+    monkeypatch.setattr("lyricloom.config.DEFAULT_VOCALS", library / "Vocals")
+    monkeypatch.setattr("lyricloom.config.WORK_ROOT", library / "Work")
+    song = library / "Artist" / "Album" / "song.flac"
+    song.parent.mkdir(parents=True)
+    song.write_bytes(b"")
+    (song.parent / "song.vocals.flac").write_bytes(b"")
+    (library / "Vocals" / "x.flac").parent.mkdir(parents=True)
+    (library / "Vocals" / "x.flac").write_bytes(b"")
+    (library / "Work" / "y.flac").parent.mkdir(parents=True)
+    (library / "Work" / "y.flac").write_bytes(b"")
+    assert runner.find_audio(library) == [song]
+
+
+def test_a_failed_keep_vocals_step_is_only_logged(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+
+    def boom(*args, **kwargs):
+        raise OSError("the vocals cache is read-only")
+
+    monkeypatch.setattr(runner, "keep_vocals", boom)
+    assert runner.process(audio).status == "done"
+
+
+def test_cli_exit_code_is_one_when_every_track_failed(lib):
+    root, _ = lib
+    (root / "bad.flac").parent.mkdir(parents=True, exist_ok=True)
+    (root / "bad.flac").write_bytes(b"not audio")
+    assert cli.main(["process", str(root)]) == 1
+
+
+def test_process_language_override_is_logged_and_used(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    seen = {}
+
+    def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
+        seen["lang"] = lang
+        return Transcript("pt", [Word("eu", 0, 300, 0.9), Word("vou", 400, 700, 0.9)])
+
+    monkeypatch.setattr(runner, "transcribe", fake_transcribe)
+    res = runner.process(audio, lang="zh")
+    assert res.status == "done" and seen["lang"] == "zh"
+    assert "language override: zh" in (runner.cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
+    assert parse_lrc((root / "a.lrc").read_text(encoding="utf-8")).meta["#language"] == "zh"

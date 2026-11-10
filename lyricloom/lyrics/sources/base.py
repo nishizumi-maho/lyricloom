@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -36,6 +38,41 @@ def check(resp: httpx.Response) -> httpx.Response:
         raise SourceBlocked(f"{resp.request.url.host} answered {resp.status_code}")
     resp.raise_for_status()
     return resp
+
+
+def host_matches(host: str | None, domain: str) -> bool:
+    """Exact host or a real subdomain, so evilgenius.com is not genius.com."""
+    host = (host or "").lower().rstrip(".")
+    domain = domain.lower()
+    return host == domain or host.endswith("." + domain)
+
+
+def is_https_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and bool(parsed.hostname)
+
+
+def get_allowed(client: httpx.Client, url: str, allowed: Callable[[str], bool],
+                max_redirects: int = 5) -> httpx.Response:
+    """GET `url`, following redirects only while every hop stays allowed.
+
+    The shared search client follows redirects by default. Pages taken from a search result are
+    fetched here with redirects disabled so each Location is validated again: an allowlisted page
+    that redirects off its host, or from https to http, is refused instead of parsed as lyrics.
+    """
+    current = url
+    for _ in range(max_redirects + 1):
+        if not allowed(current):
+            host = urlparse(current).hostname or current
+            raise SourceBlocked(f"refusing to fetch {host}: not an allowed page")
+        response = client.get(current, follow_redirects=False)
+        if not response.is_redirect:
+            return check(response)
+        location = response.headers.get("location", "")
+        if not location:
+            return check(response)
+        current = urljoin(current, location)
+    raise SourceBlocked("too many redirects while fetching a search result")
 
 
 _LRC_TS = re.compile(r"\[(\d+):(\d{2})(?:[.:](\d{1,3}))?\]")

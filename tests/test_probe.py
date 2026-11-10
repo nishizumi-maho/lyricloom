@@ -31,6 +31,19 @@ def test_probe_latin_is_other(tmp_path):
     assert meta.lang == "other"
 
 
+def test_probe_han_only_tags_are_not_japanese(tmp_path):
+    meta = probe(_make_flac(tmp_path / "a.flac", "Chinese Artist", "孤勇者"))
+    assert meta.lang == "other"
+
+
+def test_probe_explicit_language_tag_wins(tmp_path):
+    audio = _make_flac(tmp_path / "a.flac", "Chinese Artist", "孤勇者")
+    f = FLAC(str(audio))
+    f["language"] = "zh"
+    f.save()
+    assert probe(audio).lang == "zh"
+
+
 def test_probe_never_writes(tmp_path):
     audio = _make_flac(tmp_path / "a.flac", "A", "B")
     before = (audio.stat().st_mtime_ns, hashlib.sha1(audio.read_bytes()).hexdigest())

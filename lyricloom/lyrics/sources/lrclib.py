@@ -20,7 +20,7 @@ def parse(items: list[dict]) -> list[RawResult]:
             text = text or text2
         if text:
             out.append(RawResult(it.get("trackName", ""), it.get("artistName", ""), it.get("duration"),
-                                 text, None, f"https://lrclib.net/api/get/{it.get('id')}"))
+                                 text, synced, f"https://lrclib.net/api/get/{it.get('id')}"))
     return out
 
 

@@ -15,7 +15,10 @@ lyricloom models status
 lyricloom --version
 ```
 
-The packaged Windows and Linux GUI builds are windowed applications and do not expose the console command in 2.0.0. Use the model dialog, the status bar and the per-track logs; the source/pipx commands below are still the clearest way to inspect a machine if you can install them.
+The packaged Windows and Linux GUI builds are windowed applications and do not expose the console
+command in 2.1.0. Use **Help > Diagnostics…** (copy the text), **Help > Models…**, the status bar and
+the per-track logs; the source/pipx commands below are still the clearest way to inspect a machine if
+you can install them.
 
 Per-track logs are in:
 
@@ -23,6 +26,9 @@ Per-track logs are in:
 Windows: %LOCALAPPDATA%\LyricLoom\work\<hash>\log.txt
 Linux:   ~/.local/share/lyricloom/work/<hash>/log.txt
 ```
+
+The app itself also keeps a rotating log at `%LOCALAPPDATA%\LyricLoom\logs\app.log`
+(`~/.local/share/lyricloom/logs/app.log` on Linux). **Help > Open log folder** opens it.
 
 The `<hash>` changes when the audio file changes. To find a song's log on Windows:
 
@@ -36,6 +42,53 @@ On Linux:
 ```bash
 grep -rl "Song Title" ~/.local/share/lyricloom/work --include=log.txt
 ```
+
+## Setup assistant and models
+
+The first start opens **LyricLoom setup assistant**. It is also under **Help > Setup assistant…** and
+has these pages: Welcome, Your music folder, System check, Acceleration, Models, Privacy, MusicBee and
+Ready.
+
+- **A page will not continue.** A setup or download may still be running. Wait for it to finish or
+  click **Cancel**; the assistant does not run two jobs at once.
+- **No WSL environment passes.** The probe needs `torch`, `torchaudio`, `audio_separator`, `g2p_en`,
+  `nltk`, `lyricloom` and a working GPU. Read the detailed error in the combo-box tooltip or the
+  setup log, or use the manual path in [docs/wsl-rocm.md](wsl-rocm.md).
+- **The setup assistant has no WSL setup script.** A source checkout does not build the wheel. Use the
+  manual procedure in [docs/wsl-rocm.md](wsl-rocm.md), or a packaged Windows build.
+- **A model is missing or corrupt.** Open **Help > Models…**. Select the row and use **Download**,
+  **Verify** or **Repair**. See [docs/models.md](models.md).
+- **Every track fails with a model error.** A queue checks its models first and offers to download
+  what is missing. A model is never downloaded during a song; the track log names the file and the
+  `lyricloom models download` command.
+- **Not enough disk space.** The Models page checks free space before downloading. Free space in the
+  models folder, or move it with `LYRICLOOM_MODELS`.
+- **"Made with other models" appears.** The `.lrc` records its model ids in `[#models:…]`, and they
+  differ from the current choices. Use **Redo with current models** if you want the current set.
+- **An upgrade from 2.0 is redoing work.** Existing caches and kept vocals are reused when the models
+  are still the catalog defaults. A changed model, a changed audio file or a new engine version can
+  invalidate the affected stages. See [docs/models.md](models.md#upgrading-from-20).
+
+## Updates
+
+Automatic update checks are **on by default**. LyricLoom contacts `api.github.com` shortly after
+start-up and every 24 hours; clear the check in **Settings > Privacy** to stop it. **Help > Check for
+updates…** is always a manual one-off.
+
+- **No update is offered.** You may already be current, the update check may be off, or the release
+  may be skipped. **Skip this version** only skips that release; a newer one is offered normally.
+- **The download fails.** Use **Help > Check for updates…** to try again, or download from the release
+  page. A missing, wrong or unavailable SHA-256 is refused by design.
+- **The installer does not start.** The updater accepts only this project's GitHub release assets,
+  re-checks the SHA-256 before launching, and refuses a file it did not download and verify itself.
+  Download the installer manually from the [Releases page](https://github.com/nishizumi-maho/lyricloom/releases)
+  if needed.
+- **MusicBee was open during a silent update.** LyricLoom intentionally skipped the plugin files
+  rather than closing MusicBee. Close MusicBee and use **Help > Setup assistant… > MusicBee** or the
+  release ZIP.
+- **A queue was running.** **Restart now** and **Install now** ask whether to stop the queue first. A
+  normal exit installs a pending automatic update only after the queue has stopped.
+
 
 ## No lyrics found
 
@@ -94,15 +147,20 @@ It prints the `whisper-cli` path and whether the file exists, plus the models fo
 
 LyricLoom looks for `whisper-cli` in:
 
-1. The bundled `tools/bin` folder.
-2. `%LOCALAPPDATA%\LyricLoom\bin` on Windows, or `~/.local/share/lyricloom/bin` on Linux.
-3. Your `PATH`.
+1. The `whisper_cli` setting, or `LYRICLOOM_WHISPER_CLI`.
+2. The bundled `tools/bin` folder.
+3. A developer checkout's `tools/bin`.
+4. `%LOCALAPPDATA%\LyricLoom\bin` on Windows, or `~/.local/share/lyricloom/bin` on Linux.
+5. Your `PATH`.
 
-The model must be `<models>/ggml-large-v3.bin` unless you set `LYRICLOOM_WHISPER_MODEL` to another file name. The default is about 3 GB; a tiny placeholder file will not work.
+The default model is `<models>/ggml-large-v3.bin`. Choose another catalog model with
+`lyricloom models use transcribe <id>`; a tiny placeholder file will not work. The default model is
+about 3 GB.
 
 ### Fix it
 
 ```bash
+lyricloom models list
 lyricloom models download whisper
 lyricloom doctor
 ```
@@ -189,11 +247,30 @@ Qt uses Windows Media Foundation. Most FLAC/MP3/M4A/WAV files play; unusual code
 - Check the Windows/Linux output device and volume.
 - Check that the track is not muted in the system mixer.
 - Try another audio file.
-- **Vocals only** falls back to the full mix if the cached vocal file is missing; that is normal, not a bug.
+- **Vocals only** is disabled when neither the cached vocal file nor the kept `*.vocals.flac` stem
+  exists. Process or redo the song to create one.
 
 ### The player shows no lyrics
 
 The track may not have a LyricLoom `.lrc`, or it may have a `.lrc` from another program that the parser cannot read. Process it in LyricLoom first. `other` in the library means the `.lrc` was not written by LyricLoom; processing it will back up the old file and write a new one.
+
+### Smooth animation is slow or looks wrong
+
+The lyric view animates at the monitor refresh rate by default. **Settings > Smooth animation** can
+use **Half refresh** or **Third refresh**; those are exact integer divisors, not arbitrary caps. A
+lower rate reduces CPU/GPU use on a slow machine.
+
+- **The main window is idle but still busy.** The compact player's timer stops when nothing plays; the
+  karaoke window keeps a slow tick while paused so the stars stay alive.
+- **The karaoke window stops moving when hidden or minimised.** That is intentional. Restore it and
+  rendering resumes.
+- **Motion judders on a high-refresh monitor.** Use **Match display** and make sure the window is on
+  the monitor you expect; the view follows the screen's actual refresh rate.
+- **Words flash rather than sweep.** Very short words use a 60 ms minimum ramp; if the timing itself is
+  wrong, edit the word in LyricLoom.
+- **MusicBee frame rate.** The plugin has its own **Settings > Effects > Window frame rate** with
+  **Match display**, **Half refresh** and **Third refresh**. It does not change MusicBee's frame rate
+  or another plugin's. See [docs/musicbee.md](musicbee.md#smooth-motion-and-frame-rate).
 
 ## CUDA or ROCm not used
 
@@ -257,7 +334,7 @@ Use this checklist when `wsl_gpu` is enabled but separation still runs on the CP
    wsl -d Ubuntu -- /opt/lyricloom/venv/bin/python -c "import lyricloom; print(lyricloom.__file__)"
    ```
 
-   If this fails, install the package into the venv with `--no-deps` as shown in [docs/wsl-rocm.md](wsl-rocm.md#5-install-audio-separator-and-the-lyricloom-worker-package).
+   If this fails, install the package into the venv with `--no-deps` as shown in [docs/wsl-rocm.md](wsl-rocm.md#5-install-audio-separator-the-mtl-packages-and-lyricloom).
 
 5. **Is `wsl_gpu` actually true?** It is read at app startup. Save `settings.json`, close LyricLoom completely, and start it again. `lyricloom doctor` should print `wsl enabled True`.
 
@@ -386,7 +463,7 @@ Romanization uses MeCab/IPADic and pykakasi. Names, invented readings and unusua
 
 The detector looks for Japanese kana/kanji in the tags and lyric text. A Japanese song with an English title and English artist tags may be detected from the lyric text during alignment; if both the tags and lyric are ambiguous, it may use the non-Japanese path. The `.japanese.lrc`/`.romaji.lrc` files are only written when Japanese characters are found in the final lyric. Fix the tags or paste the Japanese lyric to force the issue.
 
-Chinese lyrics that use only Han characters can be ambiguous with Japanese kanji; 2.0.0 does not have a separate Chinese mode. Check the output and use manual editing if needed.
+Chinese lyrics that use only Han characters can be ambiguous with Japanese kanji; 2.1.0 does not have a separate Chinese mode. Check the output and use manual editing if needed.
 
 ## Word timing is missing or wrong
 
@@ -420,27 +497,33 @@ Restore:
 
 ### What to include in a bug report
 
-- LyricLoom version (`lyricloom --version`).
+- Product: LyricLoom app, Starry Karaoke plugin or both. Use the product choice in the bug template.
+- LyricLoom version (`lyricloom --version`) and/or plugin version.
 - Operating system and version.
-- Installer or portable / source or pipx.
-- The output of `lyricloom doctor`, with personal paths redacted.
+- Installer or portable / source or pipx, and installed or portable MusicBee for the plugin.
+- For the app, the **Help > Diagnostics…** text, with personal paths redacted if you prefer.
+- For the plugin, the **Diagnostics** text from its settings or window menu.
 - The per-track `log.txt` around the failure, with personal paths redacted.
 - Whether the file plays in another player.
 - The lyric source shown in the table, if the track completed.
-- For GPU/WSL problems, the output of the WSL check commands in [docs/wsl-rocm.md](wsl-rocm.md#8-verify).
+- For GPU/WSL problems, the output of the WSL check commands in
+  [docs/wsl-rocm.md](wsl-rocm.md#8-verify).
 
-Do not attach copyrighted audio or full lyrics unless you have the right to share them. A short error excerpt is enough.
+Do not attach copyrighted audio or full lyrics unless you have the right to share them. A short error
+excerpt is enough. The diagnostics texts never contain the AssemblyAI key or lyric text.
 
 ### Log locations
 
 | Log | Path |
 |---|---|
+| App | `%LOCALAPPDATA%\LyricLoom\logs\app.log` (Windows) or `~/.local/share/lyricloom/logs/app.log` (Linux); rotates at about 1 MB |
 | Per-track | `%LOCALAPPDATA%\LyricLoom\work\<hash>\log.txt` (Windows) or `~/.local/share/lyricloom/work/<hash>/log.txt` (Linux) |
 | Whisper output | `work/<hash>/whisper*.json` |
 | AssemblyAI response | `work/<hash>/assemblyai*.json` |
-| MusicBee plugin | `%APPDATA%\MusicBee\mb_StarryKaraoke.log` (installed) or the portable MusicBee storage folder |
+| MusicBee plugin | `%APPDATA%\MusicBee\Plugins\mb_StarryKaraoke.log` next to the plugin DLL, or MusicBee's persistent storage folder when the Plugins folder is not writable; rotates at about 1 MB |
 
 `lyricloom doctor` does not write a log; it prints to the terminal. Copy its output into the report.
+The app log does not replace the per-track log: use the track log for a stage failure and the app log
+for queue, setup, update or window-level problems.
 
 For privacy details, see [docs/privacy.md](privacy.md).
-                                                                                                                                                                                                        

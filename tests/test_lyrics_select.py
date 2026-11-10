@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from lyricloom.lyrics.clean import clean_lyrics
-from lyricloom.lyrics.score import choose, duration_score, score_meta
+from lyricloom.lyrics.score import choose, duration_score, score_meta, score_transcript
 from lyricloom.model import Candidate, TrackMeta
 
 META = TrackMeta(Path("x.flac"), "Test Artist", "Synthetic Song (Test Version)", "Synthetic Song", 238.6, "pt")
@@ -57,3 +57,34 @@ def test_without_a_transcript_only_a_near_perfect_title_is_accepted():
 def test_choose_none_below_threshold():
     c = Candidate("websearch", "nada a ver", score=0.1)
     assert choose([c], "texto inventado para o teste", "pt") is None
+
+
+def test_empty_phonetics_never_score_as_a_perfect_match():
+    """Korean, Chinese and Cyrillic have no reading in this build: both sides became "" and
+    rapidfuzz scored that as 100 (R1-02)."""
+    for text in ("사랑은 언제나", "孤勇者", "Я люблю тебя"):
+        assert score_transcript(Candidate("netease", text), text, "other") == 0.0
+    assert score_transcript(Candidate("netease", "孤勇者"), "孤勇者", "zh") == 0.0
+
+
+def test_choose_does_not_accept_a_non_latin_song_on_an_empty_transcript():
+    wrong = Candidate("netease", "孤勇者", score=0.8)
+    assert choose([wrong], "孤勇者", "other") is None
+    assert choose([Candidate("netease", "Я люблю тебя", score=0.8)], "Я люблю тебя", "other") is None
+
+
+def test_a_two_letter_candidate_cannot_match_everything():
+    assert score_transcript(Candidate("websearch", "ab"), "ab", "other") == 0.0
+    assert score_transcript(Candidate("websearch", "ab"), "texto inventado para o teste", "pt") == 0.0
+
+
+def test_missing_artist_does_not_reject_an_exact_title_and_duration_without_a_transcript():
+    meta = TrackMeta(Path("x.flac"), "", "Synthetic Song", "", 238.6, "other")
+    good = Candidate("netease", "qualquer letra")
+    good.score = score_meta(good, meta, "Synthetic Song", "", 238.0)
+    assert good.score >= 0.85
+    assert choose([good], "", "other") is good
+
+    wrong = Candidate("netease", "qualquer letra")
+    wrong.score = score_meta(wrong, meta, "A Different Song", "", 238.0)
+    assert choose([wrong], "", "other") is None

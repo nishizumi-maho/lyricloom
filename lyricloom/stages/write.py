@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 from .. import config
@@ -20,18 +21,29 @@ def _backup_path(lrc: Path) -> Path:
 
 
 def write_lrc(audio: Path, doc: LrcDoc) -> Path:
-    """Writes `<audio stem>.lrc` next to the audio. An existing .lrc is never lost: it is renamed to
-    .lrc.bak (or .lrc.bak1, .bak2, ... when older backups exist). The write is atomic."""
+    """Writes `<audio stem>.lrc` next to the audio. An existing .lrc is never lost: a copy goes to
+    .lrc.bak (or .lrc.bak1, .bak2, ... when older backups exist) and the new file replaces the old
+    one atomically. The old file is copied, not moved, so a crash between the backup and the replace
+    leaves the previous .lrc intact."""
     lrc = audio.with_suffix(".lrc")
     tmp = lrc.with_name(lrc.name + ".tmp")
     tmp.write_bytes(format_lrc(doc).encode("utf-8"))
     if lrc.exists():
-        lrc.replace(_backup_path(lrc))
+        shutil.copy2(lrc, _backup_path(lrc))
     os.replace(tmp, lrc)
     return lrc
 
 
-_JAPANESE = re.compile(r"[぀-ヿ一-鿿]")
+# Japanese needs kana.  Han characters alone are also Chinese; script variants are only written
+# when the resolved language is Japanese (R1-03).
+_JAPANESE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
+_TAG_UNSAFE = re.compile(r"[\]\r\n]+")
+
+
+def _tag_safe(value) -> str:
+    """A title/artist value that cannot break out of its ``[ti:...]``/``[ar:...]`` tag.  A semicolon
+    is left alone: it is unsafe only in the ``#models``/``#warning`` values, not in a title."""
+    return _TAG_UNSAFE.sub(" ", str(value)).strip()
 
 
 def japanese_path(audio: Path) -> Path:
@@ -43,8 +55,16 @@ def romaji_path(audio: Path) -> Path:
 
 
 def _replace(path: Path, doc: LrcDoc) -> None:
+    """Replaces a script variant, keeping the previous file as ``.bak`` (FR-A-05)."""
+    _replace_bytes_with_backup(path, format_lrc(doc).encode("utf-8"))
+
+
+def _replace_bytes_with_backup(path: Path, data: bytes) -> None:
+    """Replaces `path` after copying the old file to the engine's .bak name."""
+    if path.exists():
+        shutil.copy2(path, _backup_path(path))
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(format_lrc(doc).encode("utf-8"))
+    tmp.write_bytes(data)
     os.replace(tmp, path)
 
 
@@ -64,10 +84,17 @@ def to_romaji(doc: LrcDoc) -> LrcDoc:
     return LrcDoc(dict(doc.meta), lines)
 
 
-def write_lyrics(audio: Path, doc: LrcDoc) -> Path:
+def write_lyrics(audio: Path, doc: LrcDoc, lang: str | None = None) -> Path:
     """Writes the .lrc. Japanese lyrics are also kept in both scripts, <song>.japanese.lrc and
-    <song>.romaji.lrc, and the .lrc gets the one chosen in the app (config.japanese_script)."""
-    if not _is_japanese(doc):
+    <song>.romaji.lrc, and the .lrc gets the one chosen in the app (config.japanese_script).
+
+    ``lang`` is the resolved lyric language.  A Chinese or Korean lyric that merely contains Han
+    characters must not get Japanese readings and romaji sidecars (R1-03).  ``None`` falls back to
+    the document's [#language] tag, then to the old character heuristic for hand-written calls."""
+    if lang is None:
+        lang = doc.meta.get("#language")
+    japanese = (lang == "ja") if lang else _is_japanese(doc)
+    if not japanese:
         return write_lrc(audio, doc)
     romaji = to_romaji(doc)
     _replace(japanese_path(audio), doc)
@@ -75,12 +102,16 @@ def write_lyrics(audio: Path, doc: LrcDoc) -> Path:
     return write_lrc(audio, romaji if config.japanese_script() == "romaji" else doc)
 
 
-def apply_script_preference(root: Path) -> int:
+def apply_script_preference(root: Path, *, script: str | None = None, dry_run: bool = False) -> int:
     """Puts the chosen script in the .lrc of every Japanese song under root; songs processed
-    before both scripts were kept get them now. Returns the number of .lrc files rewritten."""
+    before both scripts were kept get them now. Returns the number of .lrc files rewritten.
+
+    With `dry_run=True` nothing is written and the return value is how many files a real run would
+    rewrite, so the GUI can ask for confirmation with the exact count. The main .lrc gets the same
+    .bak copy as a save; the two variant files are derived and are replaced without one."""
     from ..lrc import parse_lrc
     from ..runner import AUDIO_EXT
-    want_romaji = config.japanese_script() == "romaji"
+    want_romaji = (script or config.japanese_script()) == "romaji"
     n = 0
     for lrc in root.rglob("*.lrc"):
         if lrc.name.endswith((".japanese.lrc", ".romaji.lrc", ".original.lrc")):
@@ -88,18 +119,26 @@ def apply_script_preference(root: Path) -> int:
         audio = next((lrc.with_suffix(e) for e in AUDIO_EXT if lrc.with_suffix(e).exists()), None)
         if audio is None:
             continue                       # not a song's lyric (e.g. a comparison file)
-        if not japanese_path(audio).exists():
+        japanese = japanese_path(audio)
+        romaji = romaji_path(audio)
+        if not japanese.exists():
             doc = parse_lrc(lrc.read_text(encoding="utf-8", errors="replace"))
-            if "#engine" not in doc.meta or not is_ours(doc.meta.get("re")) or not _is_japanese(doc):
+            if (doc.meta.get("#language") not in (None, "ja")
+                    or "#engine" not in doc.meta or not is_ours(doc.meta.get("re"))
+                    or not _is_japanese(doc)):
                 continue                   # not a LyricLoom Japanese lyric
-            _replace(japanese_path(audio), doc)
-            _replace(romaji_path(audio), to_romaji(doc))
-        chosen = (romaji_path if want_romaji else japanese_path)(audio).read_bytes()
+            if dry_run:
+                chosen = format_lrc(to_romaji(doc) if want_romaji else doc).encode("utf-8")
+            else:
+                _replace(japanese, doc)
+                _replace(romaji, to_romaji(doc))
+                chosen = (romaji if want_romaji else japanese).read_bytes()
+        else:
+            chosen = (romaji if want_romaji else japanese).read_bytes()
         if lrc.read_bytes() != chosen:
-            tmp = lrc.with_name(lrc.name + ".tmp")
-            tmp.write_bytes(chosen)
-            os.replace(tmp, lrc)          # derived from the kept files: no backup needed
             n += 1
+            if not dry_run:
+                _replace_bytes_with_backup(lrc, chosen)
     return n
 
 
@@ -109,15 +148,18 @@ def original_path(audio: Path) -> Path:
 
 def write_original(audio: Path, meta: dict, official: Candidate) -> Path:
     """Keeps the official lyric as found (its own timing when it has one, else plain text) in
-    `<audio stem>.original.lrc`, so it survives the enhanced .lrc and any edit made to it."""
+    `<audio stem>.original.lrc`, so it survives the enhanced .lrc and any edit made to it.
+
+    A user may have hand-corrected the fetched lyric, so a rewrite keeps a ``.bak`` copy; title and
+    artist are sanitized like every other tag (FR-A-05, FR-A-06)."""
+    safe_meta = {key: _tag_safe(value) if key in ("ti", "ar") else value
+                 for key, value in meta.items()}
     if official.synced:
         lines = [Line(l.start_ms, l.segments if len(l.segments) > 1 else [Segment(l.text, None, None)])
                  for l in official.synced]
-        body = format_lrc(LrcDoc(meta, lines))
+        body = format_lrc(LrcDoc(safe_meta, lines))
     else:
-        body = format_lrc(LrcDoc(meta, [])) + official.text.strip() + "\n"
+        body = format_lrc(LrcDoc(safe_meta, [])) + official.text.strip() + "\n"
     path = original_path(audio)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(body.encode("utf-8"))
-    os.replace(tmp, path)
+    _replace_bytes_with_backup(path, body.encode("utf-8"))
     return path

@@ -12,28 +12,36 @@ if not hasattr(np, "Inf"):   # the model's utils.py predates NumPy 2, which drop
     np.Inf = np.inf
 
 from . import emit, read_payload
+from .copies import first_checkpoint_dir
 
 # The model's frames are 3 x 256 samples at 22050 Hz.
 FRAME_S = 256 / 22050 * 3
 
 
+def _mtl_repo(configured: str) -> str:
+    """The LyricsAlignment-MTL code folder: the configured one when it holds wrapper.py, otherwise
+    the copy shipped inside the lyricloom package (a WSL environment built by the setup assistant
+    installs the package but has no separate /opt/lyricloom/mtl folder)."""
+    from pathlib import Path
+
+    if configured and (Path(configured) / "wrapper.py").is_file():
+        return configured
+    vendored = Path(__file__).resolve().parent.parent / "vendor" / "mtl"
+    return str(vendored) if (vendored / "wrapper.py").is_file() else configured
+
+
 def main() -> None:
     p = read_payload()
-    # g2p_en needs three small NLTK corpora; fetch them once if a fresh install is missing them.
-    try:
-        import nltk
-        for package, path in (("cmudict", "corpora/cmudict"),
-                              ("averaged_perceptron_tagger", "taggers/averaged_perceptron_tagger"),
-                              ("averaged_perceptron_tagger_eng", "taggers/averaged_perceptron_tagger_eng"),
-                              ("punkt", "tokenizers/punkt"),
-                              ("punkt_tab", "tokenizers/punkt_tab")):
-            try:
-                nltk.data.find(path)
-            except LookupError:
-                nltk.download(package, quiet=True)
-    except Exception:  # noqa: BLE001 - the model import below reports the real error
-        pass
-    os.chdir(p["checkpoint_dir"])       # checkpoints are loaded by relative path
+    p["repo"] = _mtl_repo(p.get("repo", ""))
+    # The corpora are a pinned catalog model downloaded by the app; never fetch them here.
+    nltk_dir = p.get("nltk_dir")
+    if nltk_dir:
+        os.environ["NLTK_DATA"] = str(nltk_dir) + os.pathsep + os.environ.get("NLTK_DATA", "")
+    # checkpoints are loaded by relative path; prefer the copy inside the distro over /mnt
+    checkpoint_dir = first_checkpoint_dir(p.get("checkpoint_dirs"),
+                                          int(p.get("checkpoint_size") or 0),
+                                          p["checkpoint_dir"])
+    os.chdir(checkpoint_dir)
     # PyInstaller's frozen modules have no source file, and inflect (through g2p_en) decorates
     # functions with typeguard, which calls inspect.getsource() and fails in a frozen build.
     # Timing is unaffected; skip the runtime type-check instrumentation.

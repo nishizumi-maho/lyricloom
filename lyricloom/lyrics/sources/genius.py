@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 import httpx
 from bs4 import BeautifulSoup
 
 from ...model import TrackMeta
-from .base import RawResult, check
+from .base import RawResult, check, get_allowed, host_matches, is_https_url
 
 name = "genius"
+
+
+def allowed_page_url(url: str) -> bool:
+    """Only https pages on genius.com itself may be fetched from search results."""
+    return is_https_url(url) and host_matches(urlparse(url).hostname, "genius.com")
 
 
 def parse_search(data: dict) -> list[dict]:
@@ -50,7 +57,9 @@ def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
     r = check(client.get("https://genius.com/api/search/multi", params={"q": f"{meta.title} {meta.artist}"}))
     out = []
     for hit in parse_search(r.json())[:3]:
-        text = parse_page(check(client.get(hit["url"])).text)
+        if not allowed_page_url(hit["url"]):
+            continue
+        text = parse_page(get_allowed(client, hit["url"], allowed_page_url).text)
         if text:
             out.append(RawResult(hit["title"], hit["artist"], None, text, None, hit["url"]))
     return out
