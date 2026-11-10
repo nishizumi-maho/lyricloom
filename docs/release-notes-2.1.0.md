@@ -74,7 +74,7 @@ first start; **Help > Models…** manages them later.
 - Native AMD GPU acceleration on Windows is not supported; use WSL 2 + ROCm.
 - On native Linux, the English singing model (MTL) runs on the CPU.
 - The default MMS_FA alignment weights are **CC-BY-NC 4.0 (non-commercial)**. See
-  [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md) before commercial use.
+  [`THIRD-PARTY-NOTICES.md`](https://github.com/nishizumi-maho/lyricloom/blob/v2.1.0/THIRD-PARTY-NOTICES.md) before commercial use.
 - The interface is English-only.
 
 ## Verify the download
@@ -96,4 +96,4 @@ A mismatch means the download is corrupt or not the file you think it is. Delete
 again from this release. Because the installer is unsigned, the checksum is the integrity check.
 
 Full documentation is in the repository's `docs/` folder, starting with
-[`README.md`](../README.md) and [`install-windows.md`](install-windows.md).
+[`README.md`](https://github.com/nishizumi-maho/lyricloom/blob/v2.1.0/README.md) and [`install-windows.md`](https://github.com/nishizumi-maho/lyricloom/blob/v2.1.0/docs/install-windows.md).
