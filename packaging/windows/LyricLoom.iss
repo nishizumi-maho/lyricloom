@@ -119,9 +119,11 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: RelaunchAfterSilentInst
 
 ; The uninstaller removes the installation directory and the plugin files recorded
 ; in its uninstall log. It then asks once (default No) whether to also delete
-; LyricLoom's own data folders. Custom work/vocals/models locations read from
-; settings.json are only deleted when they are LyricLoom's defaults; anything
-; else, and any environment-provided location, is listed for manual removal.
+; the data LyricLoom created in its data folder. Only the entries LyricLoom itself
+; creates there are deleted, never the folder as a whole. Custom work/vocals/models
+; locations (settings.json or environment variables) are listed for manual removal;
+; if one of them lies inside the data folder, or settings.json cannot be read,
+; nothing is deleted.
 ; The user's music library and the .lrc files next to the music are never
 ; touched. The rest of the user's MusicBee Plugins folder is never touched.
 
@@ -129,6 +131,55 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: RelaunchAfterSilentInst
 function RelaunchAfterSilentInstall: Boolean;
 begin
   Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
+// Every LyricLoom process holds this mutex until it exits (lyricloom/updater.py). The app starts
+// Setup as the last step of closing, but its process can live a little longer while background
+// threads finish; installing then would hit files in use. A silent install (the in-app update)
+// waits up to 60 seconds and gives up without changing anything; an interactive install waits
+// briefly and then asks the user to close LyricLoom.
+function LyricLoomRunning: Boolean;
+begin
+  Result := CheckForMutexes('LyricLoomAppRunning');
+end;
+
+function WaitForLyricLoomExit(const MaxMs: Integer): Boolean;
+var
+  Waited: Integer;
+begin
+  Waited := 0;
+  while LyricLoomRunning and (Waited < MaxMs) do
+  begin
+    Sleep(500);
+    Waited := Waited + 500;
+  end;
+  Result := not LyricLoomRunning;
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := True;
+  if WizardSilent then
+  begin
+    if not WaitForLyricLoomExit(60000) then
+    begin
+      Log('LyricLoom was still running after 60 seconds; the silent install was cancelled.');
+      Result := False;
+    end;
+    Exit;
+  end;
+  if WaitForLyricLoomExit(15000) then
+    Exit;
+  while LyricLoomRunning do
+  begin
+    if MsgBox('LyricLoom is still running.' + #13#10#13#10 +
+      'Close LyricLoom, then click OK to continue the installation.',
+      mbInformation, MB_OKCANCEL) <> IDOK then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
 end;
 
 function MusicBeeDetected: Boolean;
@@ -149,24 +200,51 @@ begin
   Result := MusicBeeDetected and (ExpandConstant('{param:SKIPPLUGIN|0}') <> '1');
 end;
 
-function ReadSettingString(const FileName, KeyName: String): String;
+function IsJsonSpace(const C: Char): Boolean;
+begin
+  Result := (C = ' ') or (C = #9) or (C = #13) or (C = #10);
+end;
+
+// Reads one string value of settings.json, which LyricLoom writes as UTF-8 JSON with the
+// non-ASCII characters of a path stored as they are (C:\Users\Jose with an accent, for example).
+// Returns True with Value = '' when the key is absent or null, True with the folder when it was
+// read, and False when the key is there but cannot be understood: the caller must then refuse to
+// delete anything, because it cannot know where that folder is.
+function ReadSetting(const FileName, KeyName: String; var Value: String): Boolean;
 var
   Raw: AnsiString;
   Text, Needle: String;
   P, Q: Integer;
 begin
-  Result := '';
-  if not LoadStringFromFile(FileName, Raw) then
+  Value := '';
+  Result := True;
+  if not FileExists(FileName) then
     Exit;
-  Text := String(Raw);
+  if not LoadStringFromFile(FileName, Raw) then
+  begin
+    Result := False;
+    Exit;
+  end;
+  Text := UTF8Decode(Raw);
   Needle := '"' + KeyName + '"';
   P := Pos(Needle, Text);
   if P = 0 then
     Exit;
+  Result := False;
   P := P + Length(Needle);
-  while (P <= Length(Text)) and (Text[P] <> '"') do
+  while (P <= Length(Text)) and IsJsonSpace(Text[P]) do
     Inc(P);
-  if P > Length(Text) then
+  if (P > Length(Text)) or (Text[P] <> ':') then
+    Exit;
+  Inc(P);
+  while (P <= Length(Text)) and IsJsonSpace(Text[P]) do
+    Inc(P);
+  if Copy(Text, P, 4) = 'null' then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if (P > Length(Text)) or (Text[P] <> '"') then
     Exit;
   Inc(P);
   Q := P;
@@ -174,9 +252,18 @@ begin
     Inc(Q);
   if Q > Length(Text) then
     Exit;
-  Result := Copy(Text, P, Q - P);
-  StringChangeEx(Result, '\\', '\', True);
-  StringChangeEx(Result, '\/', '/', True);
+  Value := Copy(Text, P, Q - P);
+  // "\\" is a backslash and "\/" a slash; any other escape (\uXXXX, \n ...) is not expected in
+  // a folder LyricLoom saved, so it is treated as unreadable rather than guessed.
+  StringChangeEx(Value, '\\', #1, True);
+  StringChangeEx(Value, '\/', '/', True);
+  if Pos('\', Value) > 0 then
+  begin
+    Value := '';
+    Exit;
+  end;
+  StringChangeEx(Value, #1, '\', True);
+  Result := True;
 end;
 
 function NormalizedDir(const Value: String): String;
@@ -258,10 +345,49 @@ begin
   end;
 end;
 
+// Adds a configured folder that is not LyricLoom's default to the "remove by hand" list and
+// reports whether it lies inside the data folder (then nothing in the data folder is deleted).
+procedure NoteCustomFolder(const Caption, Dir, DefaultDir, DataDir: String;
+  var Manual: String; var CustomInside: Boolean);
+begin
+  if (Dir = '') or SameDirectory(Dir, DefaultDir) then
+    Exit;
+  Manual := Manual + #13#10 + '  ' + Caption + ': ' + Dir;
+  if SameDirectory(Dir, DataDir) or IsInsideDirectory(Dir, DataDir) then
+    CustomInside := True;
+end;
+
+// Deletes only what LyricLoom itself creates in its data folder. The folder itself is removed
+// only when that leaves it empty, so a file the user put there is never deleted.
+procedure DeleteOwnData(const DataDir: String);
+var
+  FindRec: TFindRec;
+begin
+  DelTree(DataDir + '\work', True, True, True);
+  DelTree(DataDir + '\vocals', True, True, True);
+  DelTree(DataDir + '\models', True, True, True);
+  DelTree(DataDir + '\logs', True, True, True);
+  DelTree(DataDir + '\bin', True, True, True);
+  DeleteFile(DataDir + '\settings.json');
+  DeleteFile(DataDir + '\settings.json.tmp');
+  DeleteFile(DataDir + '\assemblyai.key');
+  if FindFirst(DataDir + '\scan-*.json', FindRec) then
+  begin
+    try
+      repeat
+        DeleteFile(DataDir + '\' + FindRec.Name);
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  RemoveDir(DataDir);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir, SettingsFile, ModelsDir, VocalsDir, WorkDir, LibraryDir, Manual, MessageText: String;
-  CustomInside: Boolean;
+  CustomInside, Readable: Boolean;
   Answer: Integer;
 begin
   if CurUninstallStep <> usPostUninstall then
@@ -270,8 +396,26 @@ begin
     Exit;
 
   DataDir := ExpandConstant('{localappdata}\LyricLoom');
+  if not DirExists(DataDir) then
+    Exit;
   SettingsFile := DataDir + '\settings.json';
-  LibraryDir := ReadSettingString(SettingsFile, 'library');
+  Readable := ReadSetting(SettingsFile, 'library', LibraryDir);
+  if not ReadSetting(SettingsFile, 'models', ModelsDir) then
+    Readable := False;
+  if not ReadSetting(SettingsFile, 'vocals', VocalsDir) then
+    Readable := False;
+  if not ReadSetting(SettingsFile, 'work', WorkDir) then
+    Readable := False;
+  if not Readable then
+  begin
+    MsgBox('The uninstaller could not read the folders saved in:' + #13#10 +
+      '  ' + SettingsFile + #13#10#13#10 +
+      'It cannot tell where your library, models, vocals and work folders are, so it will not ' +
+      'delete anything in LyricLoom''s data folder.' + #13#10 +
+      'Remove the LyricLoom data files by hand if you want to.', mbInformation, MB_OK);
+    Exit;
+  end;
+
   if (LibraryDir <> '') and (SameDirectory(LibraryDir, DataDir) or IsInsideDirectory(LibraryDir, DataDir)) then
   begin
     MsgBox('Your music library is inside LyricLoom''s data folder:' + #13#10 +
@@ -289,85 +433,47 @@ begin
     Exit;
   end;
 
-  ModelsDir := ReadSettingString(SettingsFile, 'models');
-  VocalsDir := ReadSettingString(SettingsFile, 'vocals');
-  WorkDir := ReadSettingString(SettingsFile, 'work');
-
+  // Every configured folder, from settings.json and from the environment, is read before the
+  // decision: one that is not a default and lies inside the data folder stops the deletion.
   Manual := '';
   CustomInside := False;
-  if (ModelsDir <> '') and not SameDirectory(ModelsDir, DataDir + '\models') then
-  begin
-    Manual := Manual + #13#10 + '  models: ' + ModelsDir;
-    if IsInsideDirectory(ModelsDir, DataDir) then
-      CustomInside := True;
-    ModelsDir := '';
-  end;
-  if ModelsDir = '' then
-    ModelsDir := DataDir + '\models';
-
-  if (VocalsDir <> '') and not SameDirectory(VocalsDir, DataDir + '\vocals') then
-  begin
-    Manual := Manual + #13#10 + '  kept vocals: ' + VocalsDir;
-    if IsInsideDirectory(VocalsDir, DataDir) then
-      CustomInside := True;
-    VocalsDir := '';
-  end;
-  if VocalsDir = '' then
-    VocalsDir := DataDir + '\vocals';
-
-  if (WorkDir <> '') and not SameDirectory(WorkDir, DataDir + '\work') then
-  begin
-    Manual := Manual + #13#10 + '  work cache: ' + WorkDir;
-    if IsInsideDirectory(WorkDir, DataDir) then
-      CustomInside := True;
-    WorkDir := '';
-  end;
-  if WorkDir = '' then
-    WorkDir := DataDir + '\work';
+  NoteCustomFolder('models', ModelsDir, DataDir + '\models', DataDir, Manual, CustomInside);
+  NoteCustomFolder('kept vocals', VocalsDir, DataDir + '\vocals', DataDir, Manual, CustomInside);
+  NoteCustomFolder('work cache', WorkDir, DataDir + '\work', DataDir, Manual, CustomInside);
+  NoteCustomFolder('data (LYRICLOOM_DATA_DIR)', GetEnv('LYRICLOOM_DATA_DIR'), DataDir, DataDir,
+    Manual, CustomInside);
+  NoteCustomFolder('models (LYRICLOOM_MODELS)', GetEnv('LYRICLOOM_MODELS'), DataDir + '\models',
+    DataDir, Manual, CustomInside);
+  NoteCustomFolder('work cache (LYRICLOOM_WORK)', GetEnv('LYRICLOOM_WORK'), DataDir + '\work',
+    DataDir, Manual, CustomInside);
 
   if CustomInside then
   begin
-    MsgBox('One of the configured models, vocals or work folders is inside LyricLoom''s data folder:' +
-      Manual + #13#10#13#10 +
-      'It is not a LyricLoom default location, so the uninstaller will not delete the data folder.' + #13#10 +
+    MsgBox('A configured models, vocals, work or data folder is inside LyricLoom''s data folder ' +
+      'and is not a LyricLoom default location:' + Manual + #13#10#13#10 +
+      'The uninstaller will not delete anything in the data folder.' + #13#10 +
       'Remove the LyricLoom data files by hand if you want to.', mbInformation, MB_OK);
     Exit;
   end;
 
-  if GetEnv('LYRICLOOM_DATA_DIR') <> '' then
-  begin
-    Manual := Manual + #13#10 + '  data (LYRICLOOM_DATA_DIR): ' + GetEnv('LYRICLOOM_DATA_DIR');
-    if IsInsideDirectory(GetEnv('LYRICLOOM_DATA_DIR'), DataDir) then
-      CustomInside := True;
-  end;
-  if GetEnv('LYRICLOOM_MODELS') <> '' then
-  begin
-    Manual := Manual + #13#10 + '  models (LYRICLOOM_MODELS): ' + GetEnv('LYRICLOOM_MODELS');
-    if IsInsideDirectory(GetEnv('LYRICLOOM_MODELS'), DataDir) then
-      CustomInside := True;
-  end;
-  if GetEnv('LYRICLOOM_WORK') <> '' then
-  begin
-    Manual := Manual + #13#10 + '  work cache (LYRICLOOM_WORK): ' + GetEnv('LYRICLOOM_WORK');
-    if IsInsideDirectory(GetEnv('LYRICLOOM_WORK'), DataDir) then
-      CustomInside := True;
-  end;
-
-  MessageText := 'LyricLoom can also delete its own data folders:' + #13#10 +
-    '  settings, logs and scan cache: ' + DataDir + #13#10 +
-    '  work cache: ' + WorkDir + #13#10 +
-    '  kept vocals: ' + VocalsDir + #13#10 +
-    '  models: ' + ModelsDir + #13#10 +
-    '  AssemblyAI key: ' + DataDir + '\assemblyai.key';
+  MessageText := 'LyricLoom can also delete the data it created in:' + #13#10 +
+    '  ' + DataDir + #13#10 +
+    '  (settings, the AssemblyAI key, logs, the scan and work caches, kept vocals, models' + #13#10 +
+    '  and a downloaded whisper build; any other file there is kept)';
   if Manual <> '' then
     MessageText := MessageText + #13#10#13#10 +
       'These custom or environment-provided folders are not LyricLoom default locations. ' +
       'Remove them by hand if you want to:' + Manual;
   MessageText := MessageText + #13#10#13#10 +
     'Your music library and the .lrc files next to your music are never deleted.' + #13#10#13#10 +
-    'Delete LyricLoom''s data folders too?';
+    'Delete LyricLoom''s data too?';
 
   Answer := MsgBox(MessageText, mbConfirmation, MB_YESNO or MB_DEFBUTTON2);
   if Answer = IDYES then
-    DelTree(DataDir, True, True, True);
+  begin
+    DeleteOwnData(DataDir);
+    if DirExists(DataDir) then
+      MsgBox('Files that LyricLoom did not create were kept in:' + #13#10 + '  ' + DataDir,
+        mbInformation, MB_OK);
+  end;
 end;

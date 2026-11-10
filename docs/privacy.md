@@ -97,8 +97,9 @@ No audio, library path, settings file or key is sent to any of those hosts.
 
 ### GitHub and updates
 
-The automatic update check is **on by default**. About four seconds after the window opens, and then
-every 24 hours while the app runs, LyricLoom sends one request to:
+The automatic update check is **on by default**, but no automatic request is made before you have
+finished the setup assistant, whose Privacy page shows the choice. After that, about four seconds
+after the window opens and then every 24 hours while the app runs, LyricLoom sends one request to:
 
 - `https://api.github.com/repos/nishizumi-maho/lyricloom/releases/latest`
 
@@ -324,8 +325,10 @@ The installers can delete LyricLoom's own data for you:
 - **Windows:** the uninstaller asks once, with **No** as the default, whether to remove settings,
   logs, work cache, kept vocals, models, installed whisper.cpp builds and the AssemblyAI key. Custom
   `models`, `vocals` or `work` locations from `settings.json`, and environment-provided locations,
-  are listed for you to remove by hand. It refuses to delete the data folder when music files are
-  inside it.
+  are listed for you to remove by hand. Only what LyricLoom itself created is deleted; other files
+  in the data folder are kept. It deletes nothing there when music files, the music library or one
+  of those custom or environment-provided folders is inside it, or when it cannot read the folders
+  saved in `settings.json`.
 - **Linux:** `install.sh --uninstall` asks once (default No); `install.sh --purge` removes the data
   without asking.
 

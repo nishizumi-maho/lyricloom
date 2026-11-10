@@ -9,7 +9,8 @@ processed locally by Whisper, the vocal separator and the aligners.
   registry only when you ask for a model. Processing never downloads one: a missing model fails that
   track with a download command.
 - **Update checks are on by default**: LyricLoom asks `api.github.com` for the latest public release
-  shortly after start-up and every 24 hours, sending no personal data (only its own version in the
+  shortly after start-up and every 24 hours (never before you have finished the setup
+  assistant, where the choice is shown), sending no personal data (only its own version in the
   User-Agent). Turn them off in **Settings**. **Help > Check for updates…** still works as a manual
   check. When a newer release is found, **Settings > When an update is found** chooses automatic
   install on close, ask first, or notify only; a downloaded installer is SHA-256 verified.
