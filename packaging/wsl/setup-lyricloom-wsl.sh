@@ -108,7 +108,9 @@ esac
     "torch==$TORCH_VERSION" "torchaudio==$TORCH_VERSION"
 
 step 5 "Installing audio-separator, g2p_en and nltk"
-"$VENV/bin/pip" install "audio-separator>=0.40" g2p_en nltk
+# The separator worker is tested against this release (pyproject.toml pins the same one); it
+# accepts the torch installed above (audio-separator 0.47.1 needs torch >=2.3,<3 on Linux).
+"$VENV/bin/pip" install "audio-separator==0.47.1" g2p_en nltk
 
 step 6 "Installing the LyricLoom wheel"
 "$VENV/bin/pip" install --no-deps --ignore-requires-python "$wheel"

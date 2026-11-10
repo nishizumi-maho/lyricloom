@@ -292,7 +292,7 @@ If `cuda available` is `False`:
 ### 5. Install audio-separator, the MTL packages and LyricLoom
 
 ```bash
-/opt/lyricloom/venv/bin/pip install "audio-separator>=0.40" g2p_en nltk
+/opt/lyricloom/venv/bin/pip install "audio-separator==0.47.1" g2p_en nltk
 ```
 
 `g2p_en` and `nltk` are needed by the English singing model. The `audio-separator` install uses the
