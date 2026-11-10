@@ -11,7 +11,7 @@ from PySide6.QtNetwork import QLocalSocket  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from lyricloom.app import ipc  # noqa: E402
-from lyricloom.app.main import MainWindow  # noqa: E402
+from lyricloom.app.main import BUSY_INSTANCE_MESSAGE, MainWindow, handle_busy_instance  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -237,3 +237,104 @@ def test_a_second_instance_message_reaches_the_window_and_queues_valid_files(app
     finally:
         w.dirty = False
         w.close()
+
+
+# ---------- FRB-02 / FRB-03: hand-over and listener robustness ----------
+
+class _BusyServer:
+    """A server that could not listen because a live instance owns the name."""
+
+    name = "LyricLoom-test-busy"
+
+    @property
+    def is_listening(self):
+        return False
+
+    def listen(self):
+        return False
+
+    def remove_stale(self, probe_ms=5000):
+        return False
+
+    def close(self):
+        pass
+
+
+def test_a_busy_instance_handover_accepts_path_objects(app, tmp_path):
+    name = _name()
+    live = ipc.Server(name=name)
+    assert live.listen()
+    received = []
+    live.received.connect(received.append)
+
+    def send(command, timeout_ms=2000):
+        return ipc.send(command, name=name, timeout_ms=timeout_ms)
+
+    audio = _audio(tmp_path)
+    try:
+        assert handle_busy_instance(_BusyServer(), {"cmd": "process", "paths": [audio]},
+                                    send=send, notify=lambda message: None) is True
+        assert received and received[0]["paths"] == [audio.resolve()]
+    finally:
+        live.received.disconnect()
+        live.close()
+        app.processEvents()
+
+
+def test_a_startup_race_handover_accepts_path_objects(app, tmp_path, monkeypatch):
+    name = _name()
+    live = ipc.Server(name=name)
+    assert live.listen()
+    received = []
+    live.received.connect(received.append)
+    audio = _audio(tmp_path)
+
+    class StartupRaceServer(_BusyServer):
+        pass
+
+    def send(command, timeout_ms=2000):
+        return ipc.send(command, name=name, timeout_ms=timeout_ms)
+
+    monkeypatch.setattr("lyricloom.app.main.ipc_send", send)
+    w = MainWindow(tmp_path, server=StartupRaceServer(),
+                   startup={"cmd": "open", "path": audio})
+    try:
+        _wait(app, lambda: received)
+        assert w._duplicate_instance
+        assert received[0]["cmd"] == "open" and received[0]["path"] == audio.resolve()
+    finally:
+        w.dirty = False
+        w.close()
+        live.received.disconnect()
+        live.close()
+        app.processEvents()
+
+
+def test_a_failed_handover_shows_the_busy_message(tmp_path):
+    notices = []
+
+    def broken(*args, **kwargs):
+        raise TypeError("Object of type WindowsPath is not JSON serializable")
+
+    assert handle_busy_instance(_BusyServer(), {"cmd": "open", "path": tmp_path},
+                                send=broken, notify=notices.append) is True
+    assert notices == [BUSY_INSTANCE_MESSAGE]
+
+
+def test_a_second_listen_on_a_listening_server_keeps_the_connection(app, tmp_path):
+    name = _name()
+    server = ipc.Server(name=name)
+    assert server.listen()
+    received = []
+    server.received.connect(received.append)
+    try:
+        assert server.listen() is True       # no close/re-acquire gap (FRB-03)
+        assert server.is_listening
+        audio = _audio(tmp_path)
+        assert ipc.send({"cmd": "process", "paths": [str(audio)]}, name=name)["ok"]
+        _wait(app, lambda: received)
+        assert received[0]["paths"] == [audio.resolve()]
+    finally:
+        server.received.disconnect()
+        server.close()
+        app.processEvents()

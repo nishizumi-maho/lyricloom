@@ -1,6 +1,8 @@
+import json
+
 import pytest
 
-from lyricloom.app.main import CommandLine, parse_command_line, run
+from lyricloom.app.main import CommandLine, parse_command_line, run, startup_message
 
 
 def test_process_parses_one_or_more_files_and_redo():
@@ -40,3 +42,19 @@ def test_worker_without_a_name_is_not_treated_as_a_worker():
     # Only the existing two-argument form is a worker; anything else still goes through argparse.
     with pytest.raises(SystemExit):
         run(["LyricLoom.exe", "--worker"])
+
+
+def test_startup_messages_are_json_ready(tmp_path):
+    audio = tmp_path / "Artist" / "Album" / "01 - Song.flac"
+    audio.parent.mkdir(parents=True)
+    audio.write_bytes(b"x")
+
+    process = startup_message(CommandLine(process=[str(audio)], open_file=None, redo=False))
+    json.dumps(process)                     # Path objects used to raise TypeError here
+    assert process["paths"] == [str(audio.resolve())]
+
+    opened = startup_message(CommandLine(process=[], open_file=str(audio), redo=False))
+    json.dumps(opened)
+    assert opened == {"cmd": "open", "path": str(audio.resolve())}
+
+    assert startup_message(CommandLine(process=[], open_file=None, redo=False)) is None

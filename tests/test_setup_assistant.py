@@ -1,4 +1,6 @@
 import os
+import logging
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -10,6 +12,8 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from lyricloom import config, runner, setup  # noqa: E402
 from lyricloom.app import main as main_module  # noqa: E402
+from lyricloom.app import dialogs  # noqa: E402
+from lyricloom.app import setup_assistant as setup_assistant_module  # noqa: E402
 from lyricloom.app.main import MainWindow  # noqa: E402
 from lyricloom.app.setup_assistant import ASK_BEFORE_UPLOAD, SetupAssistant  # noqa: E402
 from lyricloom.workers import WorkerCancelled  # noqa: E402
@@ -233,3 +237,79 @@ def test_skipped_plugin_notice_offers_the_musicbee_page(app, tmp_path, monkeypat
     finally:
         w.dirty = False
         w.close()
+
+
+# ---------- FRB-06: setup threads are cancelled, joined and logged ----------
+
+def test_the_system_check_honours_a_cancel_before_and_after_detection(monkeypatch):
+    class Worker:
+        def __init__(self):
+            self.cancel = threading.Event()
+
+    worker = Worker()
+    worker.cancel.set()
+    with pytest.raises(WorkerCancelled):
+        setup_assistant_module._detect(worker)
+
+    worker = Worker()
+
+    def detect():
+        worker.cancel.set()
+        return object()
+
+    monkeypatch.setattr(setup_assistant_module.setup, "detect", detect)
+    with pytest.raises(WorkerCancelled):
+        setup_assistant_module._detect(worker)
+
+
+def test_a_job_that_ignores_cancel_logs_and_is_not_destroyed(app, caplog):
+    started, release = threading.Event(), threading.Event()
+
+    def stuck(worker):
+        started.set()
+        release.wait(5)
+
+    job = setup_assistant_module._Job(stuck)
+    job.start()
+    assert started.wait(3)
+    try:
+        with caplog.at_level(logging.WARNING):
+            assert job.stop(wait_ms=10) is False
+        assert "did not stop" in caplog.text
+        assert job.is_busy()
+    finally:
+        release.set()
+        assert job.stop(wait_ms=5000) is True
+        job.close()
+    assert not job.is_busy()
+
+
+def test_join_background_jobs_closes_every_kept_job(monkeypatch):
+    calls = []
+
+    class FakeJob:
+        def close(self, wait_ms=5000):
+            calls.append(wait_ms)
+
+    monkeypatch.setattr(setup_assistant_module, "_KEEP_ALIVE", [FakeJob()])
+    setup_assistant_module.join_background_jobs(123)
+    assert calls == [123]
+
+
+def test_join_test_threads_quits_a_running_acceleration_test(monkeypatch):
+    calls = []
+
+    class FakeThread:
+        def isRunning(self):
+            return True
+
+        def quit(self):
+            calls.append("quit")
+
+        def wait(self, timeout_ms):
+            calls.append(timeout_ms)
+            return True
+
+    monkeypatch.setattr(dialogs, "_TEST_KEEP_ALIVE", [(FakeThread(), object())])
+    dialogs.join_test_threads(77)
+    assert calls == ["quit", 77]

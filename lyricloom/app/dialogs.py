@@ -2,6 +2,7 @@
 stays focused on the library and the editor."""
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from .. import VERSION, config, runtime, setup, updater
 
 ASK_BEFORE_UPLOAD = "assemblyai_ask_before_upload"
 _TEST_KEEP_ALIVE: list[tuple[QThread, _SetupCheck]] = []
+LOG = logging.getLogger(__name__)
 
 
 def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = False
@@ -65,6 +67,18 @@ class _SetupCheck(QObject):
             self.done.emit(setup.detect())
         except Exception as exc:  # noqa: BLE001 - shown in a message box
             self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+def join_test_threads(timeout_ms: int = 5000) -> None:
+    """Joins acceleration-test threads that outlived the dialog, with a bounded wait (FRB-06)."""
+    for thread, _worker in list(_TEST_KEEP_ALIVE):
+        try:
+            if thread.isRunning():
+                thread.quit()
+                if not thread.wait(timeout_ms):
+                    LOG.warning("the acceleration test did not stop within %d ms", timeout_ms)
+        except RuntimeError:
+            pass
 
 
 class SettingsDialog(QDialog):
