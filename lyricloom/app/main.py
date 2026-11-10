@@ -224,6 +224,15 @@ class _PendingQueue:
     force: bool = False   # this queue re-runs every stage, whatever the Force checkbox says
 
 
+@dataclass
+class _InstallRequest:
+    """"Restart now"/"Install now": the verified download Setup starts with once the close ends."""
+    path: Path
+    info: updater.UpdateInfo | None
+    silent: bool
+    relaunch: bool
+
+
 class QueueWorker(QObject):
     """Processes tracks one at a time.
 
@@ -393,9 +402,7 @@ class MainWindow(QMainWindow):
         self._notice = ""
         self._tray: QSystemTrayIcon | None = None
         self._quit_after_queue = False
-        self._pending_installer: Path | None = None
-        self._pending_install_silent = True
-        self._pending_install_relaunch = True
+        self._install_request: _InstallRequest | None = None
         self._cancel_background = threading.Event()
         self._stop_at: int | None = None
         self._shown_line = -1
@@ -447,19 +454,29 @@ class MainWindow(QMainWindow):
             self._ipc_server.received.connect(self._external_message)
             self._ipc_server.set_ready()
             self._ipc_available = True
+            # Only the primary instance may clean the update folder: a second process that is
+            # about to hand its command over and exit must not delete the primary's download.
+            # A file left there by an earlier run is never trusted.
+            updater.cleanup_stale_downloads()
         else:
             self._ipc_available = False
             LOG.warning("single-instance server %s could not listen", self._ipc_server.name)
         if startup is not None:
             QTimer.singleShot(0, lambda: self._handle_external(startup))
-        # A file left in the temporary update folder by an earlier run is never trusted.
-        updater.cleanup_stale_downloads()
         self._update_timer = QTimer(self, interval=updater.CHECK_INTERVAL_MS,
                                     timeout=self._periodic_update_check)
         self._update_timer.start()
-        if updater.should_check_on_startup():
-            QTimer.singleShot(4000, lambda: check_for_updates(self, silent=True))
+        # Nothing is requested before the setup assistant finished; _setup_finished runs this
+        # start-up check then.
+        self._startup_check_scheduled = updater.should_check_on_startup()
+        if self._startup_check_scheduled:
+            QTimer.singleShot(4000, self._startup_update_check)
         QTimer.singleShot(0, self._show_pending_plugin_notice)
+
+    def _startup_update_check(self) -> None:
+        """The automatic start-up check (also run once when the setup assistant finishes)."""
+        if updater.should_check_automatically():
+            check_for_updates(self, silent=True)
 
     def _periodic_update_check(self) -> None:
         """The 24-hour re-check; a disabled or explicitly off check makes no request."""
@@ -467,15 +484,16 @@ class MainWindow(QMainWindow):
             check_for_updates(self, silent=True)
 
     def _show_pending_plugin_notice(self) -> None:
-        """Explain once that a silent update had to leave the MusicBee plugin alone."""
+        """Explain once that a silent update to this version left the MusicBee plugin alone."""
         if not updater.take_plugin_skip_notice():
             return
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Information)
         box.setWindowTitle("MusicBee plugin not updated")
-        box.setText("Starry Karaoke for MusicBee was not updated because MusicBee was open.")
-        box.setInformativeText("LyricLoom itself has been updated. Close MusicBee, then update the "
-                               "plugin from the setup assistant's MusicBee page.")
+        box.setText("Starry Karaoke for MusicBee was not updated because MusicBee was open "
+                    "(or LyricLoom could not check that it was closed).")
+        box.setInformativeText(f"LyricLoom has been updated to {VERSION}. Close MusicBee, then "
+                               "update the plugin from the setup assistant's MusicBee page.")
         open_page = box.addButton("Open the MusicBee page", QMessageBox.AcceptRole)
         box.addButton("Later", QMessageBox.RejectRole)
         box.exec()
@@ -613,6 +631,10 @@ class MainWindow(QMainWindow):
         self._update_cloud_indicator()
         if _result == QDialog.Accepted:
             self.statusBar().showMessage("Setup complete.", 8000)
+            if not self._startup_check_scheduled and updater.should_check_on_startup():
+                # The owner has now seen the update choice: run the start-up check once.
+                self._startup_check_scheduled = True
+                self._startup_update_check()
 
     def _offer_models(self):
         def check():
@@ -2035,7 +2057,7 @@ class MainWindow(QMainWindow):
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("Pause after this song")
 
-        if (self._external_backlog and self._pending_installer is None
+        if (self._external_backlog and self._install_request is None
                 and not self._quit_after_queue and not self._user_stopped_queue
                 and self._pending_queue is None):
             paths, redo = self._external_backlog[0]
@@ -2072,9 +2094,7 @@ class MainWindow(QMainWindow):
                 self._notify("Queue finished", summary)
         else:
             self.statusBar().showMessage(summary if results else "Queue finished", 6000)
-        if self._pending_installer is not None:
-            QTimer.singleShot(0, self._install_pending_update)
-        elif self._quit_after_queue:
+        if self._quit_after_queue:   # an install request, if any, starts at the end of this close
             self._quit_after_queue = False
             QTimer.singleShot(0, self.close)
 
@@ -2577,52 +2597,50 @@ class MainWindow(QMainWindow):
             return "now"
         return "keep"
 
-    def prepare_update(self, path: Path, *, silent: bool = True, relaunch: bool = True) -> bool:
-        """Called in the GUI thread when an installer is ready. Uses the same shutdown path as
-        closing the window; returns True only when the app may exit and start the installer now.
+    def prepare_update(self, path: Path, *, info: updater.UpdateInfo | None = None,
+                       silent: bool = True, relaunch: bool = True) -> None:
+        """"Restart now"/"Install now": record the install request and start the normal close.
 
-        ``silent`` is false for the interactive "Install now" flow. ``relaunch`` makes a silent
-        install start LyricLoom again (the "Restart now" action).
+        Setup is not started here. The close asks about unsaved edits and a running queue, may be
+        vetoed, and waits for a stopping queue; ``_install_update_on_exit`` starts Setup as its
+        last step. ``silent`` is false for the interactive "Install now" flow; ``relaunch`` makes
+        a silent install start LyricLoom again (the "Restart now" action).
         """
-        if self._queue is not None:
-            choice = self._ask_queue_shutdown()
-            if choice == "keep":
-                self.statusBar().showMessage("Update downloaded; quit LyricLoom when the queue is done", 12000)
-                return False
-            self._cancel_background.set()
-            self._pending_installer = path
-            self._pending_install_silent = silent
-            self._pending_install_relaunch = relaunch
-            if choice == "now":
-                self._queue.stop(now=True)
-            else:
-                self._queue.stop()
-            self.statusBar().showMessage("The update will install when the queue stops …", 12000)
-            return False
-        return self._confirm_discard()
-
-    def _install_pending_update(self):
-        path, self._pending_installer = self._pending_installer, None
-        if path is None or not self._confirm_discard():
-            return
-        silent, relaunch = self._pending_install_silent, self._pending_install_relaunch
-        self._update_controller.take_downloaded_update(path)
-        try:
-            updater.launch_installer(path, silent=silent, relaunch=relaunch, skip_plugin=False)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Update", "Could not start the installer:\n" + str(exc))
-            return
+        self._install_request = _InstallRequest(Path(path), info, silent, relaunch)
         self.close()
 
+    def _close_vetoed(self, e) -> None:
+        """Keep the window open. A restart/install request ends here; an ``auto`` download stays
+        armed for a later normal close."""
+        e.ignore()
+        if self._install_request is not None:
+            self._install_request = None
+            self._update_controller.install_postponed()
+
     def _install_update_on_exit(self) -> None:
-        """Start the silent install of a verified auto-downloaded update as the last close step."""
-        if self._queue is not None:
-            return   # install-on-exit must never interrupt a queue
-        path = self._update_controller.take_downloaded_update(auto_only=True)
+        """Start Setup as the very last step of a close that is really happening.
+
+        A restart/install request runs as asked; otherwise a verified ``auto`` download installs
+        silently. Nothing starts while a queue runs or is being checked before it starts.
+        """
+        request, self._install_request = self._install_request, None
+        if self._queue is not None or self._pending_queue is not None:
+            if request is not None or self._update_controller.downloaded_info is not None:
+                LOG.warning("a queue started while LyricLoom was closing; the update was not installed")
+            return   # an install must never interrupt a queue
+        info = self._update_controller.downloaded_info
+        if request is not None:
+            path = self._update_controller.take_downloaded_update(request.path)
+            silent, relaunch = request.silent, request.relaunch
+            info = request.info or info
+        else:
+            path = self._update_controller.take_downloaded_update(auto_only=True)
+            silent, relaunch = True, False
         if path is None:
             return
         try:
-            updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False)
+            updater.launch_installer(path, silent=silent, relaunch=relaunch, skip_plugin=False,
+                                     version=info.version if info is not None else "")
         except Exception as exc:  # noqa: BLE001
             LOG.error("could not start the downloaded update on exit: %s", exc)
             QMessageBox.critical(self, "Update", "Could not start the installer:\n" + str(exc))
@@ -2652,7 +2670,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e):
         if not self._confirm_discard():
-            e.ignore()
+            self._close_vetoed(e)
             return
         if self._setup_assistant is not None:
             self._setup_assistant.reject()
@@ -2660,7 +2678,7 @@ class MainWindow(QMainWindow):
         if self._queue is not None:
             choice = self._ask_queue_shutdown()
             if choice == "keep":
-                e.ignore()
+                self._close_vetoed(e)
                 return
             self._cancel_background.set()
             self._quit_after_queue = True
@@ -2674,13 +2692,13 @@ class MainWindow(QMainWindow):
             return
         if self._models_window is not None:
             if not self._models_window.close():   # asks before cancelling a running download
-                e.ignore()
+                self._close_vetoed(e)
                 return
         self._save_ui_state()
         if self._ipc_server is not None:
             self._ipc_server.close()
         self._stop_threads()
-        self._install_update_on_exit()
+        self._install_update_on_exit()   # last: every prompt and veto above has passed
         super().closeEvent(e)
 
 
@@ -2740,6 +2758,8 @@ def run(argv: list[str] | None = None):
 
         run_worker(argv[2])
         return
+    # Every GUI process holds this mutex until it exits, so the installer can wait for it.
+    updater.hold_app_mutex()
     has_program = bool(argv) and not argv[0].startswith("-")
     cli = parse_command_line(argv[1:] if has_program else argv)
     migrated = config.migrate_legacy_settings()

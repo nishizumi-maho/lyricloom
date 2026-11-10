@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QProgressDialog, QPushButton, QVBoxLayout, QWidget)
 
@@ -524,8 +524,8 @@ class UpdateController(QObject):
         if updater.installer_available():
             if mode == "auto" and self._downloaded is not None:
                 action_text = "Restart now"
-            elif mode == "ask" and self._downloaded is None:
-                action_text = "Install now"
+            elif mode == "ask":
+                action_text = "Install now"   # also after a postponed install of the download
         bar = self._bar()
         if bar is None:
             if not self._silent:
@@ -567,6 +567,8 @@ class UpdateController(QObject):
         info = self._info
         if info is None:
             return
+        if self._download_thread is not None:
+            self._cancel.set()   # a running download of the skipped release stops between chunks
         try:
             updater.skip_version(info.version)
         except OSError as exc:
@@ -592,26 +594,27 @@ class UpdateController(QObject):
         result, self._downloaded = self._downloaded, None
         return result
 
+    @property
+    def downloaded_info(self) -> updater.UpdateInfo | None:
+        """The release of the verified download that is still waiting to be installed."""
+        return self._info if self._downloaded is not None else None
+
+    def install_postponed(self) -> None:
+        """MainWindow's close was vetoed after "Restart now"/"Install now": offer it again."""
+        self._notice_later()
+        self._show_notice()
+
     def _begin_install(self, *, silent: bool, relaunch: bool) -> bool:
-        """Ask MainWindow to stop the queue, then start the installer and close the window."""
+        """Hand the install request to MainWindow, which closes and starts Setup last.
+
+        Setup is never started here: a prompt during the close can still start a queue or veto
+        the close, so only MainWindow's close knows when the install may really begin.
+        """
         path = self._downloaded
-        if path is None:
-            return False
         prepare = getattr(self._window, "prepare_update", None)
-        if prepare is not None and not prepare(path, silent=silent, relaunch=relaunch):
-            return False   # the queue is still stopping; MainWindow installs it when it finishes
-        try:
-            updater.launch_installer(path, silent=silent, relaunch=relaunch, skip_plugin=False)
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self._window, "Update", "Could not start the installer:\n" + str(exc))
+        if path is None or prepare is None:
             return False
-        self.take_downloaded_update(path)
-        # Close the window so the normal close path stops the background threads instead of a bare
-        # event-loop exit while the update/scan threads still run.
-        if hasattr(self._window, "close"):
-            self._window.close()
-        else:
-            QApplication.quit()
+        prepare(path, info=self._info, silent=silent, relaunch=relaunch)
         return True
 
     @Slot(str)
@@ -638,6 +641,14 @@ class UpdateController(QObject):
                 and downloaded_info.version != self._info.version):
             # A check found a different release while this download ran; never install the
             # verified file as if it belonged to the new version (it will be cleaned on restart).
+            return
+        release = downloaded_info or self._info
+        if release is not None and updater.is_skipped(release.version):
+            # "Skip this version" was clicked while the download ran: never arm or install it.
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass   # never trusted again: the next start deletes what this process left
             return
         self._downloaded = Path(path)
         if automatic:
