@@ -299,3 +299,24 @@ def test_a_dirty_open_track_can_be_skipped_from_the_queue(app, tmp_path, monkeyp
     finally:
         w.dirty = False
         w.close()
+
+
+def test_redo_with_current_models_runs_a_forced_full_queue(app, tmp_path, monkeypatch):
+    """The library action re-runs every stage of a finished song with the current model choices,
+    whatever the window's Force checkbox says (it used to raise TypeError on click)."""
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.process",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = MainWindow(tmp_path)
+    try:
+        monkeypatch.setattr(w, "_preflight", lambda *a, **k: True)
+        assert not w.force.isChecked()
+        w._redo_with_current_models(audio)
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["force"] is True
+        assert seen[0].get("only_stage") is None and seen[0].get("models") is None
+        assert not w.force.isChecked()   # the window's own choice is untouched
+    finally:
+        w.dirty = False
+        w.close()

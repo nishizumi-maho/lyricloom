@@ -221,6 +221,7 @@ class _PendingQueue:
     research: bool
     models: dict[str, str] | None
     from_backlog: bool = False
+    force: bool = False   # this queue re-runs every stage, whatever the Force checkbox says
 
 
 class QueueWorker(QObject):
@@ -1816,7 +1817,7 @@ class MainWindow(QMainWindow):
         return batch_redo == redo and list(batch_paths) == list(paths)
 
     def process(self, paths: list[Path], redo: bool = False, research: bool = False,
-                models: dict[str, str] | None = None) -> bool:
+                models: dict[str, str] | None = None, force: bool = False) -> bool:
         """Accepts a queue and checks the models in a worker before starting it.
 
         Returns True when the request was accepted. A queued request may still be refused after
@@ -1831,7 +1832,7 @@ class MainWindow(QMainWindow):
             return False
         from_backlog = self._take_backlog_marker(paths, redo)
         self._pending_queue = _PendingQueue(list(paths), redo, research, models,
-                                            from_backlog=from_backlog)
+                                            from_backlog=from_backlog, force=force)
         checked = self._preflight(paths, redo, models, research=research)
         pending = self._pending_queue
         if checked is True and pending is not None:
@@ -1854,8 +1855,8 @@ class MainWindow(QMainWindow):
         self._queue_started = time.monotonic()
         allow_cloud = self._cloud_choice_for_queue()
         items = [QueueItem(path, pending.models) for path in pending.paths]
-        self._queue = QueueWorker(items, self.force.isChecked(), pending.redo, pending.research,
-                                  allow_cloud=allow_cloud)
+        self._queue = QueueWorker(items, self.force.isChecked() or pending.force, pending.redo,
+                                  pending.research, allow_cloud=allow_cloud)
         self._prog = {"done": 0, "total": len(pending.paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
         q = self._queue
