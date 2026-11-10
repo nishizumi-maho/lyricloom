@@ -183,7 +183,7 @@ Two separate choices:
 - **Check for updates when LyricLoom starts and every 24 hours (contacts GitHub)** is on by
   default. The request goes to `api.github.com`, carries LyricLoom's version in the User-Agent and
   contains nothing about you or your library. Clear it to stop automatic checks; **Help > Check for
-  updates…** still works when you ask.
+  updates…** still works when you ask. No automatic check runs before you finish the assistant.
 - **When an update is found** chooses *Install updates automatically when LyricLoom closes*,
   *Ask before installing* or *Only tell me that a new version exists*.
 
@@ -436,11 +436,15 @@ written by the current engine unless you use **Force**.
    logs, work cache, kept vocals, models, installed whisper.cpp builds and the AssemblyAI key.
    **No** is the default.
 
-If you answer yes, only LyricLoom's default data folders are deleted. Custom `models`, `vocals` or
-`work` locations from `settings.json`, and environment-provided locations
-(`LYRICLOOM_DATA_DIR`, `LYRICLOOM_MODELS`, `LYRICLOOM_WORK`), are listed for you to remove by hand.
-The uninstaller refuses to delete the data folder when it finds music files inside it or when the
-configured music library is inside it.
+If you answer yes, only the files and folders LyricLoom itself creates in
+`%LOCALAPPDATA%\LyricLoom` are deleted; any other file you put there is kept, and the folder is
+removed only when that leaves it empty. Custom `models`, `vocals` or `work` locations from
+`settings.json`, and environment-provided locations (`LYRICLOOM_DATA_DIR`, `LYRICLOOM_MODELS`,
+`LYRICLOOM_WORK`), are listed for you to remove by hand.
+
+The uninstaller deletes nothing in the data folder when it finds music files inside it, when the
+configured music library is inside it, when one of those custom or environment-provided folders is
+inside it, or when it cannot read the folders saved in `settings.json`.
 
 Your music library and the `.lrc` files next to your music are never deleted by the uninstaller. The
 shared `RomajiCore.dll`, `LibNMeCab.dll` and `RomajiLyrics\IpaDic` files used by other MusicBee
