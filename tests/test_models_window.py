@@ -51,6 +51,7 @@ def test_model_rows_are_grouped_and_show_statuses(app, monkeypatch):
         assert window.tree.topLevelItemCount() == 4
         assert [window.tree.topLevelItem(i).text(0) for i in range(4)] == [
             "Transcription", "Vocal separation", "Alignment", "Singing model"]
+        _wait(app, lambda: window._items["whisper-large-v3"].text(2) == "Ready")
         assert window._items["whisper-large-v3"].text(2) == "Ready"
         assert window._items["separator-mel-band-roformer"].text(2) == "Missing"
         assert window._items["align-mms-fa"].text(2) == "Corrupt"
@@ -206,7 +207,9 @@ def test_preflight_blocks_the_queue_when_a_model_is_missing(app, tmp_path, monke
         asked = []
         monkeypatch.setattr(w, "_ask_missing_models",
                             lambda specs: asked.append(list(specs)) or "cancel")
-        assert w.process([audio]) is False
+        # The status check runs in a worker now, so the call is accepted first (FRB-04).
+        assert w.process([audio]) is True
+        _wait(app, lambda: asked)
         assert asked and asked[0][0].id == "separator-mel-band-roformer"
         assert w._queue is None
     finally:
@@ -225,7 +228,8 @@ def test_search_lyrics_again_preflights_only_the_alignment_model(app, tmp_path, 
     try:
         # The transcription model may be missing: "Search lyrics again" reuses everything but the
         # alignment, so only the alignment model blocks the queue.
-        assert w.process([audio], research=True) is False
+        assert w.process([audio], research=True) is True
+        _wait(app, lambda: asked)
         assert [spec.id for spec in asked[0]] == ["align-mms-fa"]
         assert w._queue is None
     finally:
@@ -253,7 +257,9 @@ def test_a_missing_models_pause_still_honours_stop_after_this_song(tmp_path, mon
     worker.run()
 
     assert calls == [first]          # paused on the missing model, then the stop won
-    assert rows == []                # the missing track is retried, not reported as failed
+    # The started track must get a terminal row, not stay "processing" forever (FRB-08).
+    assert len(rows) == 1 and rows[0].path == first
+    assert rows[0].status == "cancelled" and "waiting for models" in rows[0].error
 
 
 def test_missing_models_failure_pauses_and_retries_the_track(app, tmp_path, monkeypatch):
@@ -278,6 +284,38 @@ def test_missing_models_failure_pauses_and_retries_the_track(app, tmp_path, monk
     assert seen and seen[0][0].id == spec.id
     assert len(calls) == 2                      # the same track ran again after the resume
     assert rows and rows[-1].path == audio
+
+
+def test_a_finished_unrelated_download_does_not_resume_the_paused_queue(app, tmp_path, monkeypatch):
+    w = MainWindow(tmp_path)
+    spec = models.get("align-mms-fa")
+    results = []
+    monkeypatch.setattr("lyricloom.models.status", lambda spec: "missing")
+    try:
+        w._models_after_download = [((spec,), results.append)]
+        w._models_downloads_finished(True)
+        _wait(app, lambda: results)
+        assert results == [False]          # the missing model is still missing
+    finally:
+        w._models_after_download = []
+        w.dirty = False
+        w.close()
+
+
+def test_a_download_resumes_only_when_the_requested_model_is_ready(app, tmp_path, monkeypatch):
+    w = MainWindow(tmp_path)
+    spec = models.get("align-mms-fa")
+    results = []
+    monkeypatch.setattr("lyricloom.models.status", lambda spec: "ready")
+    try:
+        w._models_after_download = [((spec,), results.append)]
+        w._models_downloads_finished(True)
+        _wait(app, lambda: results)
+        assert results == [True]
+    finally:
+        w._models_after_download = []
+        w.dirty = False
+        w.close()
 
 
 def test_a_missing_models_failure_pauses_the_window_queue(app, tmp_path, monkeypatch):

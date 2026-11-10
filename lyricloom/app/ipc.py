@@ -219,6 +219,10 @@ class Server(QObject):
         return self._server is not None and self._server.isListening()
 
     def listen(self) -> bool:
+        if self._server is not None and self._server.isListening():
+            # MainWindow is handed an already-listening server; a second listen() would fail and
+            # made every startup close and re-acquire the single-instance name (FRB-03).
+            return True
         if self._server is None:
             self._server = QLocalServer(self)
             self._server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
@@ -279,6 +283,22 @@ class Server(QObject):
             client.start()
 
 
+def _json_ready(value):
+    """Converts ``Path`` values (and containers holding them) before ``json.dumps``.
+
+    A second instance forwards the startup command through ``send``; those dicts carried
+    ``WindowsPath`` objects and JSON serialisation raised ``TypeError`` while the first instance
+    was busy (FRB-02).  Normalising here protects every caller, including future commands.
+    """
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_json_ready(item) for item in value]
+    return value
+
+
 def send(message, *, name: str | None = None, timeout_ms: int = DEFAULT_TIMEOUT_MS) -> dict | None:
     """Sends one command to the running instance. Returns its JSON reply or None if nobody answers.
 
@@ -289,7 +309,7 @@ def send(message, *, name: str | None = None, timeout_ms: int = DEFAULT_TIMEOUT_
     if not isinstance(message, dict):
         paths = message if isinstance(message, (list, tuple, set)) else [message]
         message = {"cmd": "process", "paths": [str(path) for path in paths]}
-    payload = json.dumps(message, ensure_ascii=False).encode("utf-8") + b"\n"
+    payload = json.dumps(_json_ready(message), ensure_ascii=False).encode("utf-8") + b"\n"
     if len(payload) > MAX_MESSAGE_BYTES:
         return None
     socket = QLocalSocket()

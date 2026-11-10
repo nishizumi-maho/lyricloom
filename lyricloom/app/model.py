@@ -312,16 +312,19 @@ def load_cached_rows(root: Path) -> list[TrackRow]:
     return rows
 
 
-def scan_cached(root: Path, stats: dict | None = None) -> list[TrackRow]:
+def scan_cached(root: Path, stats: dict | None = None, cancel=None) -> list[TrackRow]:
     """Full listing, re-reading only tracks whose audio or .lrc changed since the last scan.
 
     One unreadable file (a hand-edited .lrc, a file deleted mid-scan) must not kill Refresh, so
-    each file is handled on its own; `stats["unreadable"]` counts the failures for the UI."""
+    each file is handled on its own; `stats["unreadable"]` counts the failures for the UI. A set
+    ``cancel`` stops between files and leaves the previous cache untouched (FRB-07)."""
     stats = stats if stats is not None else {}
     stats["unreadable"] = 0
     old = _read_cache(root)
     new, rows = {}, []
     for audio in find_audio(root):
+        if cancel is not None and cancel.is_set():
+            return rows
         try:
             stamp = _stamp(audio)
         except OSError as exc:
