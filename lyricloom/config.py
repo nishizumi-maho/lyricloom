@@ -262,6 +262,20 @@ WHISPER_MODEL_NAME = os.environ.get("LYRICLOOM_WHISPER_MODEL", "ggml-large-v3.bi
 WHISPER_MODEL = MODELS / WHISPER_MODEL_NAME
 
 
+def refresh_folder_constants() -> None:
+    """Re-reads the module path constants after ``migrate_legacy_settings`` rewrote the settings.
+
+    The constants are computed at import time, before the migration in ``run()`` can move the
+    old folders and rewrite the ``work``/``models`` settings.  Without this refresh the migrated
+    session keeps using the old (now missing) folders (FRB-14).  Every consumer reads these
+    attributes at call time, so replacing them is enough.
+    """
+    global WORK_ROOT, MODELS, WHISPER_MODEL
+    WORK_ROOT = work_root()
+    MODELS = models_root()
+    WHISPER_MODEL = MODELS / WHISPER_MODEL_NAME
+
+
 def whisper_cli_candidates() -> list[Path]:
     """Every path checked for whisper-cli, in precedence order (the error message lists them)."""
     suffix = ".exe" if IS_WINDOWS else ""

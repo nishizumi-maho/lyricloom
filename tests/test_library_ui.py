@@ -155,23 +155,107 @@ def test_a_second_batch_starts_when_the_running_queue_ends(app, tmp_path, monkey
         w._prog = {"done": 0, "total": 0}
         w._queue_finished()
         assert started and started[0][0] == [audio.resolve()]
+        assert not w._external_backlog
     finally:
         w._queue = None
         w.dirty = False
         w.close()
 
 
-def test_open_outside_the_library_switches_folder_and_selects(app, tmp_path):
+def test_a_user_stop_does_not_restart_the_external_backlog(app, tmp_path, monkeypatch):
+    w = MainWindow(tmp_path)
+    try:
+        audio = _audio(tmp_path, "later.flac")
+        started = []
+        monkeypatch.setattr(w, "process", lambda paths, redo=False: started.append((list(paths), redo)) or True)
+        w._external_backlog = [([audio.resolve()], False)]
+
+        class FakeQueue:
+            def stop(self, now=False):
+                pass
+
+        w._queue = FakeQueue()
+        w._stop_now()                     # the user asked to stop
+        assert w._user_stopped_queue
+        w._queue = None
+        w._queue_started = time.monotonic()
+        w._queue_results = []
+        w._prog = {"done": 0, "total": 1}
+        w._queue_finished()
+        assert not started
+        assert w._external_backlog         # left for the next deliberate start
+    finally:
+        w._queue = None
+        w._external_backlog = []
+        w.dirty = False
+        w.close()
+
+
+def test_a_failed_batch_that_cannot_start_stays_in_the_backlog(app, tmp_path, monkeypatch):
+    w = MainWindow(tmp_path)
+    try:
+        audio = _audio(tmp_path, "later.flac")
+        batch = ([audio.resolve()], False)
+        w._external_backlog = [batch]
+        monkeypatch.setattr(w, "process", lambda paths, redo=False: False)
+        w._queue_started = time.monotonic()
+        w._queue_results = []
+        w._prog = {"done": 0, "total": 0}
+        w._queue_finished()
+        assert w._external_backlog == [batch]
+    finally:
+        w._queue = None
+        w._external_backlog = []
+        w.dirty = False
+        w.close()
+
+
+def test_open_outside_the_library_switches_folder_and_selects(app, tmp_path, monkeypatch):
     library = tmp_path / "library"
     _audio(library)
     outside = _audio(tmp_path / "elsewhere", "other.flac")
     w = MainWindow(library)
     try:
+        monkeypatch.setattr(w, "_ask_open_outside_library", lambda path: "library")
         w.open_external(outside)
         _wait(app, lambda: w.audio == outside)
         assert w.root == outside.parent
         assert config.library_root() == outside.parent
         assert w._queue is None
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_open_outside_the_library_can_be_session_only(app, tmp_path, monkeypatch):
+    library = tmp_path / "library"
+    _audio(library)
+    config.set_library_root(library)
+    outside = _audio(tmp_path / "elsewhere", "other.flac")
+    w = MainWindow(library)
+    try:
+        monkeypatch.setattr(w, "_ask_open_outside_library", lambda path: "session")
+        w.open_external(outside)
+        _wait(app, lambda: w.audio == outside)
+        assert w.root == outside.parent
+        assert config.library_root() == library      # the saved library did not change
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_open_outside_the_library_can_be_cancelled(app, tmp_path, monkeypatch):
+    library = tmp_path / "library"
+    _audio(library)
+    config.set_library_root(library)
+    outside = _audio(tmp_path / "elsewhere", "other.flac")
+    w = MainWindow(library)
+    try:
+        monkeypatch.setattr(w, "_ask_open_outside_library", lambda path: "cancel")
+        w.open_external(outside)
+        assert w.root == library
+        assert w.audio is None
+        assert config.library_root() == library
     finally:
         w.dirty = False
         w.close()

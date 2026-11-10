@@ -223,3 +223,15 @@ def test_compact_lyric_view_clears_for_a_track_without_lyrics(app, tmp_path):
     finally:
         w.dirty = False
         w.close()
+
+
+def test_dragging_the_main_seek_bar_scrubs_live(app, tmp_path):
+    audio = _track(tmp_path, "01 - Song.flac")
+    w = _window(app, tmp_path)
+    try:
+        w.load(audio)
+        w.seek.sliderMoved.emit(42000)       # FRB-13: the same signal the karaoke window uses
+        assert w.player.positions[-1] == 42000
+    finally:
+        w.dirty = False
+        w.close()

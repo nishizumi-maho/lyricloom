@@ -31,7 +31,7 @@ from .. import VERSION, updater
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
-from . import theme
+from . import model_status, theme
 from .details import TrackDetailsDialog, details_text
 from .diagnostics import DiagnosticsDialog, diagnostics_text, open_local_folder, setup_app_logging
 from .dialogs import SettingsDialog, UpdateController, check_for_updates, validate_folder
@@ -102,6 +102,29 @@ def queue_summary(results: list) -> str:
 
 BUSY_INSTANCE_MESSAGE = "LyricLoom is already running but is not responding"
 BUSY_RETRY_TIMEOUT_MS = 10_000
+BACKGROUND_JOIN_TIMEOUT_MS = 30_000
+
+
+def _join_background_jobs() -> None:
+    """Joins the assistant, Models-window and Settings-dialog threads with bounded waits.
+
+    ``aboutToQuit`` calls this (FRB-06); ``MainWindow.finish_shutdown`` calls it too, so a test or
+    an embedding host that never emits ``aboutToQuit`` still stops the threads it can.
+    """
+    from . import dialogs, models_window, setup_assistant
+
+    setup_assistant.join_background_jobs()
+    dialogs.join_test_threads()
+    models_window.join_status_checks()
+
+
+def install_shutdown_joins() -> None:
+    """Registers the bounded thread joins once per QApplication."""
+    app = QApplication.instance()
+    if app is None or getattr(app, "_lyricloom_shutdown_joins", False):
+        return
+    app.aboutToQuit.connect(_join_background_jobs)
+    app._lyricloom_shutdown_joins = True   # type: ignore[attr-defined]
 
 
 def handle_busy_instance(server, command, *, send=None, notify=None) -> bool:
@@ -115,7 +138,14 @@ def handle_busy_instance(server, command, *, send=None, notify=None) -> bool:
     if server.remove_stale():
         return False   # a crashed process left the name behind; this instance may listen
     sender = send or ipc_send
-    if sender(command, timeout_ms=BUSY_RETRY_TIMEOUT_MS) is not None:
+    try:
+        reply = sender(command, timeout_ms=BUSY_RETRY_TIMEOUT_MS)
+    except Exception as exc:  # noqa: BLE001 - a hand-over failure must show the busy message
+        # A command that cannot be serialised (or a socket error) must not kill the second
+        # instance with a traceback; the user gets the same explanation as a silent instance.
+        LOG.warning("could not hand the command to the running instance: %s", exc)
+        reply = None
+    if reply is not None:
         return True
     if notify is None:
         QMessageBox.warning(None, config.APP_NAME, BUSY_INSTANCE_MESSAGE)
@@ -141,11 +171,56 @@ class FuncWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
 
 
+class _ThreadFinishedRelay(QObject):
+    """Carries ``QThread.finished`` to a GUI-thread callable with the thread it belongs to.
+
+    ``QThread.finished`` is emitted from the worker thread and PySide's ``sender()`` is None in a
+    Python slot, so the thread is captured in the callback instead (FRB-11).
+    """
+
+    def __init__(self, callback, parent: QObject | None = None):
+        super().__init__(parent)
+        self._callback = callback
+
+    @Slot()
+    def run(self) -> None:
+        self._callback()
+
+
+class _ModelCheckRelay(QObject):
+    """Delivers a model-status sweep to the window in the GUI thread (a lambda would not be)."""
+
+    def __init__(self, window: "MainWindow", entries: list, parent: QObject | None = None):
+        super().__init__(parent or window)
+        self._window = window
+        self._entries = entries
+
+    @Slot(object)
+    def done(self, states: dict) -> None:
+        self._window._models_ready(self._entries, states)
+        self.deleteLater()
+
+    @Slot(str)
+    def failed(self, message: str) -> None:
+        self._window._models_check_failed(self._entries, message)
+        self.deleteLater()
+
+
 @dataclass
 class QueueItem:
     """One track and the optional per-song model choices for that run."""
     path: Path
     models: dict[str, str] | None = None
+
+
+@dataclass
+class _PendingQueue:
+    """A queue accepted by the window while the model-status check runs off the GUI thread."""
+    paths: list[Path]
+    redo: bool
+    research: bool
+    models: dict[str, str] | None
+    from_backlog: bool = False
 
 
 class QueueWorker(QObject):
@@ -201,6 +276,7 @@ class QueueWorker(QObject):
 
     def _run_tracks(self):
         last_missing: dict[Path, frozenset[str]] = {}
+        blocked: Path | None = None
         index = 0
         while index < len(self._items):
             item = self._items[index]
@@ -208,7 +284,17 @@ class QueueWorker(QObject):
             while self._pause.is_set() and not self._cancel.is_set() and not self._stop_after:
                 time.sleep(0.05)
             if self._cancel.is_set() or self._stop_after:
+                if blocked == p:
+                    # The track was started and paused on missing models; stopping here must not
+                    # leave its row "processing" forever (FRB-08).
+                    try:
+                        row = read_status(p)
+                    except Exception:  # noqa: BLE001 - the row must still become terminal
+                        row = TrackRow(p, p.parent.name, p.stem, "cancelled")
+                    row.status, row.error = "cancelled", "Stopped while waiting for models"
+                    self.track_done.emit(row)
                 break
+            blocked = None
             self.track_started.emit(str(p))
             moved: dict[Path, Path] = {}
             try:
@@ -220,7 +306,8 @@ class QueueWorker(QObject):
                                          on_stage=self.stage.emit, cancel=self._cancel,
                                          models=item.models, allow_cloud=self._allow_cloud)
                 elif self._research:
-                    res = runner.research_lyrics(p, cancel=self._cancel)
+                    res = runner.research_lyrics(p, cancel=self._cancel,
+                                                 allow_cloud=self._allow_cloud)
                 else:
                     res = runner.process(p, force=self._force, on_stage=self.stage.emit,
                                          cancel=self._cancel, models=item.models,
@@ -234,6 +321,7 @@ class QueueWorker(QObject):
                     if moved:
                         runner.restore_sync(moved)
                     self.pause()
+                    blocked = p
                     self.missing_models.emit(list(res.missing))
                     continue
                 if moved:
@@ -290,6 +378,10 @@ class MainWindow(QMainWindow):
         self.dirty = False
         self._threads: list[tuple[QThread, QObject]] = []
         self._queue: QueueWorker | None = None
+        self._pending_queue: _PendingQueue | None = None
+        self._preflight_running = False
+        self._user_stopped_queue = False
+        self._backlog_starting: tuple[list[Path], bool] | None = None
         self._queue_error = ""
         self._queue_results: list = []
         self._queue_started = 0.0
@@ -315,12 +407,13 @@ class MainWindow(QMainWindow):
         self.karaoke_window: KaraokeWindow | None = None
         self._update_controller = UpdateController(self)
         self._models_window: ModelsWindow | None = None
-        self._models_after_download: list = []
+        self._models_after_download: list[tuple[tuple, object]] = []
         self._duplicate_instance = False
         self.undo_stack = QUndoStack(self)
         app = QApplication.instance()
         if app is not None and not getattr(app, "_lyricloom_theme_watch", False):
             theme.apply_theme(app)
+        install_shutdown_joins()
         self.setWindowTitle(config.APP_NAME)
         self.resize(1400, 850)
         self.setMinimumSize(640, 480)
@@ -521,8 +614,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Setup complete.", 8000)
 
     def _offer_models(self):
-        missing = runtime.status()
-        if all(missing.values()) and runtime._nltk_ready():
+        def check():
+            return runtime.status(), runtime._nltk_ready()
+
+        self._run(FuncWorker(check), self._offer_models_checked, self._offer_models_failed)
+
+    def _offer_models_checked(self, result) -> None:
+        missing, nltk_ready = result
+        if all(missing.values()) and nltk_ready:
             return
         answer = QMessageBox.question(
             self, "Download models?",
@@ -533,6 +632,9 @@ class MainWindow(QMainWindow):
             "songs that need a missing model will ask again.")
         if answer == QMessageBox.Yes:
             self.open_models()
+
+    def _offer_models_failed(self, message: str) -> None:
+        LOG.warning("could not check the models for the first-run offer: %s", message)
 
     def open_settings(self):
         previous_script = config.japanese_script()
@@ -595,8 +697,9 @@ class MainWindow(QMainWindow):
             self._models_window.choices_changed.connect(self._models_choices_changed)
         window = self._models_window
         added = on_finished is not None
+        entry = (tuple(specs or ()), on_finished)
         if added:
-            self._models_after_download.append(on_finished)
+            self._models_after_download.append(entry)
         window.show()
         window.raise_()
         window.activateWindow()
@@ -606,15 +709,45 @@ class MainWindow(QMainWindow):
                 # The job never started (another one is running, or not enough disk space):
                 # do not leave a callback that a later, unrelated job would run.
                 try:
-                    self._models_after_download.remove(on_finished)
+                    self._models_after_download.remove(entry)
                 except ValueError:
                     pass
         return window
 
     def _models_downloads_finished(self, ok: bool) -> None:
-        callbacks, self._models_after_download = self._models_after_download, []
-        for callback in callbacks:
-            callback(ok)
+        entries, self._models_after_download = self._models_after_download, []
+        if not entries:
+            return
+        if not ok:
+            for _specs, callback in entries:
+                callback(False)
+            return
+        requested: list = []
+        seen: set[str] = set()
+        for specs, _callback in entries:
+            for spec in specs:
+                if spec.id not in seen:
+                    seen.add(spec.id)
+                    requested.append(spec)
+        if not requested:
+            for _specs, callback in entries:
+                callback(True)
+            return
+
+        def check():
+            return model_status.snapshot(requested)
+
+        relay = _ModelCheckRelay(self, entries)
+        self._run(FuncWorker(check), relay.done, relay.failed)
+
+    def _models_ready(self, entries: list, states: dict[str, str]) -> None:
+        for specs, callback in entries:
+            callback(all(model_status.usable(states.get(spec.id)) for spec in specs))
+
+    def _models_check_failed(self, entries: list, message: str) -> None:
+        LOG.warning("could not check the models after a download: %s", message)
+        for _specs, callback in entries:
+            callback(False)
 
     def _models_choices_changed(self) -> None:
         """A new default or language choice changes the "made with other models" marker."""
@@ -665,22 +798,60 @@ class MainWindow(QMainWindow):
         return specs
 
     def _preflight(self, paths: list[Path], redo: bool,
-                   overrides: dict[str, str] | None = None, *, research: bool = False) -> bool:
-        """True when every required model is present; otherwise asks and refuses to start."""
+                   overrides: dict[str, str] | None = None, *, research: bool = False) -> bool | None:
+        """Checks the required models off the GUI thread.
+
+        ``False`` means another check is already running, ``True`` means no check is needed and
+        ``None`` means a worker was started; ``_preflight_checked`` will start or refuse the queue.
+        Model files can be several gigabytes, so ``models.status`` must never run in this slot
+        (FRB-04).
+        """
+        if self._preflight_running:
+            self.statusBar().showMessage("A model check is already running.", 5000)
+            return False
         stages = ("align",) if redo or research else ("transcribe", "separate", "align")
-        missing = [spec for spec in self._required_models(overrides, stages)
-                   if model_catalog.status(spec) in ("missing", "corrupt")]
+
+        def check():
+            specs = self._required_models(overrides, stages)
+            return specs, model_status.snapshot(specs)
+
+        self._preflight_running = True
+        self.statusBar().showMessage("Checking the models…")
+        self._run(FuncWorker(check), self._preflight_checked, self._preflight_failed)
+        return None
+
+    def _preflight_checked(self, result) -> None:
+        self._preflight_running = False
+        pending, self._pending_queue = self._pending_queue, None
+        if pending is None:
+            return
+        specs, states = result
+        missing = [spec for spec in specs if states.get(spec.id) in ("missing", "corrupt")]
         if not missing:
-            return True
+            self._start_queue(pending)
+            return
 
         def downloaded(ok: bool) -> None:
             if ok:
-                QTimer.singleShot(0, lambda: self.process(
-                    paths, redo=redo, research=research, models=overrides))
+                if pending.from_backlog:
+                    self._backlog_starting = (list(pending.paths), pending.redo)
+
+                def retry() -> None:
+                    if not self.process(pending.paths, redo=pending.redo,
+                                        research=pending.research, models=pending.models):
+                        self._backlog_starting = None
+
+                QTimer.singleShot(0, retry)
 
         self._offer_missing_models(missing, downloaded)
         self.statusBar().showMessage("The queue was not started: some models are missing.", 8000)
-        return False
+
+    def _preflight_failed(self, message: str) -> None:
+        self._preflight_running = False
+        self._pending_queue = None
+        LOG.warning("model check failed: %s", message)
+        self.statusBar().showMessage("The queue was not started: the model check failed — "
+                                     + message, 12000)
 
     def open_data_folder(self):
         config.APP_DATA.mkdir(parents=True, exist_ok=True)
@@ -695,7 +866,19 @@ class MainWindow(QMainWindow):
         open_local_folder(config.LOG_DIR)
 
     def show_diagnostics(self):
-        DiagnosticsDialog(diagnostics_text(self.root), self).exec()
+        root = self.root
+
+        def build():
+            return diagnostics_text(root)
+
+        self._run(FuncWorker(build), self._show_diagnostics_text, self._diagnostics_failed)
+
+    def _show_diagnostics_text(self, text: str) -> None:
+        DiagnosticsDialog(text, self).exec()
+
+    def _diagnostics_failed(self, message: str) -> None:
+        LOG.warning("could not build the diagnostics report: %s", message)
+        QMessageBox.warning(self, "Diagnostics", "Could not build the report:\n" + message)
 
     def show_details(self):
         rows = self._selected_rows()
@@ -927,6 +1110,7 @@ class MainWindow(QMainWindow):
         self.btn_pause.clicked.connect(self._toggle_pause)
         self.btn_play.clicked.connect(self.toggle_play)
         self.seek.sliderReleased.connect(self._seek_released)
+        self.seek.sliderMoved.connect(self._seek_moved)
         self.seek.valueChanged.connect(self._seek_changed)
         self.vocals.toggled.connect(self._set_source)
         self.btn_karaoke.clicked.connect(self.open_karaoke)
@@ -976,9 +1160,15 @@ class MainWindow(QMainWindow):
             if on_failed is not None:
                 worker.failed.connect(on_failed)
             worker.failed.connect(thread.quit)
-        thread.finished.connect(lambda: self._threads.remove((thread, worker)) if (thread, worker) in self._threads else None)
+        thread.finished.connect(_ThreadFinishedRelay(
+            lambda: self._thread_finished(thread), self).run)
         self._threads.append((thread, worker))
         thread.start()
+
+    @Slot(object)
+    def _thread_finished(self, thread: QThread) -> None:
+        """Removes a finished worker's bookkeeping on the GUI thread (FRB-11)."""
+        self._threads = [(t, w) for t, w in self._threads if t is not thread]
 
     # ---------- library ----------
     def refresh(self):
@@ -999,10 +1189,11 @@ class MainWindow(QMainWindow):
             self.rows = load_cached_rows(root)
             self._fill_table()
         self.statusBar().showMessage(f"Checking {root} for changes …")
+        cancel = self._cancel_background
 
         def scan():
             stats: dict = {}
-            return root, scan_cached(root, stats), stats
+            return root, scan_cached(root, stats, cancel=cancel), stats
 
         self._run(FuncWorker(scan), self._scanned, self._scan_failed)
 
@@ -1279,13 +1470,33 @@ class MainWindow(QMainWindow):
         if self.audio is None:
             self._pending_select = paths[0]
             self._select_pending()
-        if self._queue is not None:
+        if self._queue is not None or self._pending_queue is not None:
             self._external_backlog.append((paths, redo))
             self.statusBar().showMessage(
                 f"{len(paths)} track(s) queued; they start when the current queue ends", 8000)
             return
         if not self.process(paths, redo=redo):
             self.statusBar().showMessage("Could not start the queued track(s)", 8000)
+
+    def _ask_open_outside_library(self, path: Path) -> str:
+        """Asks whether an outside folder is only shown now or becomes the saved library (FRB-10)."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Open outside the library")
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"{path.name} is outside your library:\n{self.root}")
+        box.setInformativeText(
+            "Show its folder for this session, or make that folder your saved music library?\n\n"
+            "Only the saved choice is used the next time LyricLoom starts.")
+        current = box.addButton("Show for this session", QMessageBox.ActionRole)
+        save = box.addButton("Use this folder as my library", QMessageBox.AcceptRole)
+        box.addButton("Cancel", QMessageBox.RejectRole)
+        box.setDefaultButton(current)
+        box.exec()
+        if box.clickedButton() is save:
+            return "library"
+        if box.clickedButton() is current:
+            return "session"
+        return "cancel"
 
     def open_external(self, path: Path) -> None:
         path = Path(path).resolve()
@@ -1295,15 +1506,21 @@ class MainWindow(QMainWindow):
         except (OSError, RuntimeError, ValueError):
             inside = False
         if not inside:
+            choice = self._ask_open_outside_library(path)
+            if choice == "cancel":
+                self.statusBar().showMessage(f"{path.name} is outside the library", 8000)
+                return
+            if choice == "library":
+                try:
+                    config.set_library_root(path.parent)
+                except OSError as exc:
+                    self._show_io_error("Save the library setting", config.SETTINGS_FILE, exc)
             self.root = path.parent
-            try:
-                config.set_library_root(self.root)
-            except OSError as exc:
-                self._show_io_error("Save the library setting", config.SETTINGS_FILE, exc)
             self.rows = []
             self._pending_select = path
             self.refresh()
-            self.statusBar().showMessage(f"Showing {path.name} from {self.root}", 8000)
+            suffix = "" if choice == "library" else " (this session only)"
+            self.statusBar().showMessage(f"Showing {path.name} from {self.root}{suffix}", 8000)
             return
         self._ensure_rows([path])
         self._pending_select = path
@@ -1590,25 +1807,56 @@ class MainWindow(QMainWindow):
                 return False
         return True
 
+    def _take_backlog_marker(self, paths: list[Path], redo: bool) -> bool:
+        """True when this process() call is the external batch consumed from the backlog."""
+        marker, self._backlog_starting = self._backlog_starting, None
+        if marker is None:
+            return False
+        batch_paths, batch_redo = marker
+        return batch_redo == redo and list(batch_paths) == list(paths)
+
     def process(self, paths: list[Path], redo: bool = False, research: bool = False,
                 models: dict[str, str] | None = None) -> bool:
-        if not paths or self._queue is not None:
+        """Accepts a queue and checks the models in a worker before starting it.
+
+        Returns True when the request was accepted. A queued request may still be refused after
+        the check (missing models) just as before, but the GUI never hashes a model itself.
+        """
+        if not paths or self._queue is not None or self._pending_queue is not None:
             return False
         if not self._validate_folders():
-            return False
-        if not self._preflight(paths, redo, models, research=research):
             return False
         paths = self._confirm_open_track(paths, redo)
         if not paths:
             return False
+        from_backlog = self._take_backlog_marker(paths, redo)
+        self._pending_queue = _PendingQueue(list(paths), redo, research, models,
+                                            from_backlog=from_backlog)
+        checked = self._preflight(paths, redo, models, research=research)
+        pending = self._pending_queue
+        if checked is True and pending is not None:
+            self._pending_queue = None
+            return self._start_queue(pending)
+        if checked is False:
+            self._pending_queue = None
+            return False
+        return True
+
+    def _start_queue(self, pending: _PendingQueue) -> bool:
+        if pending.from_backlog:
+            for index, (batch_paths, batch_redo) in enumerate(self._external_backlog):
+                if batch_redo == pending.redo and list(batch_paths) == list(pending.paths):
+                    self._external_backlog.pop(index)
+                    break
+        self._user_stopped_queue = False
         self._queue_error = ""
         self._queue_results = []
         self._queue_started = time.monotonic()
         allow_cloud = self._cloud_choice_for_queue()
-        items = [QueueItem(path, models) for path in paths]
-        self._queue = QueueWorker(items, self.force.isChecked(), redo, research,
+        items = [QueueItem(path, pending.models) for path in pending.paths]
+        self._queue = QueueWorker(items, self.force.isChecked(), pending.redo, pending.research,
                                   allow_cloud=allow_cloud)
-        self._prog = {"done": 0, "total": len(paths), "name": "", "stage": "lyrics",
+        self._prog = {"done": 0, "total": len(pending.paths), "name": "", "stage": "lyrics",
                       "since": time.monotonic(), "dur": 240.0}
         q = self._queue
         q.track_started.connect(self._track_started)
@@ -1724,11 +1972,13 @@ class MainWindow(QMainWindow):
 
     def _stop_queue(self):
         if self._queue:
+            self._user_stopped_queue = True
             self._queue.stop()
             self.statusBar().showMessage("Stopping after the current track …")
 
     def _stop_now(self):
         if self._queue:
+            self._user_stopped_queue = True
             self._queue.stop(now=True)
             self.statusBar().showMessage("Stopping now …")
 
@@ -1784,11 +2034,22 @@ class MainWindow(QMainWindow):
         self.btn_pause.setEnabled(False)
         self.btn_pause.setText("Pause after this song")
 
-        if self._external_backlog and self._pending_installer is None and not self._quit_after_queue:
-            paths, redo = self._external_backlog.pop(0)
+        if (self._external_backlog and self._pending_installer is None
+                and not self._quit_after_queue and not self._user_stopped_queue
+                and self._pending_queue is None):
+            paths, redo = self._external_backlog[0]
             self.statusBar().showMessage(
                 f"Starting the next queued batch ({len(paths)} track(s)) …", 5000)
-            if not self.process(paths, redo=redo):
+            self._backlog_starting = (list(paths), redo)
+            if self.process(paths, redo=redo):
+                if self._backlog_starting is not None:
+                    # A stubbed or synchronous process() start did not consume the marker.
+                    self._backlog_starting = None
+                    self._external_backlog.pop(0)
+            else:
+                # Process refused to start it; keep the batch for the next attempt instead of
+                # silently dropping songs MusicBee already counted as accepted (FRB-09).
+                self._backlog_starting = None
                 self.statusBar().showMessage("Could not start the next queued batch", 8000)
             return
 
@@ -1841,6 +2102,11 @@ class MainWindow(QMainWindow):
         if path == self.audio and not self.dirty:
             self._reload_lrc()
             self._update_vocals_control(reset=False)
+        window = self.karaoke_window
+        if window is not None and window.audio == path:
+            # A redo or a fresh run changed the lyrics on disk while the karaoke window showed
+            # the old word timing (FRB-12).
+            window.reload_lyrics()
 
     def _reload_lrc(self):
         # Japanese songs are edited in Japanese script; saving rebuilds the romaji version from it.
@@ -1913,9 +2179,13 @@ class MainWindow(QMainWindow):
 
     def _seek_changed(self, value: int):
         # A click on the groove changes the value without emitting sliderMoved; a drag is handled
-        # on release by _seek_released, and the timer blocks its own updates.
+        # by sliderMoved for live scrubbing, and the timer blocks its own updates.
         if not self.seek.isSliderDown():
             self.player.setPosition(value)
+
+    def _seek_moved(self, value: int):
+        """Drag preview: the karaoke window does the same (FRB-13)."""
+        self.player.setPosition(value)
 
     def _seek_released(self):
         self.player.setPosition(self.seek.value())
@@ -2363,15 +2633,21 @@ class MainWindow(QMainWindow):
             thread.quit()
             if not thread.wait(3000):
                 # Never terminate: a scan is read-only and a worker process is cancelled through
-                # the queue's cancellation event. run() joins whatever outlives the window.
-                pass
+                # the queue's cancellation event. finish_shutdown joins whatever outlives the
+                # window with its own, bounded wait.
+                LOG.warning("background thread did not stop within 3 s; it will be joined at exit")
 
     def finish_shutdown(self):
         """Joins background threads after the event loop ends, so none is destroyed while running."""
         self._update_controller.wait_for_threads()
+        _join_background_jobs()
         for thread, _worker in list(self._threads):
             thread.quit()
-            thread.wait()
+            if not thread.wait(BACKGROUND_JOIN_TIMEOUT_MS):
+                # A stalled network share must not keep the process alive forever (FRB-07). There
+                # is no safe way to terminate a Python thread; leave it and say so in the log.
+                LOG.warning("background thread did not stop within %d s; leaving it behind",
+                            BACKGROUND_JOIN_TIMEOUT_MS // 1000)
 
     def closeEvent(self, e):
         if not self._confirm_discard():
@@ -2438,6 +2714,19 @@ def parse_command_line(argv: list[str]) -> CommandLine:
     return CommandLine(process=process, open_file=args.open_file, redo=bool(args.redo))
 
 
+def startup_message(cli: CommandLine) -> dict | None:
+    """The command this process hands to a running instance, with JSON-ready path strings (FRB-02)."""
+    if cli.process:
+        accepted, rejected = expand_audio_paths(cli.process)
+        return {"cmd": "process", "paths": [str(path) for path in accepted],
+                "rejected": rejected, "redo": cli.redo}
+    if cli.open_file:
+        opened, error = validate_audio_file(cli.open_file)
+        return ({"cmd": "open", "path": str(opened)} if opened is not None
+                else {"cmd": "report", "rejected": [error or f"{cli.open_file}: invalid path"]})
+    return None
+
+
 def run(argv: list[str] | None = None):
     argv = list(sys.argv if argv is None else argv)
     if len(argv) >= 2 and argv[0] == "--worker":
@@ -2453,7 +2742,12 @@ def run(argv: list[str] | None = None):
     has_program = bool(argv) and not argv[0].startswith("-")
     cli = parse_command_line(argv[1:] if has_program else argv)
     migrated = config.migrate_legacy_settings()
+    if migrated:
+        # The constants were computed at import, before the migration rewrote the settings;
+        # re-read them so this session uses the moved work/models folders (FRB-14).
+        config.refresh_folder_constants()
     app = QApplication(argv if has_program else [config.APP_NAME, *argv])
+    install_shutdown_joins()
     if migrated:
         QMessageBox.information(
             None, config.APP_NAME,
@@ -2480,14 +2774,7 @@ def run(argv: list[str] | None = None):
     if ipc_send(command) is not None:
         sys.exit(0)
 
-    startup = None
-    if cli.process:
-        accepted, rejected = expand_audio_paths(cli.process)
-        startup = {"cmd": "process", "paths": accepted, "rejected": rejected, "redo": cli.redo}
-    elif cli.open_file:
-        opened, error = validate_audio_file(cli.open_file)
-        startup = ({"cmd": "open", "path": opened} if opened is not None
-                   else {"cmd": "report", "rejected": [error or f"{cli.open_file}: invalid path"]})
+    startup = startup_message(cli)
 
     server = IpcServer()
     if not server.listen():

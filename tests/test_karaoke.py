@@ -303,3 +303,30 @@ def test_karaoke_window_plays_seeks_pauses_and_closes_a_silent_wav(tmp_path):
     finally:
         window.close()
         app.processEvents()
+
+
+def test_a_finished_track_reloads_the_karaoke_window_showing_it(monkeypatch, tmp_path):
+    """FRB-12: a queue redo refreshes the karaoke lyrics even when the main view shows another song."""
+    app = _app()
+    from lyricloom.app.main import MainWindow
+    from lyricloom.app.model import TrackRow
+
+    audio = _audio(tmp_path, "line")
+    other = tmp_path / "Artist" / "Album" / "02 - Other.flac"
+    other.write_bytes(b"x")
+    other.with_suffix(".lrc").write_text("[00:01.00]other\n", encoding="utf-8")
+    window = MainWindow(tmp_path)
+    try:
+        window.timer.stop()
+        window.audio = other
+        window.dirty = False
+        fake = FakeKaraoke(audio, audio.with_suffix(".lrc"))
+        window.karaoke_window = fake
+
+        window._track_finished(TrackRow(audio, "Artist", "Song", "done"))
+        assert fake.reloaded == 1
+    finally:
+        window.karaoke_window = None
+        window.dirty = False
+        window.close()
+        app.processEvents()

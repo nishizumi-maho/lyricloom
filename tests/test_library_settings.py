@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import sys
+import threading
 import time
 
 import pytest
@@ -135,6 +136,17 @@ def test_cached_rows_load_without_touching_the_files(tmp_path, monkeypatch):
     model.scan_cached(root)
     assert [r.path.name for r in model.load_cached_rows(root)] == ["a.flac"]
     assert model.load_cached_rows(tmp_path / "other") == []
+
+
+def test_scan_stops_between_files_when_the_background_cancel_is_set(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "WORK_ROOT", tmp_path / "work")
+    root = tmp_path / "lib"
+    _track(root, "a.flac")
+    _track(root, "b.flac")
+    cancel = threading.Event()
+    cancel.set()
+    assert model.scan_cached(root, cancel=cancel) == []
+    assert not model._cache_file(root).exists()   # a cancelled scan does not replace the cache
 
 
 def test_a_malformed_confidence_does_not_break_the_scan(tmp_path, monkeypatch):

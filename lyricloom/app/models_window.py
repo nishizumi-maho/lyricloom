@@ -6,6 +6,7 @@ worker's signals are queued to the window so no widget is touched from a worker 
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -23,6 +24,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogBut
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import config, downloads, models, runtime
+from .model_status import snapshot as model_status_snapshot
+
+LOG = logging.getLogger(__name__)
 
 STAGE_TITLES = {
     "transcribe": "Transcription",
@@ -98,6 +102,46 @@ def free_space_error(specs: list[models.ModelSpec], root: Path | None = None) ->
     return (f"Not enough free disk space for this download.\n\nModels folder: {root}\n"
             f"Needed: {runtime.human_size(required)}\nFree: {runtime.human_size(free)}\n\n"
             "Free some space (or choose another models folder in Settings) and try again.")
+
+
+class _StatusWorker(QObject):
+    """Checks model states off the GUI thread (FRB-04)."""
+
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, specs: list[models.ModelSpec]):
+        super().__init__()
+        self._specs = list(specs)
+        self.cancel = threading.Event()
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.done.emit(model_status_snapshot(self._specs, cancel=self.cancel))
+        except Exception as exc:  # noqa: BLE001 - shown as a status, never kills the thread
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+
+
+_STATUS_KEEP_ALIVE: list[tuple[QThread, _StatusWorker]] = []
+
+
+def join_status_checks(timeout_ms: int = 3000) -> None:
+    """Joins status threads that outlived their window, with a bounded wait (FRB-06)."""
+    for thread, worker in list(_STATUS_KEEP_ALIVE):
+        try:
+            if thread.isRunning():
+                worker.cancel.set()
+                thread.quit()
+                if not thread.wait(timeout_ms):
+                    LOG.warning("a model-status check did not stop within %d ms", timeout_ms)
+                    continue
+        except RuntimeError:
+            pass
+        try:
+            _STATUS_KEEP_ALIVE.remove((thread, worker))
+        except ValueError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -229,14 +273,20 @@ class AddCustomModelDialog(QDialog):
 
 
 class MissingModelsDialog(QDialog):
-    """Lists missing/corrupt models with their total size; Download now / Open Models / Cancel."""
+    """Lists missing/corrupt models with their total size; Download now / Open Models / Cancel.
 
-    def __init__(self, specs: list[models.ModelSpec], parent: QWidget | None = None):
+    It deliberately does not re-check the files: the caller already knows they are missing or
+    corrupt, and a status check here would hash a large model on the GUI thread (FRB-04).
+    """
+
+    def __init__(self, specs: list[models.ModelSpec], parent: QWidget | None = None,
+                 states: dict[str, str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("Models needed")
         self.setMinimumWidth(620)
         self.choice = "cancel"
         self.specs = list(specs)
+        states = states or {}
         layout = QVBoxLayout(self)
         text = QLabel("Some models the queued songs need are missing or corrupt. "
                       "The queue will not start until they are downloaded.")
@@ -248,7 +298,8 @@ class MissingModelsDialog(QDialog):
         listing.setHeaderLabels(["Model", "Status", "Size"])
         listing.setSelectionMode(QAbstractItemView.NoSelection)
         for spec in self.specs:
-            item = QTreeWidgetItem([spec.label, STATUS_LABELS.get(models.status(spec), "Missing"),
+            state = states.get(spec.id, "missing")
+            item = QTreeWidgetItem([spec.label, STATUS_LABELS.get(state, "Missing"),
                                     runtime.human_size(spec.total_size)])
             item.setToolTip(0, f"{spec.id} — {spec.description}")
             listing.addTopLevelItem(item)
@@ -368,6 +419,11 @@ class ModelsWindow(QDialog):
         self._close_when_finished = False
         self._loading_language = False
         self._items: dict[str, QTreeWidgetItem] = {}
+        self._states: dict[str, str] = {}
+        self._status_thread: QThread | None = None
+        self._status_worker: _StatusWorker | None = None
+        self._status_recheck = False
+        self._closing = False
         self._model_tab_buttons: list[QPushButton] = []
         self._language_combos: dict[str, QComboBox] = {}
 
@@ -514,14 +570,63 @@ class ModelsWindow(QDialog):
             self.tree.setCurrentItem(self._items[selected_id])
         self._load_language_choices()
         self._selection_changed()
+        self._refresh_statuses()
+
+    def _refresh_statuses(self) -> None:
+        """Starts one background sweep of the model states; the rows show a placeholder meanwhile."""
+        if self._status_thread is not None or self._thread is not None:
+            self._status_recheck = True
+            return
+        specs = models.all_specs()
+        if not specs:
+            return
+        thread = QThread(self)
+        worker = _StatusWorker(specs)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.done.connect(self._statuses_ready, Qt.QueuedConnection)
+        worker.failed.connect(self._statuses_failed, Qt.QueuedConnection)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(self._status_finished)
+        self._status_thread, self._status_worker = thread, worker
+        thread.start()
+
+    @Slot(object)
+    def _statuses_ready(self, states: dict[str, str]) -> None:
+        self._states.update(states)
+        for model_id, state in states.items():
+            spec = _find_spec(model_id)
+            item = self._items.get(model_id)
+            if spec is None or item is None:
+                continue
+            item.setText(2, self._status_text(spec))
+            self._style_status(item, spec)
+        self._selection_changed()
+
+    @Slot(str)
+    def _statuses_failed(self, message: str) -> None:
+        LOG.warning("model status check failed: %s", message)
+        self.status_label.setText("Could not check the models: " + message)
+
+    @Slot()
+    def _status_finished(self) -> None:
+        if self._status_worker is not None:
+            self._status_worker.cancel.set()
+        self._status_thread = None
+        self._status_worker = None
+        if self._status_recheck and not self._closing:
+            self._status_recheck = False
+            self._refresh_statuses()
 
     def _status_text(self, spec: models.ModelSpec) -> str:
         if spec.id in self._progress_pct:
             return f"Downloading {self._progress_pct[spec.id]}%"
-        try:
-            state = models.status(spec)
-        except Exception as exc:  # noqa: BLE001 - one unreadable model must still show its row
-            return f"Error: {type(exc).__name__}"
+        state = self._states.get(spec.id)
+        if state is None:
+            return "Checking…"
+        if state.startswith("error:"):
+            return f"Error: {state.split(':', 1)[1]}"
         return STATUS_LABELS.get(state, state.title())
 
     def _style_status(self, item: QTreeWidgetItem, spec: models.ModelSpec) -> None:
@@ -926,7 +1031,23 @@ class ModelsWindow(QDialog):
                 item.setText(3, ", ".join(used_for(spec)) or "—")
 
     # ------------------------------------------------------------------ closing
+    def showEvent(self, event) -> None:
+        self._closing = False
+        super().showEvent(event)
+
     def closeEvent(self, event) -> None:
+        self._closing = True
+        if self._status_thread is not None and self._status_thread.isRunning():
+            self._status_worker.cancel.set()
+            self._status_thread.quit()
+            if not self._status_thread.wait(3000):
+                LOG.warning("model status check still running; it will finish in the background")
+                thread, worker = self._status_thread, self._status_worker
+                self._status_thread = None
+                thread.setParent(None)
+                entry = (thread, worker)
+                if entry not in _STATUS_KEEP_ALIVE:
+                    _STATUS_KEEP_ALIVE.append(entry)
         if self._thread is not None:
             answer = QMessageBox.question(
                 self, "Cancel the download?",
