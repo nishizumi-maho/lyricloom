@@ -222,7 +222,8 @@ def test_skipped_plugin_notice_offers_the_musicbee_page(app, tmp_path, monkeypat
 
     from lyricloom import updater
 
-    config.set_setting(updater.PLUGIN_SKIP_NOTICE_SETTING, True)
+    # The setting holds the version the skipping install was installing: this build's.
+    config.set_setting(updater.PLUGIN_SKIP_NOTICE_SETTING, updater.VERSION)
     opened = []
     monkeypatch.setattr(QMessageBox, "exec", lambda self: 0)
     monkeypatch.setattr(QMessageBox, "clickedButton",

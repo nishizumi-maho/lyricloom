@@ -98,7 +98,7 @@ class FakeWindow(QMainWindow):
     def statusBar(self):
         return self._bar
 
-    def prepare_update(self, path, *, silent=True, relaunch=True):
+    def prepare_update(self, path, *, info=None, silent=True, relaunch=True):
         self.records.append(("prepare", _in_gui()))
         self.prepared.append((path, silent, relaunch))
         return False
@@ -291,4 +291,27 @@ def test_latest_version_message_says_there_is_nothing_to_install(app, monkeypatc
                         lambda *args, **kwargs: messages.append(args[2]))
     controller.check_done(None)
     assert messages == [f"You have the latest version (LyricLoom {dialogs.VERSION})."]
+    window.close()
+
+
+def test_skip_during_a_download_never_arms_the_skipped_version(app, tmp_path, monkeypatch):
+    """M4: "Skip this version" while the installer downloads cancels it and discards the file."""
+    window = FakeWindow()
+    controller = UpdateController(window)
+    monkeypatch.setattr(updater, "installer_available", lambda: True)
+    monkeypatch.setattr(updater, "install_mode", lambda: "auto")
+    info = _info()
+    controller._info = info
+    controller._download_info = info
+    controller._download_automatic = True
+    controller._download_thread = object()      # a download is running
+    path = tmp_path / "LyricLoom-Setup.exe"
+    path.write_bytes(b"installer")
+    controller._notice_skip()
+    assert controller._cancel.is_set()
+    controller._download_thread = None
+    controller.download_done(str(path))
+    assert controller._downloaded is None
+    assert not path.exists()
+    assert window.prepared == []
     window.close()
