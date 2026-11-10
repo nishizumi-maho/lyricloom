@@ -12,7 +12,8 @@ LyricLoom, under `musicbee/`.
 Close MusicBee first.
 
 **With the LyricLoom installer (Windows).** The LyricLoom setup has an optional task **Install the
-Starry Karaoke plugin for MusicBee**. It appears and is checked by default when MusicBee is installed,
+Starry Karaoke plugin for MusicBee**. It appears and is checked by default when MusicBee is installed (an earlier choice is kept when you
+reinstall or update),
 and copies the plugin into `%APPDATA%\MusicBee\Plugins`.
 
 **With the LyricLoom setup assistant.** Open **Help > Setup assistant… > MusicBee** and click
@@ -214,8 +215,8 @@ LyricLoom's own network use (for example, the default update check or cloud tran
 user enables it) is described in LyricLoom's documentation.
 
 A silent LyricLoom update never closes MusicBee. When MusicBee is running, that update skips the
-plugin files and the next LyricLoom start explains how to update the plugin from the setup assistant
-or the release ZIP.
+plugin files; the next LyricLoom start explains this and offers to open the setup assistant's MusicBee
+page, where you can update the plugin after closing MusicBee (the release ZIP works too).
 
 ## Video recording
 

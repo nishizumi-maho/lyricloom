@@ -578,8 +578,8 @@ class MainWindow(QMainWindow):
             self, "Welcome to LyricLoom",
             "Choose the folder that contains your music. LyricLoom scans its subfolders and writes "
             "the .lrc next to each audio file.\n\n"
-            "The first song also downloads the vocal separator (about 0.9 GB). You can manage all "
-            "models later in Help > Models.")
+            "LyricLoom never downloads a model while it processes songs: it offers the suggested "
+            "models next, and Help > Models manages them at any time.")
         self.choose_library()
         QTimer.singleShot(200, self._offer_models)
 

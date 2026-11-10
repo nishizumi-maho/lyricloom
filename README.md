@@ -87,8 +87,8 @@ include the large neural models; LyricLoom downloads those only after you approv
 1. **Install.** Download `LyricLoom-Setup-2.1.0.exe` and run it. The installer is per-user: it
    installs under `%LOCALAPPDATA%\Programs\LyricLoom`, needs no administrator rights and creates a
    Start-menu shortcut. The desktop shortcut is optional and unchecked. If MusicBee is installed,
-   the optional **Install the Starry Karaoke plugin for MusicBee** task is offered and checked; the
-   setup assistant can install or update it later as well. On the portable ZIP, extract it to a
+   the optional **Install the Starry Karaoke plugin for MusicBee** task is offered and checked (an earlier
+   choice is kept when you reinstall or update); the setup assistant can install or update it later as well. On the portable ZIP, extract it to a
    writable folder and run `LyricLoom.exe`. SmartScreen help is in
    [docs/install-windows.md](docs/install-windows.md#if-smartscreen-appears).
 2. **Run the setup assistant.** The first start opens **LyricLoom setup assistant**. Choose your
@@ -96,7 +96,7 @@ include the large neural models; LyricLoom downloads those only after you approv
    works everywhere; the assistant can reuse or create a WSL GPU environment for AMD/NVIDIA, and it
    can install a faster whisper.cpp build. See
    [docs/install-windows.md](docs/install-windows.md#the-setup-assistant-page-by-page).
-3. **Get the models.** The assistant's **Models** page lists the suggested models (about 5.4 GB)
+3. **Get the models.** The assistant's **Models** page lists the suggested models (about 5 GB)
    and downloads only the ones you approve to `%LOCALAPPDATA%\LyricLoom\models`. You can skip them
    and finish later from **Help > Models…**. A model is never downloaded while a song is processing.
 4. **Process a song.** Select the track (or several) in the library and click **Process selected**,
@@ -288,7 +288,7 @@ downloads them explicitly; they are not stored in Git. Exact paths and offline i
 | LyricsAlignment-MTL (`checkpoint_MTL`) | English singing model | 66 MB | MIT (upstream) | Yes |
 | NLTK data | English singing model | 22 MB | Per NLTK data package | With MTL |
 
-The suggested defaults total about **5.4 GB**. Allow extra space for the work cache and kept vocal
+The suggested defaults total about **5 GB**. Allow extra space for the work cache and kept vocal
 stems. The MMS_FA weights are non-commercial; see **[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)**
 before commercial use.
 
