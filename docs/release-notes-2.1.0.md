@@ -35,7 +35,7 @@ window; the optional MusicBee plugin displays the same files in a starry karaoke
 | `SHA256SUMS` and per-file `*.sha256` | Checksums for every asset |
 
 The Windows installer includes the app, its worker, `whisper-cli` and the plugin files. It does not
-include the large neural models. The setup assistant offers the suggested models (about 5.4 GB) on
+include the large neural models. The setup assistant offers the suggested models (about 5 GB) on
 first start; **Help > Models…** manages them later.
 
 ## Upgrade notes

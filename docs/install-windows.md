@@ -2,8 +2,9 @@
 
 LyricLoom 2.1.0 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the
 application, the worker, `whisper-cli` and the optional Starry Karaoke MusicBee plugin; you do not
-need Python, CUDA or a separate Whisper installation. The large models are downloaded on first use
-or later from **Help > Models…**.
+need Python, CUDA or a separate Whisper installation. The large models are not included: the setup assistant offers
+them on first start and **Help > Models…** downloads them at any time; processing never downloads
+a model.
 
 There are two ways to run the app:
 
@@ -37,7 +38,7 @@ The interface is **English-only** in 2.1.0.
    `%LOCALAPPDATA%\Programs\LyricLoom`, does not request administrator rights and does not create
    file associations. The desktop shortcut is optional and unchecked by default.
 5. If MusicBee is detected, the optional **Install the Starry Karaoke plugin for MusicBee** task is
-   shown and checked. Clear it if you do not want the plugin. Setup asks you to close MusicBee if it
+   shown and checked (Setup keeps your earlier choice when you reinstall or update). Clear it if you do not want the plugin. Setup asks you to close MusicBee if it
    has the plugin files open; it does not restart MusicBee for you.
 6. Start **LyricLoom** from the Start menu or the desktop shortcut.
 
@@ -167,7 +168,7 @@ The assistant does not run two setup jobs at once. If a job is still running, fi
 ### Models
 
 The page lists the suggested model for every stage, its size and its current state. The suggested
-set totals about 5.4 GB. **Download now** fetches only the missing or incomplete files, shows byte
+set totals about 5 GB. **Download now** fetches only the missing or incomplete files, shows byte
 progress and keeps a partial file so a dropped download resumes. **Cancel** stops after the current
 chunk; **Later** moves on without downloading. **Open Models window…** opens the full manager
 described in [docs/models.md](models.md).
@@ -205,7 +206,8 @@ LyricLoom works without MusicBee; this page is optional.
 ### Ready
 
 A summary of the music folder, acceleration, model readiness, update/cloud choices and MusicBee
-state. Click **Finish** to save the assistant result and open the main window. You can reopen the
+state. Each page saves its choices when you click **Next**; **Finish** marks the setup as complete and
+opens the main window. You can reopen the
 assistant later from **Help > Setup assistant…** or jump to its Acceleration page from
 **Settings > Acceleration > Change…**.
 
@@ -329,7 +331,7 @@ LyricLoom writes everything to `%LOCALAPPDATA%\LyricLoom` unless you override it
 | What | Default Windows path | Notes |
 |---|---|---|
 | Settings | `%LOCALAPPDATA%\LyricLoom\settings.json` | Library, vocals folder, Japanese script, model choices, update/install mode and optional WSL settings. |
-| Models | `%LOCALAPPDATA%\LyricLoom\models` | About 5.4 GB when the suggested models are present. |
+| Models | `%LOCALAPPDATA%\LyricLoom\models` | About 5 GB when the suggested models are present. |
 | Work cache | `%LOCALAPPDATA%\LyricLoom\work` | Per-track JSON caches, 16 kHz vocal copies and `log.txt`. Safe to delete when the app is closed. |
 | Kept vocals | `%LOCALAPPDATA%\LyricLoom\vocals` | Lossless FLAC vocal stems and their manifests, outside the music library. Safe to delete; they are recreated. |
 | Scan cache | `%LOCALAPPDATA%\LyricLoom\scan-*.json` | One small file per scanned library. Safe to delete. |
@@ -388,9 +390,10 @@ normally.
   **Later** keeps the download and installs it when you close LyricLoom normally.
 - **Ask before installing**: the notice appears first. **Install now** downloads with progress and
   starts the interactive installer.
-- **Only notify me**: the bar links to the release page; nothing is downloaded. On Linux the bar
-  also offers **Download for Linux** for the release tarball; on Linux and in a source checkout
-  nothing is installed automatically.
+- **Only notify me**: the bar links to the release page; nothing is downloaded.
+
+On Linux, whatever the mode, the bar links to the release page and offers **Download for Linux**
+for the release tarball. On Linux and in a source checkout nothing is installed automatically.
 
 A downloaded update is only run after the updater verifies its published SHA-256. The updater
 refuses an installer with no checksum, with a wrong checksum, or from anywhere outside this
@@ -402,8 +405,8 @@ Closing the window while a queue is running also asks whether to stop after the 
 now or keep working.
 
 The automatic (silent) update never closes MusicBee. If MusicBee is open, the optional Starry
-Karaoke plugin is skipped for that run; the next LyricLoom start tells you and asks you to close
-MusicBee and update the plugin from the setup assistant or the release ZIP.
+Karaoke plugin is skipped for that run; the next LyricLoom start tells you and offers to open the
+setup assistant's MusicBee page; close MusicBee and update the plugin there (or from the release ZIP).
 
 You can also update manually:
 

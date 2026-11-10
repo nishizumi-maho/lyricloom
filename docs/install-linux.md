@@ -280,7 +280,7 @@ The icon name `audio-x-generic` is a standard themed icon. LyricLoom does not sh
 
 ## Download the models
 
-The release tarball and the source/pipx app open the setup assistant on first start; its **Models** page offers the missing files and downloads them to `~/.local/share/lyricloom/models` by default. **Help > Models…** opens the full Models window later. The suggested download is about 5.4 GB:
+The release tarball and the source/pipx app open the setup assistant on first start; its **Models** page offers the missing files and downloads them to `~/.local/share/lyricloom/models` by default. **Help > Models…** opens the full Models window later. The suggested download is about 5 GB:
 
 | Model | Size |
 |---|---:|
