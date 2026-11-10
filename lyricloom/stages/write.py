@@ -37,6 +37,13 @@ def write_lrc(audio: Path, doc: LrcDoc) -> Path:
 # Japanese needs kana.  Han characters alone are also Chinese; script variants are only written
 # when the resolved language is Japanese (R1-03).
 _JAPANESE = re.compile(r"[\u3040-\u30ff\u31f0-\u31ff\uff66-\uff9f]")
+_TAG_UNSAFE = re.compile(r"[\]\r\n]+")
+
+
+def _tag_safe(value) -> str:
+    """A title/artist value that cannot break out of its ``[ti:...]``/``[ar:...]`` tag.  A semicolon
+    is left alone: it is unsafe only in the ``#models``/``#warning`` values, not in a title."""
+    return _TAG_UNSAFE.sub(" ", str(value)).strip()
 
 
 def japanese_path(audio: Path) -> Path:
@@ -48,9 +55,8 @@ def romaji_path(audio: Path) -> Path:
 
 
 def _replace(path: Path, doc: LrcDoc) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(format_lrc(doc).encode("utf-8"))
-    os.replace(tmp, path)
+    """Replaces a script variant, keeping the previous file as ``.bak`` (FR-A-05)."""
+    _replace_bytes_with_backup(path, format_lrc(doc).encode("utf-8"))
 
 
 def _replace_bytes_with_backup(path: Path, data: bytes) -> None:
@@ -142,15 +148,18 @@ def original_path(audio: Path) -> Path:
 
 def write_original(audio: Path, meta: dict, official: Candidate) -> Path:
     """Keeps the official lyric as found (its own timing when it has one, else plain text) in
-    `<audio stem>.original.lrc`, so it survives the enhanced .lrc and any edit made to it."""
+    `<audio stem>.original.lrc`, so it survives the enhanced .lrc and any edit made to it.
+
+    A user may have hand-corrected the fetched lyric, so a rewrite keeps a ``.bak`` copy; title and
+    artist are sanitized like every other tag (FR-A-05, FR-A-06)."""
+    safe_meta = {key: _tag_safe(value) if key in ("ti", "ar") else value
+                 for key, value in meta.items()}
     if official.synced:
         lines = [Line(l.start_ms, l.segments if len(l.segments) > 1 else [Segment(l.text, None, None)])
                  for l in official.synced]
-        body = format_lrc(LrcDoc(meta, lines))
+        body = format_lrc(LrcDoc(safe_meta, lines))
     else:
-        body = format_lrc(LrcDoc(meta, [])) + official.text.strip() + "\n"
+        body = format_lrc(LrcDoc(safe_meta, [])) + official.text.strip() + "\n"
     path = original_path(audio)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(body.encode("utf-8"))
-    os.replace(tmp, path)
+    _replace_bytes_with_backup(path, body.encode("utf-8"))
     return path

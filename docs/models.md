@@ -378,7 +378,9 @@ If you cannot use the download command, put the files here:
 | NLTK zips or extracted corpora | `<models>/nltk/` or an existing `NLTK_DATA` directory |
 
 The MMS checkpoint filename is the one torchaudio expects; keep it named `model.pt`. Files placed by
-hand do not have a `.verified.json` sidecar, so the first status check hashes them once.
+hand have no `.verified.json` sidecar yet. When the size matches they show as `unverified` and are
+used at once; **Verify** in the Models window (or `lyricloom models verify`) hashes them once and
+marks them `ready`.
 
 ### Choosing whisper-cli
 
@@ -394,6 +396,11 @@ build. The `LYRICLOOM_WHISPER_CLI` environment variable does the same. Precedenc
 The setup assistant's **Faster transcription** choice points `whisper_cli` at an installed BLAS or
 cuBLAS build. **Use the bundled whisper.cpp** clears the setting again. The binary must exist and
 support the model file. `lyricloom doctor` prints the path in use and whether it exists.
+
+`LYRICLOOM_WHISPER_MODEL` still works as a 2.0 compatibility override. A catalog model id, a
+catalog file name in the models folder, or the path of another existing `.bin` file selects the
+transcription model for every song without a per-song choice, ahead of the per-language choices.
+An unusable value is ignored with a warning in the log. Prefer the model catalog for new setups.
 
 Any whisper.cpp-compatible GGML `.bin` file can be registered as a custom model with
 `lyricloom models add transcribe <path>`.
@@ -417,8 +424,9 @@ gigabytes every time. A state is one of:
 - `ready`: the file is present and verified;
 - `missing`: the file is not there;
 - `corrupt`: the size or digest does not match;
-- `unverified`: the file exists but its digest has not been checked yet (for example a hand-copied
-  custom file).
+- `unverified`: the file has the expected size but its digest has not been checked yet (for example
+  a file copied by hand, or a model downloaded by LyricLoom 2.0). Processing accepts it; verifying
+  it hashes it once and makes it `ready`.
 
 `models repair <id>` deletes that catalog model's files, sidecar and partial download, then downloads
 them again. It refuses custom models because those are your own files.

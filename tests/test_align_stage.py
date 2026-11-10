@@ -63,6 +63,27 @@ def test_unsupported_scripts_get_line_timing_review_and_a_note(monkeypatch, text
     assert all(s.start_ms is None for s in res.lines[0].segments)
 
 
+def test_a_successful_singing_alignment_does_not_report_the_ctc_model(monkeypatch):
+    """FR-A-04: [#models] must name the model that actually timed the words."""
+    def good_mtl(vocals, seg_texts, cancel=None):
+        out, t = [], 1000
+        for line in seg_texts:
+            row = []
+            for _ in line:
+                row.append(Segment("", t, t + 300, 1.0))
+                t += 400
+            out.append(row)
+        return out
+
+    monkeypatch.setattr(stage, "align_lines_mtl", good_mtl)
+    monkeypatch.setattr(stage.models, "singing_ready", lambda lang=None: True)
+    tr = Transcript("en", [Word("hello", 1000, 1300, 0.9), Word("world", 1400, 1700, 0.9)])
+    res = stage.align(META, Path("."), Candidate("netease", "hello world"), tr,
+                      Path("v16.wav"), Path("v.wav"))
+    assert res.models_used.get("singing") == "singing-mtl"
+    assert "align" not in res.models_used
+
+
 def test_a_bad_singing_model_alignment_falls_back_to_ctc_and_review(monkeypatch):
     calls = []
 
@@ -83,4 +104,6 @@ def test_a_bad_singing_model_alignment_falls_back_to_ctc_and_review(monkeypatch)
     res = stage.align(META, Path("."), Candidate("netease", "texto inventado para"), tr,
                       Path("v16.wav"), Path("v.wav"))
     assert calls == ["ctc"]
+    assert res.models_used.get("align") == "align-mms-fa"
+    assert "singing" not in res.models_used
     assert res.review is True and res.notes and "sanity check" in res.notes[0]

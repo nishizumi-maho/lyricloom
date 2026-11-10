@@ -211,19 +211,36 @@ STAGE_VERSIONS = {"lyrics": "5", "separate": "4", "transcribe": "3",
 def _legacy_cache_ok(stage: str, required: list[model_catalog.ModelSpec] | None) -> bool:
     """A 2.0 stage cache has no ``_inputs`` fingerprint.  It may only be accepted when this run
     resolves the stage's catalog-default models and the user did not override one for this track;
-    otherwise the cache may have been made with something else and must be recomputed."""
+    otherwise the cache may have been made with something else and must be recomputed.
+
+    The transcribe stage is stricter: a 2.0 cache was made with the model named by
+    ``LYRICLOOM_WHISPER_MODEL`` (or large-v3 when unset), so accepting it for any other model would
+    stamp it with a model that never ran (FR-A-01)."""
     if stage in config.active_models():
         return False
-    return all(spec.default and not spec.custom for spec in (required or []))
+    specs = required or []
+    if stage == "transcribe":
+        legacy = model_catalog.legacy_whisper_model()
+        return legacy is not None and bool(specs) and specs[0].id == legacy.id
+    return all(spec.default and not spec.custom for spec in specs)
+
+
+def _separate_files_ok(sep: dict) -> bool:
+    """A cached separation is only reusable while the wav files it names still exist (FR-A-02)."""
+    return all(Path(sep.get(key) or "").is_file() for key in ("vocals", "vocals16k"))
 
 
 def _cached(audio: Path, stage: str, fresh: set[str], compute: Callable[[], dict],
             inputs: dict | None = None,
-            required: list[model_catalog.ModelSpec] | None = None) -> dict:
+            required: list[model_catalog.ModelSpec] | None = None,
+            valid: Callable[[dict], bool] | None = None) -> dict:
     version = STAGE_VERSIONS[stage]
     legacy_ok = _legacy_cache_ok(stage, required)
     data = (None if stage in fresh else
             cache.load(audio, stage, version, inputs=inputs, legacy_ok=legacy_ok))
+    if data is not None and valid is not None and not valid(data):
+        _log(audio, f"the cached {stage} stage points at files that no longer exist; recomputing it")
+        data = None
     if data is None:
         # Never let a stage download a model on its own: check the resolved files first and turn a
         # miss into a typed, actionable failure (R3-03).
@@ -237,8 +254,22 @@ def _model_inputs(stage: str, spec: model_catalog.ModelSpec, **params) -> dict:
     return {stage: model_catalog.fingerprint(spec), **params}
 
 
+def _ensure_align_ready(lang: str) -> None:
+    """The MMS checkpoint is only needed when CTC actually runs.  For an English song whose singing
+    model and NLTK data are ready, the align stage uses that model instead, so demanding the 1.2 GB
+    fallback up front would block a track that never loads it (FR-A-04)."""
+    if lang == "en" and model_catalog.singing_ready(lang):
+        return
+    model_catalog.ensure_ready([config.resolve_model("align", lang)])
+
+
 def _tag_safe(value: str) -> str:
     return re.sub(r"[\]\r\n;]+", " ", str(value)).strip()
+
+
+def _text_tag_safe(value: str) -> str:
+    """Title/artist values may keep semicolons; only a bracket or a line break could break [ti:]."""
+    return re.sub(r"[\]\r\n]+", " ", str(value)).strip()
 
 
 def _write(audio: Path, meta, chosen: Candidate, result,
@@ -247,7 +278,7 @@ def _write(audio: Path, meta, chosen: Candidate, result,
            lang: str | None = None, lyrics_empty: bool = False) -> str:
     """Writes the .lrc; returns the status. Low-confidence lines are listed in [#review:...]."""
     notes = [n for n in (notes or []) if n]
-    tags = {"ti": meta.title, "ar": meta.artist, "re": tag(VERSION),
+    tags = {"ti": _text_tag_safe(meta.title), "ar": _text_tag_safe(meta.artist), "re": tag(VERSION),
             "#source": f"{chosen.source} conf:{result.track_conf:.2f}", "#engine": ENGINE_VERSION}
     if lang:
         tags["#language"] = _tag_safe(lang)
@@ -291,12 +322,14 @@ def realign(audio: Path, text: str, source: str = "manual",
                                    device=config.SEPARATOR_DEVICE, wsl=config.SEPARATOR_WSL_ENABLED)
         tr_inputs = _model_inputs("transcribe", tr_spec, separator=sep_inputs["separator"],
                                   lang=whisper_lang, prompt=prompt)
-        sep = cache.load(audio, "separate", STAGE_VERSIONS["separate"], inputs=sep_inputs,
-                         legacy_ok=_legacy_cache_ok("separate", [sep_spec]))
         tr = cache.load(audio, "transcribe", STAGE_VERSIONS["transcribe"], inputs=tr_inputs,
                         legacy_ok=_legacy_cache_ok("transcribe", [tr_spec]))
-        if sep is None or tr is None:
+        if tr is None:
             raise RuntimeError("process the track once before realigning it")
+        # Recompute a separation whose named wav files were deleted, instead of handing whisper /
+        # the aligner paths that no longer exist (FR-A-02).
+        sep = _cached(audio, "separate", set(), lambda: _separate(audio, work, cancel),
+                      inputs=sep_inputs, required=[sep_spec], valid=_separate_files_ok)
         whisper = _transcript_from_json(tr)
         hallucinated = looks_hallucinated(whisper, meta.duration_s)
         notes: list[str] = []
@@ -307,8 +340,7 @@ def realign(audio: Path, text: str, source: str = "manual",
         chosen = Candidate(source, text.strip())
         lang = lyric_lang(meta, whisper)
         config.set_active_language(lang)
-        align_spec = config.resolve_model("align", lang)
-        model_catalog.ensure_ready([align_spec])
+        _ensure_align_ready(lang)
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
         notes.extend(result.notes)
         used = {"transcribe": tr_spec.id, "separate": sep_spec.id, **result.models_used}
@@ -415,7 +447,7 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
         sep_inputs = _model_inputs("separator", sep_spec, overlap=config.SEPARATOR_OVERLAP,
                                    device=config.SEPARATOR_DEVICE, wsl=config.SEPARATOR_WSL_ENABLED)
         sep = _cached(audio, "separate", fresh, lambda: _separate(audio, work, cancel),
-                      inputs=sep_inputs, required=[sep_spec])
+                      inputs=sep_inputs, required=[sep_spec], valid=_separate_files_ok)
         device = sep.get("device", "")
         checkpoint()
         try:
@@ -492,8 +524,7 @@ def process(audio: Path, force: bool = False, only_stage: str | None = None,
                     inputs=extra_inputs, required=[extra_spec]))
             chosen = _transcript_candidate(fused, lang)
         stage("align")
-        align_spec = config.resolve_model("align", lang)
-        model_catalog.ensure_ready([align_spec])
+        _ensure_align_ready(lang)
         result = align(meta, work, chosen, anchor, Path(sep["vocals16k"]), Path(sep["vocals"]), cancel=cancel)
         notes.extend(result.notes)
         checkpoint()

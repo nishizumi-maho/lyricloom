@@ -8,7 +8,7 @@ counts as "MusicBee is installed" and on which files may be replaced:
 * ``RomajiCore.dll`` and ``LibNMeCab.dll`` are shared with the Desktop Lyrics (Romaji) plugin, so
   they are replaced only when the bundled copy is newer;
 * the ``RomajiLyrics\\IpaDic`` dictionary is large and stable, so it is copied only when it is
-  missing.
+  missing; any other file under ``RomajiLyrics`` belongs to this plugin and is replaced.
 
 Nothing here imports Qt.  Every external effect (the process list, the registry, the file version)
 is injectable so tests never need MusicBee, a real DLL or a Windows display.
@@ -351,7 +351,10 @@ def install_plugin(source: Path | str | None = None, destination: Path | str | N
         target = _safe_target(destination_dir, relative)
         parts = relative.parts
         shared = len(parts) == 1 and parts[0] in SHARED_DLLS
-        dictionary = bool(parts) and parts[0].lower() == DICTIONARY_FOLDER.lower()
+        # Only the shared IpaDic dictionary belongs to Desktop Lyrics (Romaji); a new file that a
+        # future plugin adds elsewhere under RomajiLyrics must still be installed (FR-A-10).
+        dictionary = (len(parts) >= 2 and parts[0].lower() == DICTIONARY_FOLDER.lower()
+                      and parts[1].lower() == "ipadic")
         if shared:
             if target.is_file() and not newer_version(version_getter(path), version_getter(target)):
                 skipped.append(relative)
@@ -363,10 +366,16 @@ def install_plugin(source: Path | str | None = None, destination: Path | str | N
             if progress:
                 progress(str(relative), index, len(files))
             continue
+        part = target.with_name(target.name + ".part")
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, target)
+            shutil.copy2(path, part)   # a crash or antivirus action never truncates the old DLL
+            os.replace(part, target)
         except OSError as exc:
+            try:
+                part.unlink()
+            except OSError:
+                pass
             raise MusicBeeError(f"could not copy {relative} to {target}: {exc}") from exc
         copied.append(relative)
         if progress:

@@ -251,6 +251,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     results = runner.process_all(runner.find_audio(path), args.force, args.stage, on_result=_show,
                                  allow_cloud=False if args.no_cloud else None)
+    if not results:
+        print(f"error: no audio files found under {path}. The work cache, the vocals folder and "
+              "*.vocals.flac files are excluded from a scan.", file=sys.stderr)
+        return 2
     counts = Counter(r.status for r in results)
     print("summary: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     if counts.get("failed"):
