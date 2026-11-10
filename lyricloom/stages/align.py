@@ -26,7 +26,11 @@ log = logging.getLogger(__name__)
 # Confidence of a line timed by the singing model that Whisper did not hear: below
 # REVIEW_THRESHOLD, so it is listed for review.
 MTL_UNCONFIRMED = 0.55
-MTL_MARGIN_MS = 500
+# A singing-model line agrees with Whisper when it starts within this distance of Whisper's anchor
+# and stays inside its block with the same slack; at least this share of lines must agree.  On a
+# real song 85% agreed; shifted or drifting alignments agreed on 0-13% (2026-11-10 measurements).
+MTL_ANCHOR_TOLERANCE_MS = 2000
+MTL_MIN_AGREEMENT = 0.75
 
 _NOISE = re.compile(r"[\s\W_]+", re.UNICODE)
 
@@ -92,16 +96,22 @@ def _block_for_line(bs: list[Block], line_idx: int) -> Block | None:
 
 def _mtl_problems(seg_texts: list[list[str]], aligned: list[list[Segment | None]],
                   bs: list[Block], anchors: list[Anchor]) -> list[str]:
-    """Sanity-checks the singing model's timing before it is trusted (R1-16)."""
+    """Sanity-checks the singing model's timing before it is trusted (R1-16).
+
+    The structure must be sound (one row per line, one timing per word, words in order and with a
+    duration), and most lines must start near where Whisper heard them and stay in their block.
+    The anchors and blocks come from Whisper's word timing, which on sung vocals is often several
+    hundred ms early (seconds on a held intro note), so one disagreeing line is no evidence against
+    the singing model; a broken alignment (lines shifted, a drift) disagrees on most lines."""
     problems: list[str] = []
     if len(aligned) != len(seg_texts):
         return [f"returned {len(aligned)} lines for {len(seg_texts)}"]
     anchor_at = {a.line_idx: a for a in anchors}
+    checked = agreeing = 0
     for i, (line, texts) in enumerate(zip(aligned, seg_texts)):
         if len(line) != len(texts):
             problems.append(f"line {i} has {len(line)} words for {len(texts)} segments")
             continue
-        block = _block_for_line(bs, i)
         timed = [s for s in line if s is not None and s.start_ms is not None]
         if not timed:
             continue
@@ -110,17 +120,22 @@ def _mtl_problems(seg_texts: list[list[str]], aligned: list[list[Segment | None]
             if s.end_ms is None or s.start_ms >= s.end_ms:
                 problems.append(f"line {i} has a word with no duration")
                 continue
-            if block is not None and (s.start_ms < block.start_ms - MTL_MARGIN_MS
-                                      or s.end_ms > block.end_ms + MTL_MARGIN_MS):
-                problems.append(f"line {i} is outside its block")
             if prev_start is not None and s.start_ms <= prev_start:
                 problems.append(f"line {i} is not monotonic")
             if prev_end is not None and s.start_ms < prev_end:
                 problems.append(f"line {i} has overlapping words")
             prev_start, prev_end = s.start_ms, s.end_ms
-        anchor = anchor_at.get(i)
-        if anchor is not None and abs(timed[0].start_ms - anchor.start_ms) > MTL_MARGIN_MS:
-            problems.append(f"line {i} does not agree with the anchor")
+        block, anchor = _block_for_line(bs, i), anchor_at.get(i)
+        if block is None and anchor is None:
+            continue
+        start, end = timed[0].start_ms, max(s.end_ms or s.start_ms for s in timed)
+        near_anchor = anchor is None or abs(start - anchor.start_ms) <= MTL_ANCHOR_TOLERANCE_MS
+        in_block = block is None or (block.start_ms - MTL_ANCHOR_TOLERANCE_MS <= start
+                                     and end <= block.end_ms + MTL_ANCHOR_TOLERANCE_MS)
+        checked += 1
+        agreeing += near_anchor and in_block
+    if checked and agreeing < MTL_MIN_AGREEMENT * checked:
+        problems.append(f"only {agreeing} of {checked} lines agree with where Whisper heard them")
     return problems[:6]
 
 

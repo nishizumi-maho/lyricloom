@@ -186,9 +186,13 @@ Optional AssemblyAI is called only when the `assemblyai_enabled` setting is on, 
 4. **Backend.**
    - **English + full-rate vocals + MTL available:** `align/mtl.align_lines_mtl` runs LyricsAlignment-MTL. This is the preferred English path.
    - **Everything else, or MTL failure:** `align/ctc.align_blocks` runs torchaudio MMS_FA CTC alignment per block.
-   - MTL failure is caught and logged; processing falls back to CTC. MTL timing is also sanity-checked
-     against its block, word order and nearby anchors; a failed check falls back to CTC, adds a
-     warning note and marks the track review.
+   - MTL failure is caught and logged; processing falls back to CTC. MTL timing is also sanity-checked:
+     every line must have one timing per word, in order and with a duration, and at least 75% of the
+     lines must start within 2 s of their Whisper anchor and stay inside their block with the same
+     slack (`MTL_ANCHOR_TOLERANCE_MS`, `MTL_MIN_AGREEMENT`). Whisper's word timing on sung vocals is
+     often several hundred ms early, so single lines may disagree; a shifted or drifting alignment
+     disagrees on most lines. A failed check falls back to CTC, adds a warning note and marks the
+     track review.
 5. **Per-word results.** CTC returns a start, end and score per segment. MTL returns start/end; punctuation segments have no acoustic word and stay `None`.
 6. **Ready-made timing.** `merge_presync` compares each line with a source's synced line by normalized text and character offsets. Word-level presync is applied when the mean difference is at most 150 ms. A plain LRC source with only a line timestamp moves the line start when it agrees with ours; word starts from CTC/MTL are kept. Otherwise our timing is kept.
 7. **Refine.** `align/refine.py` enforces strictly increasing starts, no overlaps, no times past the track end, and collapses any line that is only partly aligned into a single line-timed text segment.
