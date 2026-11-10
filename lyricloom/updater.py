@@ -26,7 +26,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
-from . import VERSION, config
+from . import VERSION, config, musicbee
 
 LOG = logging.getLogger(__name__)
 
@@ -183,12 +183,20 @@ def check_enabled() -> bool:
     return check_choice() is not False
 
 
+def setup_complete() -> bool:
+    """True once the setup assistant finished, i.e. the owner has seen the update choice."""
+    return bool(config.setting("setup_complete", False))
+
+
 def should_check_on_startup() -> bool:
     """Whether the app may contact GitHub automatically (start-up and the 24-hour timer).
 
+    Nothing is requested before the setup assistant finished: the owner must have seen the
+    update choice first. A manual Help > Check for updates does not go through this gate.
     The offscreen guard keeps GUI tests from making a real request; it is not a user setting.
     """
-    return check_enabled() and os.environ.get("QT_QPA_PLATFORM") != "offscreen"
+    return (check_enabled() and setup_complete()
+            and os.environ.get("QT_QPA_PLATFORM") != "offscreen")
 
 
 def should_check_automatically() -> bool:
@@ -225,14 +233,20 @@ def skip_version(version: str) -> None:
 
 
 def take_plugin_skip_notice() -> bool:
-    """True once after a silent update skipped the MusicBee plugin because MusicBee was open."""
-    if not config.setting(PLUGIN_SKIP_NOTICE_SETTING, False):
+    """True once after a silent update to this very version skipped the installed MusicBee plugin.
+
+    The setting holds the version the skipping install was going to install. The notice is due
+    only when this build is that version (so the install really happened); the setting is cleared
+    either way, including an old boolean value.
+    """
+    target = config.setting(PLUGIN_SKIP_NOTICE_SETTING, "")
+    if target in (None, "", False):
         return False
     try:
-        config.set_setting(PLUGIN_SKIP_NOTICE_SETTING, False)
+        config.set_setting(PLUGIN_SKIP_NOTICE_SETTING, "")
     except OSError as exc:
         LOG.warning("could not clear the MusicBee plugin notice: %s", exc)
-    return True
+    return isinstance(target, str) and target.strip().lstrip("vV") == VERSION
 
 
 def cleanup_stale_downloads() -> None:
@@ -283,20 +297,28 @@ def open_tarball_page(info: UpdateInfo) -> bool:
 def musicbee_running() -> bool:
     """Whether MusicBee is running, so a silent install must not ask Restart Manager to close it.
 
-    A failed process query is treated as "possibly running": skipping the plugin is safer than
-    letting Restart Manager close the user's MusicBee.
+    A failed process query (it cannot start, times out or exits with an error) is treated as
+    "possibly running": skipping the plugin is safer than letting Restart Manager close the
+    user's MusicBee. ``tasklist.exe`` is called by its absolute System32 path, never via PATH.
     """
     if sys.platform != "win32":
         return False
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    tasklist = str(Path(system_root) / "System32" / "tasklist.exe")
     try:
         result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq MusicBee.exe", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=10, check=False,
+            [tasklist, "/FI", "IMAGENAME eq MusicBee.exe", "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=10, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         LOG.warning("could not check whether MusicBee is running: %s", exc)
         return True
-    return "musicbee.exe" in result.stdout.lower()
+    if result.returncode != 0:
+        LOG.warning("could not check whether MusicBee is running: tasklist exited with %s",
+                    result.returncode)
+        return True
+    return "musicbee.exe" in (result.stdout or b"").decode(errors="replace").lower()
 
 
 def _tarball_asset(assets: dict) -> tuple[str, str]:
@@ -430,22 +452,60 @@ def download(info: UpdateInfo, progress: Progress | None = None,
     return destination
 
 
-def _remember_plugin_skip() -> None:
-    """Remember that the next start must explain why the MusicBee plugin was not updated."""
+def _plugin_installed() -> bool:
+    """Whether Starry Karaoke is in MusicBee's Plugins folder (the setup assistant's own rule)."""
     try:
-        config.set_setting(PLUGIN_SKIP_NOTICE_SETTING, True)
+        return (musicbee.plugins_dir() / musicbee.PLUGIN_DLL).is_file()
+    except OSError:
+        return False
+
+
+def _remember_plugin_skip(version: str) -> None:
+    """Remember the target version, so the start of that version explains the skipped plugin."""
+    try:
+        config.set_setting(PLUGIN_SKIP_NOTICE_SETTING, str(version))
     except OSError as exc:
         LOG.warning("could not remember the skipped MusicBee plugin update: %s", exc)
 
 
-def launch_installer(path: Path, *, silent: bool, relaunch: bool, skip_plugin: bool) -> None:
+APP_MUTEX_NAME = "LyricLoomAppRunning"
+_APP_MUTEX = None   # the handle is held for the life of the process and closed by Windows at exit
+
+
+def hold_app_mutex() -> None:
+    """Create the named mutex the installer waits on until every LyricLoom window has exited.
+
+    Windows only; the handle is never closed explicitly, so the mutex lives exactly as long as
+    this process. A failure is logged: the installer then falls back to its own process checks.
+    """
+    global _APP_MUTEX
+    if sys.platform != "win32" or _APP_MUTEX is not None:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel32.CreateMutexW
+    create.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    create.restype = wintypes.HANDLE
+    handle = create(None, False, APP_MUTEX_NAME)
+    if not handle:
+        LOG.warning("could not create the %s mutex (error %s)", APP_MUTEX_NAME, ctypes.get_last_error())
+        return
+    _APP_MUTEX = handle
+
+
+def launch_installer(path: Path, *, silent: bool, relaunch: bool, skip_plugin: bool,
+                     version: str = "") -> None:
     """Start the verified installer, silently or interactively.
 
     ``silent`` uses Inno Setup's quiet switches plus ``/RELAUNCH=1`` when LyricLoom should start
     again and ``/SKIPPLUGIN=1`` when the optional MusicBee plugin must not be touched. A silent
-    install never closes MusicBee: ``/NOCLOSEAPPLICATIONS`` is added when it is running, the
-    plugin task is skipped, and the next start shows a notice. On non-Windows there is no
-    installer, so an explicit download link is the only action (and silent mode is refused).
+    install never closes MusicBee: ``/NOCLOSEAPPLICATIONS`` is added when it is (or may be)
+    running and the plugin task is skipped. When the plugin is installed, ``version`` (the
+    release being installed) is remembered so that version's first start shows a notice. On
+    non-Windows there is no installer, so an explicit download link is the only action (and
+    silent mode is refused).
     """
     path = Path(path)
     expected = _VERIFIED.get(path.resolve())
@@ -467,8 +527,8 @@ def launch_installer(path: Path, *, silent: bool, relaunch: bool, skip_plugin: b
         else:
             argv = [str(path), "/CLOSEAPPLICATIONS", "/NORESTART"]
         subprocess.Popen(argv, close_fds=True)
-        if musicbee_open:
-            _remember_plugin_skip()
+        if musicbee_open and version and _plugin_installed():
+            _remember_plugin_skip(version)
         return
     if silent:
         raise RuntimeError("this build has no Windows installer; download the new version from the "

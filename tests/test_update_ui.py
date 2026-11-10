@@ -93,6 +93,16 @@ def test_main_window_schedules_the_startup_check_absent_but_not_when_disabled(tm
     scheduled = []
     monkeypatch.setattr(app_main.QTimer, "singleShot",
                         staticmethod(lambda ms, function: scheduled.append(ms)))
+    # F1: nothing is requested before the setup assistant finished.
+    w = MainWindow(tmp_path)
+    try:
+        assert 4000 not in scheduled
+    finally:
+        w.dirty = False
+        w.close()
+
+    config.set_setting("setup_complete", True)
+    scheduled.clear()
     w = MainWindow(tmp_path)
     try:
         assert 4000 in scheduled
@@ -149,8 +159,13 @@ def test_install_on_exit_never_runs_during_a_queue(tmp_path, monkeypatch):
         w._install_update_on_exit()
         assert calls == []
         w._queue = None
+        w._pending_queue = object()   # a queue being checked before it starts
         w._install_update_on_exit()
-        assert calls == [((path,), {"silent": True, "relaunch": False, "skip_plugin": False})]
+        assert calls == []
+        w._pending_queue = None
+        w._install_update_on_exit()
+        assert calls == [((path,), {"silent": True, "relaunch": False, "skip_plugin": False,
+                                    "version": ""})]
     finally:
         w.dirty = False
         w.close()
@@ -174,6 +189,106 @@ def test_install_on_exit_ignores_a_skipped_download(tmp_path, monkeypatch):
         w._install_update_on_exit()
         assert calls == []
         assert not path.exists()
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def _armed_window(tmp_path, monkeypatch):
+    from lyricloom import config
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    _app()
+    w = MainWindow(tmp_path)
+    path = tmp_path / "LyricLoom-Setup.exe"
+    path.write_bytes(b"installer")
+    w._update_controller._downloaded = path
+    w._update_controller._info = _info()
+    calls = []
+    monkeypatch.setattr(updater, "install_mode", lambda: "auto")
+    monkeypatch.setattr(updater, "launch_installer", lambda *args, **kwargs: calls.append((args, kwargs)))
+    return w, path, calls
+
+
+def test_restart_now_starts_setup_only_at_the_end_of_the_close(tmp_path, monkeypatch):
+    """H2: the action records a request; Setup starts as the last step of a real close."""
+    w, path, calls = _armed_window(tmp_path, monkeypatch)
+    w.dirty = False
+    seen_during_prompt = []
+    monkeypatch.setattr(w, "_confirm_discard", lambda: seen_during_prompt.append(list(calls)) or True)
+    w.prepare_update(path, info=_info(), silent=True, relaunch=True)
+    assert seen_during_prompt == [[]]          # nothing was launched before the prompts passed
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (path,) and kwargs["silent"] is True and kwargs["relaunch"] is True
+    assert kwargs["version"] == _info().version
+
+
+def test_a_queue_that_starts_during_the_close_prompt_blocks_setup(tmp_path, monkeypatch):
+    """H2: a MusicBee request can start a queue inside the discard prompt's nested event loop."""
+    w, path, calls = _armed_window(tmp_path, monkeypatch)
+
+    def prompt_while_a_queue_starts():
+        w._pending_queue = object()
+        return True
+
+    monkeypatch.setattr(w, "_confirm_discard", prompt_while_a_queue_starts)
+    try:
+        w.prepare_update(path, info=_info(), silent=True, relaunch=True)
+        assert calls == []
+    finally:
+        w._pending_queue = None
+        w.dirty = False
+        w.close()
+
+
+def test_a_vetoed_close_drops_the_restart_request(tmp_path, monkeypatch):
+    """H2: when the close is vetoed nothing is installed and the download stays armed."""
+    w, path, calls = _armed_window(tmp_path, monkeypatch)
+    monkeypatch.setattr(w, "_confirm_discard", lambda: False)
+    try:
+        w.prepare_update(path, info=_info(), silent=True, relaunch=True)
+        assert calls == [] and w._install_request is None
+        assert w._update_controller._downloaded == path     # still armed for a later normal close
+    finally:
+        monkeypatch.setattr(w, "_confirm_discard", lambda: True)
+        w._update_controller._downloaded = None
+        w.dirty = False
+        w.close()
+
+
+def test_only_the_primary_instance_cleans_the_update_folder(tmp_path, monkeypatch):
+    """L8: a second process that hands over and exits must not delete the primary's download."""
+    from lyricloom import config
+
+    monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
+    _app()
+    cleaned = []
+    monkeypatch.setattr(updater, "cleanup_stale_downloads", lambda: cleaned.append(1))
+
+    class BusyServer:
+        name = "LyricLoom-test-busy-update"
+        is_listening = False
+
+        def listen(self):
+            return False
+
+        def remove_stale(self, probe_ms=5000):
+            return False
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(app_main, "ipc_send", lambda command, timeout_ms=2000: {"ok": True})
+    w = MainWindow(tmp_path, server=BusyServer())
+    try:
+        assert w._duplicate_instance and cleaned == []
+    finally:
+        w.dirty = False
+        w.close()
+    w = MainWindow(tmp_path)
+    try:
+        assert cleaned == [1]
     finally:
         w.dirty = False
         w.close()

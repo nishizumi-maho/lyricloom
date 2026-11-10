@@ -1,4 +1,5 @@
 import hashlib
+import sys
 from pathlib import Path
 
 import httpx
@@ -61,6 +62,9 @@ def test_update_check_choice_is_absent_until_the_user_decides(tmp_path, monkeypa
 def test_startup_check_is_on_by_default_and_false_turns_it_off(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    # F1: no automatic request before the setup assistant finished (the choice was not seen).
+    assert updater.should_check_on_startup() is False
+    config.set_setting("setup_complete", True)
     assert updater.should_check_on_startup() is True
     config.set_setting("check_updates", False)
     assert updater.should_check_on_startup() is False
@@ -267,13 +271,23 @@ def test_whats_new_opens_only_the_validated_release_url(monkeypatch):
 
 def test_musicbee_process_detection_reads_tasklist(monkeypatch):
     class Result:
-        stdout = '"MusicBee.exe","4242","Console","1","120,000 K"\r\n'
+        returncode = 0
+        stdout = b'"MusicBee.exe","4242","Console","1","120,000 K"\r\n'
 
+    seen = []
     monkeypatch.setattr(updater.sys, "platform", "win32")
-    monkeypatch.setattr(updater.subprocess, "run", lambda *args, **kwargs: Result())
+    monkeypatch.setattr(updater.subprocess, "run",
+                        lambda argv, **kwargs: seen.append(argv[0]) or Result())
     assert updater.musicbee_running() is True
+    assert Path(seen[0]).is_absolute() and Path(seen[0]).name == "tasklist.exe"
 
-    Result.stdout = "INFO: No tasks are running which match the specified criteria.\r\n"
+    Result.stdout = b"INFO: No tasks are running which match the specified criteria.\r\n"
+    assert updater.musicbee_running() is False
+
+    # M3: a query that fails cannot rule MusicBee out, so it counts as running.
+    Result.returncode, Result.stdout = 1, b""
+    assert updater.musicbee_running() is True
+    Result.returncode, Result.stdout = 0, b"\xff\xfe not text"
     assert updater.musicbee_running() is False
 
 
@@ -297,7 +311,9 @@ def test_silent_installer_argv_relaunches_and_skips_plugins(tmp_path, monkeypatc
 def test_silent_installer_argv_never_closes_musicbee(tmp_path, monkeypatch):
     path, calls = _verified_installer(tmp_path, monkeypatch)
     monkeypatch.setattr(updater, "musicbee_running", lambda: True)
-    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False)
+    monkeypatch.setattr(updater, "_plugin_installed", lambda: True)
+    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False,
+                             version=updater.VERSION)
     argv, _kwargs = calls[0]
     assert argv == [str(path), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
                     "/NOCLOSEAPPLICATIONS", "/SKIPPLUGIN=1"]
@@ -329,3 +345,58 @@ def test_silent_installer_refuses_an_unverified_file_before_any_process(tmp_path
     monkeypatch.setattr(updater.subprocess, "Popen", no_process)
     with pytest.raises(RuntimeError, match="did not download and verify"):
         updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False)
+
+
+def test_a_failed_musicbee_check_keeps_musicbee_open(tmp_path, monkeypatch):
+    """M3 end to end: tasklist exits 1 with no output, so Setup must not close MusicBee."""
+    path, calls = _verified_installer(tmp_path, monkeypatch)
+
+    class Failed:
+        returncode = 1
+        stdout = b""
+
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater.subprocess, "run", lambda *args, **kwargs: Failed())
+    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False)
+    argv, _kwargs = calls[0]
+    assert "/NOCLOSEAPPLICATIONS" in argv and "/SKIPPLUGIN=1" in argv
+
+
+def test_plugin_notice_is_due_only_for_the_installed_version_and_an_installed_plugin(tmp_path, monkeypatch):
+    """L7: the notice must be true: this build is the one installed, and the plugin exists."""
+    path, calls = _verified_installer(tmp_path, monkeypatch)
+    monkeypatch.setattr(updater, "musicbee_running", lambda: True)
+    monkeypatch.setattr(updater, "_plugin_installed", lambda: False)
+    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False,
+                             version=updater.VERSION)
+    assert updater.take_plugin_skip_notice() is False        # no plugin: nothing to explain
+
+    monkeypatch.setattr(updater, "_plugin_installed", lambda: True)
+    updater.launch_installer(path, silent=True, relaunch=False, skip_plugin=False, version="99.0.0")
+    assert updater.take_plugin_skip_notice() is False        # Setup failed: still the old build
+    assert config.setting(updater.PLUGIN_SKIP_NOTICE_SETTING) == ""   # cleared either way
+
+    config.set_setting(updater.PLUGIN_SKIP_NOTICE_SETTING, True)      # a value saved by an older build
+    assert updater.take_plugin_skip_notice() is False
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the installer mutex is Windows-only")
+def test_the_app_holds_the_mutex_the_installer_waits_for(monkeypatch):
+    """H1: every GUI process holds LyricLoomAppRunning until it exits."""
+    import ctypes
+    from ctypes import wintypes
+
+    monkeypatch.setattr(updater, "_APP_MUTEX", None)
+    updater.hold_app_mutex()
+    assert updater._APP_MUTEX
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenMutexW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel32.OpenMutexW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenMutexW(0x00100000, False, updater.APP_MUTEX_NAME)   # SYNCHRONIZE
+    try:
+        assert handle
+    finally:
+        if handle:
+            kernel32.CloseHandle(handle)
+        kernel32.CloseHandle(updater._APP_MUTEX)
