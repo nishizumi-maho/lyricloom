@@ -1,6 +1,6 @@
 import hashlib
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import httpx
 import pytest
@@ -279,7 +279,8 @@ def test_musicbee_process_detection_reads_tasklist(monkeypatch):
     monkeypatch.setattr(updater.subprocess, "run",
                         lambda argv, **kwargs: seen.append(argv[0]) or Result())
     assert updater.musicbee_running() is True
-    assert Path(seen[0]).is_absolute() and Path(seen[0]).name == "tasklist.exe"
+    tasklist = PureWindowsPath(seen[0])
+    assert tasklist.is_absolute() and tasklist.name == "tasklist.exe"
 
     Result.stdout = b"INFO: No tasks are running which match the specified criteria.\r\n"
     assert updater.musicbee_running() is False
@@ -295,6 +296,7 @@ def _verified_installer(tmp_path, monkeypatch):
     path = tmp_path / "LyricLoom-Setup.exe"
     path.write_bytes(PAYLOAD)
     monkeypatch.setattr(updater, "_VERIFIED", {path.resolve(): SHA})
+    monkeypatch.setattr(updater.sys, "platform", "win32")   # the Setup argv is Windows-only
     calls = []
     monkeypatch.setattr(updater.subprocess, "Popen", lambda argv, **kwargs: calls.append((argv, kwargs)))
     return path, calls
