@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from lyricloom import runner  # noqa: E402
+from lyricloom import config, runner  # noqa: E402
 from lyricloom.app.main import MainWindow, QueueWorker  # noqa: E402
 from lyricloom.app.model import TrackRow  # noqa: E402
 from lyricloom.model import LrcDoc  # noqa: E402
@@ -60,14 +60,14 @@ def test_research_mode_calls_research_lyrics(tmp_path, monkeypatch):
     audio = _audio(tmp_path)
     seen = []
 
-    def fake(path, cancel=None):
-        seen.append(path)
+    def fake(path, cancel=None, allow_cloud=None):
+        seen.append((path, allow_cloud))
         return runner.TrackResult(path, "done")
 
     monkeypatch.setattr(runner, "research_lyrics", fake)
-    q = QueueWorker([audio], force=True, research=True)
+    q = QueueWorker([audio], force=True, research=True, allow_cloud=False)
     q.run()
-    assert seen == [audio]
+    assert seen == [(audio, False)]
 
 
 def test_redo_restores_the_original_lrc_when_align_fails(tmp_path, monkeypatch):
@@ -163,6 +163,112 @@ def test_save_write_error_is_shown_and_keeps_the_edits_dirty(app, tmp_path, monk
         assert w.dirty
         assert seen and seen[0][0] == "Save lyrics"
         assert str(audio.with_suffix(".lrc")) in seen[0][1] and "Access is denied" in seen[0][1]
+    finally:
+        w.dirty = False
+        w.close()
+
+
+# ---------- FRB-01: the per-queue cloud consent reaches every queue kind ----------
+
+def _declined_cloud_window(tmp_path, monkeypatch):
+    config.set_assemblyai_enabled(True)
+    w = MainWindow(tmp_path)
+    monkeypatch.setattr(w, "_ask_cloud_for_queue", lambda: False)
+    monkeypatch.setattr(w, "_preflight", lambda *args, **kwargs: True)
+    return w
+
+
+def _done(path, **kwargs):
+    return runner.TrackResult(path, "done")
+
+
+def test_declined_cloud_consent_reaches_a_normal_queue(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.process",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = _declined_cloud_window(tmp_path, monkeypatch)
+    try:
+        assert w.process([audio]) is True
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["allow_cloud"] is False
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_declined_cloud_consent_reaches_a_redo_queue(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.forget_sync", lambda path: {})
+    monkeypatch.setattr("lyricloom.runner.process",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = _declined_cloud_window(tmp_path, monkeypatch)
+    try:
+        assert w.process([audio], redo=True) is True
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["only_stage"] == "align" and seen[0]["allow_cloud"] is False
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_declined_cloud_consent_reaches_search_lyrics_again(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.research_lyrics",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = _declined_cloud_window(tmp_path, monkeypatch)
+    try:
+        assert w.process([audio], research=True) is True
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["allow_cloud"] is False
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_declined_cloud_consent_reaches_a_per_song_models_queue(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.process",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = _declined_cloud_window(tmp_path, monkeypatch)
+    try:
+        models = {"transcribe": "whisper-small"}
+        assert w.process([audio], models=models) is True
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["models"] == models and seen[0]["allow_cloud"] is False
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_declined_cloud_consent_reaches_a_command_line_process_queue(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.process",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = _declined_cloud_window(tmp_path, monkeypatch)
+    try:
+        w._handle_external({"cmd": "process", "paths": [str(audio)], "redo": False})
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["allow_cloud"] is False
+    finally:
+        w.dirty = False
+        w.close()
+
+
+def test_declined_cloud_consent_reaches_a_drag_and_drop_queue(app, tmp_path, monkeypatch):
+    audio = _audio(tmp_path)
+    seen = []
+    monkeypatch.setattr("lyricloom.runner.process",
+                        lambda path, **kwargs: seen.append(kwargs) or _done(path))
+    w = _declined_cloud_window(tmp_path, monkeypatch)
+    try:
+        w.drop_paths([str(audio)])
+        _wait(app, lambda: seen and w._queue is None)
+        assert seen[0]["allow_cloud"] is False
     finally:
         w.dirty = False
         w.close()

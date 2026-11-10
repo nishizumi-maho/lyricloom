@@ -14,9 +14,11 @@ the API key.  The assistant adds only ``setup_complete`` (on Finish).
 from __future__ import annotations
 
 import importlib.util
+import logging
 import re
 import subprocess
 import threading
+import warnings
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Qt, QUrl, Signal, Slot
@@ -29,6 +31,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
 from .. import config, models, musicbee, runtime, setup, updater
 from ..workers import WorkerCancelled
 from .dialogs import validate_folder
+from .model_status import snapshot as model_status_snapshot
+
+LOG = logging.getLogger(__name__)
 
 PAGE_WELCOME = 0
 PAGE_LIBRARY = 1
@@ -62,9 +67,18 @@ def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-def _detect(_worker: "_Worker"):
-    """``setup.detect`` in the worker thread.  The probes have their own timeouts."""
-    return setup.detect()
+def _detect(worker: "_Worker"):
+    """``setup.detect`` in the worker thread.  The probes have their own timeouts.
+
+    ``detect`` cannot be interrupted inside a blocked probe, but it must not start after the job
+    was cancelled and a cancel that arrives during the probes discards the late result.
+    """
+    if worker.cancel.is_set():
+        raise WorkerCancelled
+    report = setup.detect()
+    if worker.cancel.is_set():
+        raise WorkerCancelled
+    return report
 
 
 # --------------------------------------------------------------------------- worker plumbing
@@ -139,21 +153,30 @@ class _Job(QObject):
         if self._worker is not None:
             self._worker.cancel.set()
 
-    def stop(self, wait_ms: int = 5000) -> None:
+    def stop(self, wait_ms: int = 5000) -> bool:
+        """Cancels and joins the job; False when the thread is still running after ``wait_ms``."""
         self.cancel()
         if self._thread is not None and self._thread.isRunning():
             self._thread.quit()
-            self._thread.wait(wait_ms)
+            if not self._thread.wait(wait_ms):
+                LOG.warning("setup job did not stop within %d ms; it keeps running in the "
+                            "background", wait_ms)
+                return False
+        return True
 
-    def close(self) -> None:
+    def close(self, wait_ms: int = 5000) -> None:
         """Cancels, joins and disconnects the job so no later signal reaches a deleted page."""
-        self.stop()
-        for signal in (self.done, self.failed, self.cancelled, self.line, self.progress,
-                       self.finished):
-            try:
-                signal.disconnect()
-            except (RuntimeError, TypeError):
-                pass
+        self.stop(wait_ms)
+        # Signals with no connections make PySide print a RuntimeWarning from disconnect(); it
+        # is expected here and must not flood the app log at shutdown.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            for signal in (self.done, self.failed, self.cancelled, self.line, self.progress,
+                           self.finished):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
 
     def is_busy(self) -> bool:
         return self._thread is not None and self._thread.isRunning()
@@ -184,6 +207,18 @@ class _Job(QObject):
     @Slot(int, int)
     def _relay_progress(self, done: int, total: int) -> None:
         self.progress.emit(done, total)
+
+
+def join_background_jobs(timeout_ms: int = 5000) -> None:
+    """Joins every setup job the assistant started, with a bounded wait (FRB-06)."""
+    for job in list(_KEEP_ALIVE):
+        close = getattr(job, "close", None)
+        if close is None:
+            continue
+        try:
+            close(wait_ms=timeout_ms)
+        except TypeError:   # an older/foreign job object without the keyword
+            close()
 
 
 class _JobPage(QWizardPage):
@@ -940,30 +975,113 @@ class ModelsPage(_JobPage):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
         self._models_window = None
+        self._states: dict[str, str] = {}
+        self._status_pending = False
+        self._status_job = None
+        self._shut_down = False
+
+    def initializePage(self) -> None:
+        # Lazy-load: constructing the assistant must not check (and possibly hash) the models
+        # before the user even reaches this page (FRB-04).
         self.refresh()
 
     def refresh(self) -> None:
+        # Start the check before drawing the rows so the Download button is disabled while it runs.
+        self._start_status_check()
+        self._render_rows()
+
+    def _render_rows(self) -> None:
         specs = models.default_models()
         self.table.setRowCount(len(specs))
         ready = 0
         for row, spec in enumerate(specs):
-            try:
-                state = models.status(spec)
-            except Exception as exc:  # noqa: BLE001 - one broken file still gets a row
-                state = f"error ({type(exc).__name__})"
+            state = self._states.get(spec.id)
             if state == "ready":
                 ready += 1
             name = QTableWidgetItem(spec.label)
             name.setToolTip(f"{spec.id}\n{spec.description}")
             self.table.setItem(row, 0, name)
             self.table.setItem(row, 1, QTableWidgetItem(runtime.human_size(spec.total_size)))
-            self.table.setItem(row, 2, QTableWidgetItem(state.title()))
+            self.table.setItem(row, 2, QTableWidgetItem(self._state_text(state)))
         self.table.resizeColumnToContents(1)
         self.table.resizeColumnToContents(2)
         total = sum(spec.total_size for spec in specs)
         self.total.setText(f"{ready} of {len(specs)} suggested models are ready · "
                            f"about {runtime.human_size(total)} in total")
-        self.download_btn.setEnabled(self._job is None and ready < len(specs))
+        self.download_btn.setEnabled(self._job is None and self._status_job is None
+                                     and ready < len(specs))
+
+    @staticmethod
+    def _state_text(state: str | None) -> str:
+        if state is None:
+            return "Checking…"
+        if state.startswith("error:"):
+            return f"Error: {state.split(':', 1)[1]}"
+        return state.title()
+
+    def _start_status_check(self) -> None:
+        if self._shut_down:
+            return
+        if self._status_job is not None or self._job is not None:
+            self._status_pending = True
+            return
+        specs = models.default_models()
+
+        def check(worker):
+            return model_status_snapshot(specs, cancel=worker.cancel)
+
+        self._status_pending = False
+        job = _Job(check)
+        self._status_job = job
+        job.done.connect(self._statuses_ready, Qt.QueuedConnection)
+        job.failed.connect(self._statuses_failed, Qt.QueuedConnection)
+        job.finished.connect(self._status_job_finished, Qt.QueuedConnection)
+        job.start()
+
+    def _job_finished(self) -> None:
+        super()._job_finished()
+        if self._shut_down:
+            return
+        if self._status_pending:
+            self._status_pending = False
+            self._start_status_check()
+        self._render_rows()
+
+    @Slot()
+    def _status_job_finished(self) -> None:
+        self._status_job = None
+        if self._shut_down:
+            return
+        if self._status_pending:
+            self._status_pending = False
+            self._start_status_check()
+        self._render_rows()
+
+    @Slot(object)
+    def _statuses_ready(self, states: dict[str, str]) -> None:
+        self._states.update(states)
+        self._render_rows()
+
+    @Slot(str)
+    def _statuses_failed(self, message: str) -> None:
+        LOG.warning("model status check failed: %s", message)
+        self.progress_text.setText("Could not check the models: " + message)
+
+    def shutdown(self) -> None:
+        super().shutdown()
+        self._shut_down = True
+        if self._status_job is not None:
+            self._status_job.close()
+            self._status_job = None
+
+    def status_summary(self) -> str:
+        """The Finish page text, from the cached states; never checks the files itself."""
+        specs = models.default_models()
+        states = [self._states.get(spec.id) for spec in specs]
+        if any(state is None for state in states):
+            return "checking the suggested models…"
+        ready = sum(1 for state in states if state == "ready")
+        return f"{ready} of {len(specs)} suggested models ready"
 
     def _later(self) -> None:
         self.wizard().next()
@@ -983,10 +1101,17 @@ class ModelsPage(_JobPage):
         self._models_window.activateWindow()
 
     def start_download(self) -> None:
-        if self._job is not None:
+        if self._job is not None or self._status_job is not None:
             return
-        specs = [spec for spec in models.default_models()
-                 if models.status(spec) not in ("ready", "unverified")]
+        specs = models.default_models()
+        if any(spec.id not in self._states for spec in specs):
+            # The background check has not filled the rows yet; starting blind could re-download
+            # models that are already ready. The button is disabled until the check finishes.
+            self.refresh()
+            self.progress_text.setText("Checking the models; try Download again when the list is ready.")
+            return
+        specs = [spec for spec in specs
+                 if self._states.get(spec.id) not in ("ready", "unverified")]
         if not specs:
             self.progress_text.setText("All suggested models are ready.")
             self.refresh()
@@ -1304,8 +1429,7 @@ class SetupAssistant(QWizard):
                             f"{config.setting('wsl_python') or 'python3'}")
         else:
             acceleration = "CPU"
-        specs = models.default_models()
-        ready = sum(1 for spec in specs if models.status(spec) == "ready")
+        ready_text = self.models_page.status_summary()
         updates = (f"on ({ {'auto': 'install automatically', 'ask': 'ask first', 'notify': 'notify only'}.get(updater.install_mode(), 'install automatically') })"
                    if updater.check_enabled() else "off")
         cloud = "on" if config.assemblyai_enabled() else "off"
@@ -1319,7 +1443,7 @@ class SetupAssistant(QWizard):
         return (
             f"<b>Music folder</b><br>{library}<br><br>"
             f"<b>Acceleration</b><br>{acceleration}<br><br>"
-            f"<b>Models</b><br>{ready} of {len(specs)} suggested models ready<br><br>"
+            f"<b>Models</b><br>{ready_text}<br><br>"
             f"<b>Privacy</b><br>Startup update check: {updates}<br>"
             f"Cloud transcription: {cloud}<br><br>"
             f"<b>MusicBee</b><br>{plugin_text}")
