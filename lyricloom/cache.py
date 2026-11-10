@@ -158,11 +158,33 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+LOCK_GRACE_S = 5.0       # an unreadable lock younger than this may still be being written
+LOCK_READ_RETRIES = 3
+
+
 def lock_is_stale(path: Path) -> bool:
-    """A lock without a live owner process is stale.  Missing/unreadable locks count as stale."""
-    data = _read_lock(path)
+    """A lock without a live owner process is stale.
+
+    An unreadable lock is only stale once it is older than :data:`LOCK_GRACE_S`: ``acquire`` opens
+    the file with ``O_EXCL`` and writes the JSON immediately after, so a second process can see an
+    empty file for a moment.  Treating that as stale would unlink a live lock and let both runs
+    process the same track (FR-A-03).
+    """
+    data = None
+    for attempt in range(LOCK_READ_RETRIES):
+        data = _read_lock(path)
+        if data is not None:
+            break
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            return True   # the file is gone: nothing to wait for
+        if age >= LOCK_GRACE_S:
+            return True
+        if attempt + 1 < LOCK_READ_RETRIES:
+            time.sleep(0.02)
     if data is None:
-        return True
+        return False
     pid = data.get("pid")
     if not isinstance(pid, int):
         return True
@@ -193,8 +215,24 @@ def acquire(audio: Path) -> TrackLock | None:
             continue
         except OSError:
             return None
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(json.dumps({"pid": os.getpid(), "started": time.time()}))
+        # One write right after the exclusive create: the unreadable window is one syscall, and
+        # lock_is_stale additionally waits a few seconds before calling such a file stale.
+        payload = json.dumps({"pid": os.getpid(), "started": time.time()}).encode("utf-8")
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("could not write the lock file")
+                view = view[written:]
+        except OSError:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+            return None
+        finally:
+            os.close(fd)
         return TrackLock(path)
     return None
 

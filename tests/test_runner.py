@@ -11,7 +11,7 @@ from mutagen.flac import FLAC
 
 from lyricloom import ENGINE_VERSION, cli, config, models, runner
 from lyricloom.lrc import parse_lrc
-from lyricloom.model import Candidate, Line, Segment, Transcript, Word
+from lyricloom.model import Candidate, Line, Segment, TrackMeta, Transcript, Word
 from lyricloom.stages.align import AlignResult
 
 
@@ -32,7 +32,11 @@ def lib(tmp_path, monkeypatch):
 
     def fake_separate(audio, work, cancel=None):
         calls["separate"] += 1
-        return {"vocals": "v.wav", "vocals16k": "v16.wav", "model": "m", "device": "cpu"}
+        work.mkdir(parents=True, exist_ok=True)
+        vocals, vocals16k = work / "vocals.wav", work / "vocals16k.wav"
+        sf.write(str(vocals), np.zeros(44100, dtype="float32"), 44100, format="WAV")
+        sf.write(str(vocals16k), np.zeros(16000, dtype="float32"), 16000, format="WAV")
+        return {"vocals": str(vocals), "vocals16k": str(vocals16k), "model": "m", "device": "cpu"}
 
     def fake_transcribe(v, w, lang, prompt=None, name="whisper", extra=(), cancel=None):
         calls["transcribe"] += 1
@@ -290,6 +294,97 @@ def test_legacy_stage_cache_is_not_reused_for_a_per_run_override(lib):
     _strip_inputs(audio, "separate", "transcribe")
     runner.process(audio, force=True, models={"separate": "separator-bs-roformer-vocals"})
     assert calls["separate"] == 2
+
+
+def test_legacy_transcribe_cache_is_accepted_only_for_the_2_0_model(monkeypatch):
+    """FR-A-01: a 2.0 cache made with LYRICLOOM_WHISPER_MODEL=medium must not be relabelled as
+    large-v3 (or vice versa) when 2.1 resolves a different model."""
+    medium, large = models.get("whisper-medium"), models.get("whisper-large-v3")
+    monkeypatch.setenv("LYRICLOOM_WHISPER_MODEL", "whisper-medium")
+    assert runner._legacy_cache_ok("transcribe", [medium]) is True
+    assert runner._legacy_cache_ok("transcribe", [large]) is False
+    monkeypatch.delenv("LYRICLOOM_WHISPER_MODEL")
+    assert runner._legacy_cache_ok("transcribe", [large]) is True
+    assert runner._legacy_cache_ok("transcribe", [medium]) is False
+
+
+def _cached_separate(audio: Path) -> dict:
+    return json.loads((runner.cache.work_dir(audio) / "separate.json").read_text(encoding="utf-8"))
+
+
+def test_a_missing_cached_separation_file_is_recomputed(lib):
+    """FR-A-02: a cache that points at deleted wav files must not wedge the track forever."""
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    assert calls["separate"] == 1
+    Path(_cached_separate(audio)["vocals16k"]).unlink()
+
+    assert runner.process(audio, force=True).status == "done"
+    assert calls["separate"] == 2
+    assert "recomputing" in (runner.cache.work_dir(audio) / "log.txt").read_text(encoding="utf-8")
+
+
+def test_realign_recomputes_a_separation_with_deleted_files(lib):
+    root, calls = lib
+    audio = _flac(root / "a.flac")
+    runner.process(audio)
+    Path(_cached_separate(audio)["vocals"]).unlink()
+
+    assert runner.realign(audio, "outra letra").status == "done"
+    assert calls["separate"] == 2
+
+
+def test_english_with_the_singing_model_does_not_require_mms(lib, monkeypatch):
+    """FR-A-04: MMS_FA is the English fallback; a ready singing model is enough."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    checked = []
+    monkeypatch.setattr(runner.model_catalog, "ensure_ready",
+                        lambda specs, **kwargs: checked.extend(spec.id for spec in specs))
+    monkeypatch.setattr(runner.model_catalog, "singing_ready", lambda lang=None: True)
+    monkeypatch.setattr(runner, "transcribe", lambda *a, **k: Transcript(
+        "en", [Word("hello", 0, 300, 0.9), Word("world", 400, 700, 0.9)]))
+    runner.process(audio)
+    assert "align-mms-fa" not in checked
+
+
+def test_other_languages_still_require_the_align_model(lib, monkeypatch):
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    checked = []
+    monkeypatch.setattr(runner.model_catalog, "ensure_ready",
+                        lambda specs, **kwargs: checked.extend(spec.id for spec in specs))
+    monkeypatch.setattr(runner.model_catalog, "singing_ready", lambda lang=None: True)
+    runner.process(audio)   # the fixture's fake transcript is Portuguese
+    assert "align-mms-fa" in checked
+
+
+def test_title_and_artist_cannot_break_the_lrc_tags(lib, monkeypatch):
+    """FR-A-06: a newline or ] in a tag must not create phantom lyric lines."""
+    root, _ = lib
+    audio = _flac(root / "a.flac")
+    meta = TrackMeta(audio, "Artist; X]Y", "Line one\n[00:02.00]phantom]", "", 10.0, "pt")
+    monkeypatch.setattr(runner, "probe", lambda path: meta)
+    runner.process(audio)
+
+    doc = parse_lrc((root / "a.lrc").read_text(encoding="utf-8"))
+    assert doc.meta["ar"] == "Artist; X Y"   # a semicolon is harmless inside [ar:]
+    assert "\n" not in doc.meta["ti"] and "]" not in doc.meta["ti"]
+    assert len(doc.lines) == 1
+    original = parse_lrc((root / "a.original.lrc").read_text(encoding="utf-8"))
+    assert "\n" not in original.meta["ti"] and "]" not in original.meta["ti"]
+
+
+def test_cli_process_returns_two_when_nothing_is_scanned(lib, capsys):
+    """FR-A-11: pointing process at an excluded path is an error, not silent success."""
+    root, _ = lib
+    stem = root / "a.vocals.flac"
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    stem.write_bytes(b"")
+    assert cli.main(["process", str(stem)]) == 2
+    err = capsys.readouterr().err
+    assert "no audio files" in err and "vocals" in err and "excluded" in err
 
 
 def test_realign_with_pasted_text_reuses_the_audio_stages(lib, monkeypatch):

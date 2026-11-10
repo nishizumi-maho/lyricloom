@@ -48,3 +48,11 @@ def isolated_vocals(tmp_path, monkeypatch):
     monkeypatch.setattr("lyricloom.config.SEPARATOR_WSL_ENABLED", False)
     monkeypatch.setattr("lyricloom.config.ALIGN_WSL_ENABLED", False)
     monkeypatch.setattr("lyricloom.config.MTL_WSL_ENABLED", False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_whisper_model(monkeypatch):
+    """A 2.0 user's LYRICLOOM_WHISPER_MODEL must not change which model a test resolves."""
+    monkeypatch.delenv("LYRICLOOM_WHISPER_MODEL", raising=False)
+    from lyricloom import models
+    models._COMPAT_LOGGED.clear()

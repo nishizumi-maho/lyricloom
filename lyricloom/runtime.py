@@ -44,20 +44,26 @@ def _status(stage: str) -> str:
     return models.status(config.resolve_model(stage))
 
 
+def _available(stage: str) -> bool:
+    """A model that processing may use: a verified file or one whose pinned size matches and that
+    has no sidecar yet (FR-A-07)."""
+    return _status(stage) in ("ready", "unverified")
+
+
 def whisper_status() -> bool:
-    return _status("transcribe") == "ready"
+    return _available("transcribe")
 
 
 def separator_status() -> bool:
-    return _status("separate") == "ready"
+    return _available("separate")
 
 
 def mtl_status() -> bool:
-    return _status("singing") == "ready"
+    return _available("singing")
 
 
 def mms_status() -> bool:
-    return _status("align") == "ready"
+    return _available("align")
 
 
 def status() -> dict[str, bool]:
@@ -81,32 +87,31 @@ def download_model(model_id: str, progress: Progress | None = None, cancel=None)
     return download_spec(spec, progress=progress, cancel=cancel)
 
 
-def download_whisper(progress: Progress | None = None, model_id: str | None = None) -> Path:
-    spec = models.find(model_id) if model_id else config.resolve_model("transcribe")
+def _download_for(stage: str, model_id: str | None) -> models.ModelSpec:
+    """The selected model for ``stage``; an unknown explicit id is an error, never a silent
+    fallback to the default (FR-A-09)."""
+    if not model_id:
+        return config.resolve_model(stage)
+    spec = models.find(model_id)
     if spec is None:
-        spec = models.default("transcribe")
-    return download_spec(spec, progress=progress)[0]
+        raise ValueError(f"unknown model {model_id!r}; use `lyricloom models list`")
+    return spec
+
+
+def download_whisper(progress: Progress | None = None, model_id: str | None = None) -> Path:
+    return download_spec(_download_for("transcribe", model_id), progress=progress)[0]
 
 
 def download_separator(progress: Progress | None = None, model_id: str | None = None) -> Path:
-    spec = models.find(model_id) if model_id else config.resolve_model("separate")
-    if spec is None:
-        spec = models.default("separate")
-    return download_spec(spec, progress=progress)[0]
+    return download_spec(_download_for("separate", model_id), progress=progress)[0]
 
 
 def download_mms(progress: Progress | None = None, model_id: str | None = None) -> Path:
-    spec = models.find(model_id) if model_id else config.resolve_model("align")
-    if spec is None:
-        spec = models.default("align")
-    return download_spec(spec, progress=progress)[0]
+    return download_spec(_download_for("align", model_id), progress=progress)[0]
 
 
 def download_mtl(progress: Progress | None = None, model_id: str | None = None) -> Path:
-    spec = models.find(model_id) if model_id else config.resolve_model("singing")
-    if spec is None:
-        spec = models.default("singing")
-    return download_spec(spec, progress=progress)[0]
+    return download_spec(_download_for("singing", model_id), progress=progress)[0]
 
 
 def download_nltk(progress: Progress | None = None) -> list[Path]:

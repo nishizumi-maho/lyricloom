@@ -1,3 +1,6 @@
+import json
+
+from lyricloom.stages import assemblyai
 from lyricloom.stages.assemblyai import build_request, parse_transcript
 
 RESPONSE = {
@@ -43,3 +46,61 @@ def test_japanese_falls_back_to_universal_2_without_prompt():
     assert r["speech_models"] == ["universal-2"]
     assert r["language_code"] == "ja"
     assert "prompt" not in r
+
+
+class _Response:
+    def __init__(self, data):
+        self._data = data
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._data
+
+
+class _Client:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def post(self, url, **_kwargs):
+        if url.endswith("/upload"):
+            return _Response({"upload_url": "https://cdn/uploaded"})
+        return _Response({"id": "job-1"})
+
+    def get(self, _url, **_kwargs):
+        return _Response(RESPONSE)
+
+
+def _run(tmp_path, monkeypatch, name="assemblyai"):
+    wav = tmp_path / "v.wav"
+    wav.write_bytes(b"RIFF")
+    monkeypatch.setattr(assemblyai, "api_key", lambda: "test-key")
+    monkeypatch.setattr(assemblyai.httpx, "Client", _Client)
+    return assemblyai.transcribe_assemblyai(wav, tmp_path / "work", "pt", name=name)
+
+
+def test_the_cache_is_written_atomically(tmp_path, monkeypatch):
+    """FR-A-08: a crash must never leave a truncated JSON that disables cloud for the track."""
+    result = _run(tmp_path, monkeypatch)
+    saved = tmp_path / "work" / "assemblyai.json"
+    assert [w.text for w in result.words][:2] == ["Texto", "inventado"]
+    assert json.loads(saved.read_text(encoding="utf-8"))["status"] == "completed"
+    assert not list((tmp_path / "work").glob("*.tmp"))
+
+
+def test_a_corrupt_cache_is_set_aside_and_the_upload_runs_again(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "assemblyai.json").write_text('{"status": "compl', encoding="utf-8")
+
+    result = _run(tmp_path, monkeypatch)
+    assert result.words[0].text == "Texto"
+    assert (work / "assemblyai.json.corrupt").is_file()
+    assert json.loads((work / "assemblyai.json").read_text(encoding="utf-8"))["status"] == "completed"
