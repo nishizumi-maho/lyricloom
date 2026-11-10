@@ -107,3 +107,53 @@ def test_a_bad_singing_model_alignment_falls_back_to_ctc_and_review(monkeypatch)
     assert res.models_used.get("align") == "align-mms-fa"
     assert "singing" not in res.models_used
     assert res.review is True and res.notes and "sanity check" in res.notes[0]
+
+
+_WORDS = ["alpha beta", "gamma delta", "epsilon zeta", "eta theta",
+          "iota kappa", "lambda mu", "nu xi", "omicron pi"]
+_LONG = TrackMeta(Path("x.flac"), "A", "T", "", 120.0, "other")
+
+
+def _heard(line_starts):
+    """Whisper heard every line: two words per line, starting at the given times."""
+    words = []
+    for text, start in zip(_WORDS, line_starts):
+        first, second = text.split()
+        words += [Word(first, start, start + 400, 0.9), Word(second, start + 600, start + 1000, 0.9)]
+    return Transcript("en", words)
+
+
+def _sung(line_starts, offsets):
+    def mtl(vocals, seg_texts, cancel=None):
+        return [[Segment("", s + o, s + o + 400, 1.0), Segment("", s + o + 600, s + o + 1000, 1.0)]
+                for s, o in zip(line_starts, offsets)]
+    return mtl
+
+
+def test_singing_alignment_is_kept_when_only_whispers_usual_timing_error_disagrees(monkeypatch):
+    """Real data (Adele, 2026-11-10): the singing model and MMS agreed within ~0.1 s, while Whisper's
+    anchors started most lines 0.3-0.7 s early and the first line 5.7 s early. That is Whisper's
+    timing error on sung vocals, not a broken alignment, so the singing model must be kept."""
+    starts = [5000 + 10_000 * k for k in range(len(_WORDS))]
+    ctc_calls = []
+    monkeypatch.setattr(stage, "align_lines_mtl", _sung(starts, [5700] + [600] * (len(_WORDS) - 1)))
+    monkeypatch.setattr(stage, "align_blocks", lambda *a, **k: ctc_calls.append(1) or [])
+    monkeypatch.setattr(stage.models, "singing_ready", lambda lang=None: True)
+    res = stage.align(_LONG, Path("."), Candidate("netease", "\n".join(_WORDS)), _heard(starts),
+                      Path("v16.wav"), Path("v.wav"))
+    assert ctc_calls == []
+    assert res.models_used.get("singing") == "singing-mtl" and "align" not in res.models_used
+    assert not res.notes
+
+
+def test_a_singing_alignment_shifted_by_one_line_falls_back_to_ctc(monkeypatch):
+    """Each line gets the next line's timing: a broken alignment the check must still catch."""
+    starts = [5000 + 10_000 * k for k in range(len(_WORDS))]
+    shifted = [s for s in starts[1:]] + [starts[-1] + 10_000]
+    monkeypatch.setattr(stage, "align_lines_mtl", _sung(shifted, [0] * len(_WORDS)))
+    monkeypatch.setattr(stage, "align_blocks", _fake_ctc(0.9))
+    monkeypatch.setattr(stage.models, "singing_ready", lambda lang=None: True)
+    res = stage.align(_LONG, Path("."), Candidate("netease", "\n".join(_WORDS)), _heard(starts),
+                      Path("v16.wav"), Path("v.wav"))
+    assert "singing" not in res.models_used and res.models_used.get("align") == "align-mms-fa"
+    assert res.review is True and "sanity check" in res.notes[0]
