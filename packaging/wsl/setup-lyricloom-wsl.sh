@@ -4,7 +4,7 @@
 # Run it as your normal WSL user: only apt uses sudo.  It never installs or changes GPU drivers or
 # the ROCm/CUDA runtime itself; install AMD's ROCm-on-WSL stack first when using --backend rocm.
 #
-#   bash setup-lyricloom-wsl.sh --backend rocm --wheel /mnt/c/path/lyricloom-2.1.0-py3-none-any.whl
+#   bash setup-lyricloom-wsl.sh --backend rocm --wheel /mnt/c/path/lyricloom-2.1.1-py3-none-any.whl
 #
 # It prints progress as "@@step <n>/<total> <text>" and one final JSON line.
 set -euo pipefail
