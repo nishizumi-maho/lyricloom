@@ -213,8 +213,11 @@ LyricLoom writes enhanced LRC:
 - The plugin turns each `<...>` segment gold as playback reaches it.
 - A final `<...>` with no text marks the end of the last word, so the last word does not stay lit
   through the next instrumental break.
-- If a file has no word tags, the plugin sweeps across the line over an estimated duration. That is a
-  fallback, not real word timing.
+- If a file has no word tags (lyrics synced per line, as LRCLIB and most players write them), the
+  plugin estimates the sweep: it learns the song's pace from its own lines, spreads each line by sung
+  syllables rather than letters, starts a moment after the line's time (a line time usually comes a
+  little before the voice) and finishes before the next line. The LyricLoom app does the same. It is
+  still an estimate, not real word timing; process the song with LyricLoom for word timing.
 - Japanese text is displayed without inserted spaces. LyricLoom segments Japanese with MeCab and
   keeps the original text in `.japanese.lrc`; the `.romaji.lrc` copy uses spaces between romanized
   segments.
