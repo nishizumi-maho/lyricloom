@@ -55,7 +55,7 @@ Tags are written at the top, in this order when present:
 | `[ar:...]` | `[ar:鈴木このみ]` | Artist from the audio tags. May be empty if the file has no artist tag. |
 | `[re:...]` | `[re:LyricLoom 2.1.0]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
 | `[#source:...]` | `[#source:uta-net conf:0.94]` | Where the lyric came from, followed by the track confidence. Sources include `lrclib`, `netease`, `qq`, `utaten`, `genius`, `websearch`, `transcription` and `manual`. |
-| `[#engine:...]` | `[#engine:9]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
+| `[#engine:...]` | `[#engine:10]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
 | `[#models:...]` | `[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]` | The model each stage used for this song, as `stage=model-id` pairs separated by `;`. Written on every successful run. |
 | `[#language:...]` | `[#language:ja]` | The resolved lyric language when it is known. It controls script variants and language-specific models. |
 | `[#warning:...]` | `[#warning:no usable transcript; word timing unconfirmed]` | Warnings the app shows in the row tooltip. A track with a warning is marked review. |

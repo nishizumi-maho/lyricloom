@@ -147,10 +147,19 @@ Keeping the vocal stem and the instrumental subtraction are optional work: an un
 whisper-cli -m <resolved whisper model> -f vocals16k.wav
   -l ja|pt|en|auto -ojf -of <work>/<name>
   -ml 1 -sow --beam-size 5 --best-of 5 -t <threads> -np
+  -mc 0 [-dtw <preset> -nfa]
   [--prompt "artist - title"] [extra flags]
 ```
 
-It parses the JSON word tokens into `Word(text, start_ms, end_ms, prob)`.
+`-mc 0` carries no text from one 30 s window into the next: with the text carried, Whisper could
+repeat one window through a whole song. `-dtw` (official models only: `large.v3`, `large.v3.turbo`,
+`medium`, `small`; whisper.cpp computes it only with flash attention off, `-nfa`) times each token
+from the attention alignment. Measured on five songs in Japanese, English and Portuguese, the pair
+cut the character error against the lyrics in four of them (63% to 20% in English, 155% and 72% to
+26% and 33% in Japanese) and put 75 to 97% of the anchors within 0.5 s of a human sync.
+
+It parses the JSON word tokens into `Word(text, start_ms, end_ms, prob)`; a word starts at its
+first token's DTW time when the run computed one.
 
 `looks_hallucinated` flags output that is not a plausible transcript:
 
@@ -185,7 +194,7 @@ Optional AssemblyAI is called only when the `assemblyai_enabled` setting is on, 
 3. **Blocks.** `blocks` turns anchors into short regions with 500 ms margins. Lines between anchors stay in the same block; unanchored intro/outro lines get their own block. Blocks prevent one alignment error from drifting across the song.
 4. **Backend.**
    - **English + full-rate vocals + MTL available:** `align/mtl.align_lines_mtl` runs LyricsAlignment-MTL. This is the preferred English path.
-   - **Everything else, or MTL failure:** `align/ctc.align_blocks` runs torchaudio MMS_FA CTC alignment per block.
+   - **Everything else, or MTL failure:** `align/ctc.align_blocks` runs torchaudio MMS_FA CTC alignment. Each block is aligned in a window that also holds the neighbouring block on each side (`CTC_CONTEXT_BLOCKS`), and only the block's own lines are kept, so a line never has to explain its neighbours' singing with its own words. Japanese is aligned in one window over the whole song (`WHOLE_SONG_CTC_LANGS`): Whisper's Japanese anchors are phrase-long and on round seconds, and blocks cut there held lines out of place.
    - MTL failure is caught and logged; processing falls back to CTC. MTL timing is also sanity-checked:
      every line must have one timing per word, in order and with a duration, and at least 75% of the
      lines must start within 2 s of their Whisper anchor and stay inside their block with the same
