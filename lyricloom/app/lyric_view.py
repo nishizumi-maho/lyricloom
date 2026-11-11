@@ -18,8 +18,8 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPaint
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from .. import config
-from ..animation import (LineEmphasis, PlaybackClock, ScrollPath, effective_fps, normalize_divisor,
-                         smootherstep, word_fill)
+from ..animation import (LineEmphasis, PlaybackClock, ScrollPath, effective_fps, line_sweeps,
+                         normalize_divisor, smootherstep, sung_weights, sweep_lit, word_fill)
 from ..model import Line, LrcDoc
 
 _FUTURE = QColor("#657199")
@@ -65,6 +65,15 @@ def _utf16_len(text: str) -> int:
     if all(ord(char) < 0x10000 for char in text):
         return len(text)
     return len(text.encode("utf-16-le")) // 2
+
+
+def _utf16_units(text: str, characters: float) -> float:
+    """UTF-16 units covered by the first ``characters`` code points (the last one may be partial)."""
+    whole = int(characters)
+    units = float(_utf16_len(text[:whole]))
+    if whole < len(text):
+        units += (characters - whole) * _utf16_len(text[whole])
+    return units
 
 
 def _utf16_slice(text: str, start: int, length: int) -> str:
@@ -123,6 +132,8 @@ class LyricView(QWidget):
         self._doc: LrcDoc | None = None
         self._lines: list[Line] = []
         self._starts: list[float] = []
+        self._sweeps: list[tuple[float, float] | None] = []
+        self._sweep_weights: list[list[float]] = []
         self._message: tuple[str, str] = ("", "")
 
         self._elapsed = QElapsedTimer()
@@ -165,6 +176,7 @@ class LyricView(QWidget):
         self._lines = list(doc.lines) if doc is not None else []
         self._starts = [float(line.start_ms) if line.start_ms is not None else 1e18
                         for line in self._lines]
+        self._prepare_sweeps()
         self._message = ("", "")
         self._layout_dirty = True
         self._scroll_path = None
@@ -184,6 +196,7 @@ class LyricView(QWidget):
         self._doc = None
         self._lines = []
         self._starts = []
+        self._prepare_sweeps()
         self._message = (headline, detail)
         self._layout_dirty = True
         self._scroll_path = None
@@ -432,6 +445,17 @@ class LyricView(QWidget):
         self._line_layouts[key] = result
         return result
 
+    def _prepare_sweeps(self) -> None:
+        """Sweep windows and per-character weights for lines with a time but no word times."""
+        line_only = [bool(line.text.strip()) and line.start_ms is not None
+                     and all(segment.start_ms is None for segment in line.segments)
+                     for line in self._lines]
+        self._sweep_weights = [sung_weights(line.text) if only else [] for line, only in
+                               zip(self._lines, line_only)]
+        self._sweeps = line_sweeps(
+            [float(line.start_ms) if line.start_ms is not None else None for line in self._lines],
+            [sum(weights) for weights in self._sweep_weights], line_only)
+
     def _line_end(self, index: int) -> float:
         for following in range(index + 1, len(self._lines)):
             if self._lines[following].start_ms is not None:
@@ -547,7 +571,10 @@ class LyricView(QWidget):
         if not line.segments:
             return 0.0
         if all(segment.start_ms is None for segment in line.segments):
-            return word_fill(t_ms, line.start_ms, self._line_end(index)) * _utf16_len(line.text)
+            window = self._sweeps[index] if index < len(self._sweeps) else None
+            if window is None:
+                return word_fill(t_ms, line.start_ms, self._line_end(index)) * _utf16_len(line.text)
+            return _utf16_units(line.text, sweep_lit(self._sweep_weights[index], t_ms, window))
         lit = 0.0
         for position, segment in enumerate(line.segments):
             if not segment.text:

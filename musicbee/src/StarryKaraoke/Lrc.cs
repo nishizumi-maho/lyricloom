@@ -146,6 +146,25 @@ namespace MusicBeePlugin
                 if (text[i] == ' ') ends[i] = i > from ? ends[i - 1] : tFrom;
         }
 
+        /// <summary>Times a line that has no word tags: its characters light between begin and end in
+        /// proportion to how long they take to sing (<see cref="LineSweep.Weights"/>). A character that
+        /// takes no time (a space, punctuation) lights together with the one before it.</summary>
+        public static TimedText Swept(string text, double begin, double end)
+        {
+            text = text ?? "";
+            var tt = new TimedText { Text = text, CharEndMs = new double[text.Length], StartMs = begin };
+            if (text.Length == 0) return tt;
+            var weights = LineSweep.Weights(text);
+            var total = weights.Sum();
+            double done = 0;
+            for (var i = 0; i < text.Length; i++)
+            {
+                done += weights[i];
+                tt.CharEndMs[i] = total > 0 ? begin + (end - begin) * done / total : end;
+            }
+            return tt;
+        }
+
         /// <summary>Builds the timing from marks (char index, time a word starts) up to lineEnd.</summary>
         public static TimedText FromMarks(string text, double lineStart, double lineEnd, List<(int Index, double Ms)> marks)
         {
@@ -163,6 +182,110 @@ namespace MusicBeePlugin
             for (var i = 1; i < tt.CharEndMs.Length; i++)
                 if (tt.CharEndMs[i] < tt.CharEndMs[i - 1]) tt.CharEndMs[i] = tt.CharEndMs[i - 1];
             return tt;
+        }
+    }
+
+    /// <summary>Line-synced lyrics carry a time per line and none per word, so their sweep is an
+    /// estimate. Measured against word-timed songs (13 songs, ja/en/pt, 2026-11-10): sweeping at a fixed
+    /// 85 ms per letter reached 28% of the words more than 0.5 s before they were sung; sweeping each
+    /// line at the song's own pace, by sung syllables, starting a little after the tag, 13% (and 14%
+    /// more than 0.5 s late). lyricloom/animation.py (line_sweeps) applies the same rules in the app.</summary>
+    internal static class LineSweep
+    {
+        /// <summary>A human line tag usually comes slightly before the voice.</summary>
+        public const double DelayMs = 150;
+        /// <summary>Lines followed by an instrumental have time to spare: a high percentile of the
+        /// per-line pace is the pace of the singing.</summary>
+        public const double RatePercentile = 75;
+        /// <summary>Sung units per millisecond when a song has too few lines to learn from (the
+        /// median of the measured songs).</summary>
+        public const double DefaultRate = 4.3 / 1000.0;
+        public const int MinSamples = 3;
+        public const double MinUnits = 2.0;
+        public const double MinAvailableMs = 300;
+
+        private const string Vowels =
+            "aeiouyàáâãäåæèéêëìíîï" +
+            "òóôõöùúûüýÿœ" +
+            "аеёиоуыэюяіїє" +
+            "αεηιουωάέήίόύώ";
+        /// <summary>Small kana extend the mora before them rather than adding one.</summary>
+        private const string SmallKana =
+            "ぁぃぅぇぉゃゅょゎァィゥェォャュョヮ";
+
+        /// <summary>How long each character takes to sing, in sung units: one per syllable nucleus (a
+        /// vowel group in Latin, Cyrillic or Greek script, a kana mora, a Hangul syllable), about 1.7 per
+        /// kanji, plus 0.25 per letter so a consonant cluster still takes a little time. Spaces and
+        /// punctuation take none.</summary>
+        public static double[] Weights(string text)
+        {
+            var weights = new double[text?.Length ?? 0];
+            var previousVowel = false;
+            for (var i = 0; i < weights.Length; i++)
+            {
+                var c = text[i];
+                double w = 0;
+                var vowel = false;
+                if (c >= '぀' && c <= 'ヿ') w = SmallKana.IndexOf(c) >= 0 ? 0.25 : 1.0;
+                else if ((c >= '㐀' && c <= '鿿') || (c >= '豈' && c <= '﫿')) w = 1.7;
+                else if (c >= '가' && c <= '힣') w = 1.0;
+                else if (char.IsLetterOrDigit(c))
+                {
+                    vowel = Vowels.IndexOf(char.ToLowerInvariant(c)) >= 0;
+                    w = 0.25 + (vowel && !previousVowel ? 1.0 : 0.0);
+                }
+                previousVowel = vowel;
+                weights[i] = w;
+            }
+            return weights;
+        }
+
+        /// <summary>Linear interpolation between the closest ranks (numpy's default method).</summary>
+        internal static double Percentile(List<double> values, double percent)
+        {
+            var ordered = values.OrderBy(v => v).ToList();
+            var position = (ordered.Count - 1) * percent / 100.0;
+            var low = (int)Math.Floor(position);
+            var high = Math.Min(low + 1, ordered.Count - 1);
+            return ordered[low] + (ordered[high] - ordered[low]) * (position - low);
+        }
+
+        /// <summary>Sweep windows for the lines of one song that have a line time but no word times.
+        /// starts are the line times in order (empty lines included: they mark where singing stops), units
+        /// the sung units of each line, estimate which lines need a window (null for the others). The
+        /// song's pace is learned from its own lines; each window starts DelayMs after the tag, lasts the
+        /// line's units at that pace and ends before the next line with a short breath.</summary>
+        public static (double Begin, double End)?[] Windows(IReadOnlyList<double> starts, IReadOnlyList<double> units,
+                                                            IReadOnlyList<bool> estimate)
+        {
+            var n = starts.Count;
+            var available = new double[n];
+            for (var i = 0; i < n; i++)
+            {
+                available[i] = double.PositiveInfinity;
+                for (var k = i + 1; k < n; k++)
+                    if (starts[k] > starts[i]) { available[i] = starts[k] - starts[i]; break; }
+            }
+            var samples = new List<double>();
+            for (var i = 0; i < n; i++)
+                if (estimate[i] && units[i] >= MinUnits && available[i] > MinAvailableMs && !double.IsInfinity(available[i]))
+                    samples.Add(units[i] / available[i]);
+            var rate = samples.Count >= MinSamples ? Percentile(samples, RatePercentile) : DefaultRate;
+            var result = new (double Begin, double End)?[n];
+            for (var i = 0; i < n; i++)
+            {
+                if (!estimate[i]) continue;
+                var room = available[i];
+                var delay = Math.Min(DelayMs, 0.1 * room);
+                var duration = rate > 0 ? units[i] / rate : 0;
+                if (!double.IsInfinity(room))
+                {
+                    var breath = Math.Min(250, 0.15 * room);
+                    duration = Math.Max(Math.Min(duration, room - delay - breath), Math.Min(500, 0.5 * room));
+                }
+                result[i] = (starts[i] + delay, starts[i] + delay + duration);
+            }
+            return result;
         }
     }
 
@@ -185,28 +308,57 @@ namespace MusicBeePlugin
         {
             var result = new List<KaraokeLine>();
             var songIsJapanese = raw.Any(r => Lrc.HasKana(r.Text));
+            var originals = new string[raw.Count];
+            var romajis = new string[raw.Count];
+            var units = new double[raw.Count];
+            var estimate = new bool[raw.Count];
+            for (var i = 0; i < raw.Count; i++)
+            {
+                var r = raw[i];
+                originals[i] = Lrc.Tidy(r.Text);
+                var japanese = romanize != null && (Lrc.HasKana(originals[i]) || songIsJapanese);
+                var romaji = japanese ? Lrc.Tidy(romanize(r.Text)) : null;
+                romajis[i] = string.IsNullOrEmpty(romaji) ? null : romaji;   // empty: romaji engine unavailable
+                // the pace is learned from the text the window shows as its main line
+                var shown = romajis[i] != null && mode != JapaneseMode.JapaneseOnly ? romajis[i] : originals[i];
+                units[i] = LineSweep.Weights(shown).Sum();
+                estimate[i] = !r.HasWordTimes && double.IsNaN(r.EndTagMs) && originals[i].Length > 0;
+            }
+            var windows = LineSweep.Windows(raw.Select(r => r.StartMs).ToList(), units, estimate);
             for (var i = 0; i < raw.Count; i++)
             {
                 var r = raw[i];
                 var next = i + 1 < raw.Count ? raw[i + 1].StartMs : Math.Max(songMs, r.StartMs + 8000);
-                var original = Lrc.Tidy(r.Text);
-                var jp = romanize != null && (Lrc.HasKana(original) || songIsJapanese);
-                var romaji = jp ? Lrc.Tidy(romanize(r.Text)) : null;
-                if (jp && romaji.Length == 0) { jp = false; romaji = null; }   // romaji engine unavailable
+                var original = originals[i];
+                var romaji = romajis[i];
+                var jp = romaji != null;
 
-                var letters = (romaji ?? original).Count(c => c != ' ');
-                if (!jp && (Lrc.HasKana(original) || songIsJapanese)) letters = (int)(letters * 2.5);
-                var end = Math.Min(next - 100, r.StartMs + Math.Max(1400, letters * 85 + 600));
-                if (!double.IsNaN(r.EndTagMs)) end = Math.Min(next - 30, r.EndTagMs);
-                else if (r.HasWordTimes) end = Math.Min(next - 50, LastWordEnd(r, songIsJapanese));
-                end = Math.Max(end, r.StartMs + 300);
+                double end;
+                (double Begin, double End)? sweep = null;
+                if (windows[i].HasValue)
+                {
+                    // a line-synced line: estimated from the song's own pace (LineSweep)
+                    end = Math.Min(windows[i].Value.End, next - 100);
+                    sweep = (Math.Min(windows[i].Value.Begin, end), end);
+                }
+                else
+                {
+                    var letters = (romaji ?? original).Count(c => c != ' ');
+                    if (!jp && (Lrc.HasKana(original) || songIsJapanese)) letters = (int)(letters * 2.5);
+                    end = Math.Min(next - 100, r.StartMs + Math.Max(1400, letters * 85 + 600));
+                    if (!double.IsNaN(r.EndTagMs)) end = Math.Min(next - 30, r.EndTagMs);
+                    else if (r.HasWordTimes) end = Math.Min(next - 50, LastWordEnd(r, songIsJapanese));
+                    end = Math.Max(end, r.StartMs + 300);
+                }
 
                 var line = new KaraokeLine { StartMs = r.StartMs, EndMs = end, NextMs = next };
-                var originalTimed = Timed(r, original, end, null);
+                var originalTimed = sweep.HasValue ? TimedText.Swept(original, sweep.Value.Begin, sweep.Value.End)
+                                                   : Timed(r, original, end, null);
                 if (!jp || mode == JapaneseMode.JapaneseOnly) line.Main = originalTimed;
                 else
                 {
-                    var romajiTimed = Timed(r, romaji, end, romanize);
+                    var romajiTimed = sweep.HasValue ? TimedText.Swept(romaji, sweep.Value.Begin, sweep.Value.End)
+                                                     : Timed(r, romaji, end, romanize);
                     if (mode == JapaneseMode.RomajiOnly) line.Main = romajiTimed;
                     else { line.Main = originalTimed; line.Sub = romajiTimed; }
                 }
