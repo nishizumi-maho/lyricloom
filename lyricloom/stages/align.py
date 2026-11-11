@@ -31,6 +31,19 @@ MTL_UNCONFIRMED = 0.55
 # real song 85% agreed; shifted or drifting alignments agreed on 0-13% (2026-11-10 measurements).
 MTL_ANCHOR_TOLERANCE_MS = 2000
 MTL_MIN_AGREEMENT = 0.75
+# Each CTC window also holds this many neighbouring blocks on each side, and only its central
+# block's lines are kept. Aligned alone, a line had to explain the end of the line before it and
+# the start of the next one with its own words, so its first word could start on the previous
+# line's last note (lit before it is sung). Measured 2026-11-11 against human timing: English
+# word starts within 100 ms of NetEase's 71% -> 82% (more than 0.5 s off: 70 -> 37 words);
+# Japanese lines within 0.5 s of LRCLIB's 62% -> 71%, 92% -> 95% and 96% -> 96%.
+CTC_CONTEXT_BLOCKS = 1
+# Languages aligned in one CTC pass over the whole song instead of blocks cut at the anchors.
+# Whisper times Japanese in phrase-long pieces on round seconds, and blocks cut there held lines
+# out of place: without the cloud, 55% of Redo's lines were within 0.5 s of a human sync, 95% in
+# one pass; Reweave, with no usable Whisper anchor at all, 98%. With the cloud's word-level
+# anchors one pass did as well as the blocks (95% and 98% against 95% and 96%).
+WHOLE_SONG_CTC_LANGS = frozenset({"ja"})
 
 _NOISE = re.compile(r"[\s\W_]+", re.UNICODE)
 
@@ -85,6 +98,31 @@ def _line_timing(texts: list[str], total_ms: int, presync: list[Line] | None) ->
     for text, start in zip(texts, starts):
         lines.append(Line(min(total_ms, int(start or 0)), [Segment(text, None, None)], 0.0))
     return lines
+
+
+def context_windows(bs: list[Block], context: int = CTC_CONTEXT_BLOCKS) -> list[Block]:
+    """Each block widened by ``context`` neighbouring blocks on each side (lines and time)."""
+    if context <= 0:
+        return list(bs)
+    out = []
+    for j in range(len(bs)):
+        lo, hi = max(0, j - context), min(len(bs) - 1, j + context)
+        out.append(Block(bs[lo].line_start, bs[hi].line_end, bs[lo].start_ms, bs[hi].end_ms))
+    return out
+
+
+def central_rows(bs: list[Block], windows: list[Block], rows: list) -> list:
+    """The aligned rows of each window's own block, in line order (rows are per window line)."""
+    out = []
+    k = 0
+    for b, w in zip(bs, windows):
+        for line in range(w.line_start, w.line_end):
+            if k >= len(rows):
+                return out
+            if b.line_start <= line < b.line_end:
+                out.append(rows[k])
+            k += 1
+    return out
 
 
 def _block_for_line(bs: list[Block], line_idx: int) -> Block | None:
@@ -176,14 +214,17 @@ def align(meta: TrackMeta, work: Path, chosen: Candidate, transcript: Transcript
             log.warning("singing model failed, using the CTC aligner: %s", str(e)[-300:])
     used: dict[str, str] = {}
     if aligned is None:
-        seg_tokens = [[[to_mms_tokens(reading(s, lang)) for s in seg_texts[i]] for i in range(b.line_start, b.line_end)]
-                      for b in bs]
+        ctc_blocks = [Block(0, len(texts), 0, total_ms)] if lang in WHOLE_SONG_CTC_LANGS else bs
+        windows = context_windows(ctc_blocks)
+        seg_tokens = [[[to_mms_tokens(reading(s, lang)) for s in seg_texts[i]] for i in range(w.line_start, w.line_end)]
+                      for w in windows]
         # align_blocks resolves the align model for the current choice; make the lyric language
         # visible to it so a per-language align choice is honoured even outside runner.process.
         previous = config.active_language()
         config.set_active_language(lang)
         try:
-            aligned = align_blocks(vocals16k, bs, seg_tokens, cancel=cancel)
+            aligned = central_rows(ctc_blocks, windows,
+                                   align_blocks(vocals16k, windows, seg_tokens, cancel=cancel))
         finally:
             config.set_active_language(previous)
         used["align"] = align_spec.id   # only CTC actually ran this model (FR-A-04)
