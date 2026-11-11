@@ -104,3 +104,66 @@ def test_transcribe_jfk(tmp_path):
 
     t = transcribe(FX / "jfk.wav", tmp_path, "en")
     assert "fellow Americans" in t.text
+
+
+def _capture_cmd(monkeypatch, tmp_path):
+    """Runs transcribe() against a fake whisper-cli that records its command line."""
+    import types
+
+    from lyricloom import config
+    from lyricloom.stages import transcribe as tr
+    seen = []
+
+    def fake_run(cmd, cancel=None, **kwargs):
+        seen.append(cmd)
+        out = Path(cmd[cmd.index("-of") + 1]).with_suffix(".json")
+        out.write_text(json.dumps({"result": {"language": "pt"}, "transcription": []}), encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stderr=b"")
+
+    monkeypatch.setattr(tr, "run_process", fake_run)
+    cli = tmp_path / "whisper-cli"
+    cli.write_text("", encoding="utf-8")
+    model = tmp_path / "ggml.bin"
+    model.write_text("", encoding="utf-8")
+    monkeypatch.setattr(config, "whisper_cli", lambda: cli)
+    monkeypatch.setattr(tr, "_model_path", lambda spec: model)
+    return tr, seen
+
+
+def test_sung_vocals_are_decoded_without_carried_text_and_with_dtw_times(monkeypatch, tmp_path):
+    from lyricloom import models
+    tr, seen = _capture_cmd(monkeypatch, tmp_path)
+    tr.transcribe(tmp_path / "v.wav", tmp_path, "pt", model=models.get("whisper-large-v3"))
+    cmd = seen[0]
+    assert cmd[cmd.index("-mc") + 1] == "0"
+    assert cmd[cmd.index("-dtw") + 1] == "large.v3" and "-nfa" in cmd
+    tr.transcribe(tmp_path / "v.wav", tmp_path, "pt", model=models.get("whisper-large-v3-turbo"))
+    assert seen[1][seen[1].index("-dtw") + 1] == "large.v3.turbo"
+
+
+def test_a_custom_whisper_model_gets_no_dtw_preset(monkeypatch, tmp_path):
+    import dataclasses
+
+    from lyricloom import models
+    tr, seen = _capture_cmd(monkeypatch, tmp_path)
+    base = models.get("whisper-large-v3")
+    custom = dataclasses.replace(base, id="custom-whisper", files=(
+        dataclasses.replace(base.files[0], filename=str(tmp_path / "my-finetune.bin")),))
+    tr.transcribe(tmp_path / "v.wav", tmp_path, "pt", model=custom)
+    assert "-dtw" not in seen[0] and "-nfa" not in seen[0]
+    assert seen[0][seen[0].index("-mc") + 1] == "0"
+
+
+def test_word_starts_come_from_dtw_when_the_run_computed_it():
+    def token(text, t_dtw, a, b):
+        return {"text": text, "t_dtw": t_dtw, "p": 0.9, "offsets": {"from": a, "to": b}}
+    data = {"result": {"language": "en"}, "transcription": [
+        {"text": " hello", "offsets": {"from": 1000, "to": 1600},
+         "tokens": [token("[_BEG_]", -1, 1000, 1000), token(" hello", 112, 1000, 1600)]},
+        {"text": " world", "offsets": {"from": 1600, "to": 2200},
+         "tokens": [token(" world", -1, 1600, 2200)]},
+        {"text": " late", "offsets": {"from": 2200, "to": 2500},
+         "tokens": [token(" late", 999, 2200, 2500)]},
+    ]}
+    words = parse_whisper_json(data).words
+    assert [(w.start_ms, w.end_ms) for w in words] == [(1120, 1600), (1600, 2200), (2500, 2500)]
