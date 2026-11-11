@@ -204,8 +204,8 @@ def _already_done(audio: Path) -> bool:
 # Each cached stage has its own version: bump one only when that stage's output would change, so
 # an engine change does not redo the expensive ones (separation, transcription) for the library.
 # Started at "3", the engine version the existing caches were written with, so they stay valid.
-STAGE_VERSIONS = {"lyrics": "5", "separate": "4", "transcribe": "3",
-                  "transcribe_extra": "3", "transcribe_extra_aai": "3"}
+STAGE_VERSIONS = {"lyrics": "5", "separate": "4", "transcribe": "4",
+                  "transcribe_extra": "4", "transcribe_extra_aai": "4"}
 
 
 def _legacy_cache_ok(stage: str, required: list[model_catalog.ModelSpec] | None) -> bool:
