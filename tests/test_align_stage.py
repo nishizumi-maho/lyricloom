@@ -157,3 +157,67 @@ def test_a_singing_alignment_shifted_by_one_line_falls_back_to_ctc(monkeypatch):
                       Path("v16.wav"), Path("v.wav"))
     assert "singing" not in res.models_used and res.models_used.get("align") == "align-mms-fa"
     assert res.review is True and "sanity check" in res.notes[0]
+
+
+def test_context_windows_add_the_neighbouring_blocks():
+    from lyricloom.align.anchors import Block
+    bs = [Block(0, 2, 0, 5000), Block(2, 3, 4500, 8000), Block(3, 5, 7500, 12000)]
+    windows = stage.context_windows(bs, 1)
+    assert windows == [Block(0, 3, 0, 8000), Block(0, 5, 0, 12000), Block(2, 5, 4500, 12000)]
+    assert stage.context_windows(bs, 0) == bs
+
+
+def test_central_rows_keep_each_windows_own_lines():
+    from lyricloom.align.anchors import Block
+    bs = [Block(0, 2, 0, 5000), Block(2, 3, 4500, 8000), Block(3, 5, 7500, 12000)]
+    windows = stage.context_windows(bs, 1)
+    rows = [(w, line) for w, win in enumerate(windows) for line in range(win.line_start, win.line_end)]
+    picked = stage.central_rows(bs, windows, rows)
+    assert picked == [(0, 0), (0, 1), (1, 2), (2, 3), (2, 4)]
+
+
+def test_each_ctc_window_aligns_a_line_with_its_neighbours(monkeypatch):
+    """A line aligned alone had to explain its neighbours' singing with its own words."""
+    seen = []
+
+    def fake(vocals16k, blocks, seg_tokens, cancel=None):
+        seen.extend(blocks)
+        out = []
+        for w, (block, lines) in enumerate(zip(blocks, seg_tokens)):
+            for k, line in enumerate(lines):
+                # the tens of the row's start tell which window aligned it
+                start = 1000 * (block.line_start + k + 1) + 10 * w
+                out.append([Segment("", start + 100 * i, start + 100 * i + 50, 0.9)
+                            for i, _ in enumerate(line)])
+        return out
+
+    monkeypatch.setattr(stage, "align_blocks", fake)
+    monkeypatch.setattr(stage, "trim_line_ends", lambda lines, path: lines)
+    tr = Transcript("pt", [Word("um", 1000, 1300, 0.9), Word("dois", 4000, 4300, 0.9),
+                           Word("tres", 7000, 7300, 0.9)])
+    res = stage.align(META, Path("."), Candidate("lrclib", "um\ndois\ntres"), tr, Path("v16.wav"))
+    assert len(seen) == 3
+    assert (seen[1].line_start, seen[1].line_end) == (0, 3)          # the middle line with both neighbours
+    # every line comes from the window centred on it
+    assert [(l.start_ms % 1000) // 10 for l in res.lines] == [0, 1, 2]
+
+
+def test_japanese_is_aligned_in_one_pass_over_the_whole_song(monkeypatch):
+    """Blocks cut at Whisper's Japanese anchors held lines out of place; one pass did not."""
+    seen = []
+
+    def fake(vocals16k, blocks, seg_tokens, cancel=None):
+        seen.extend(blocks)
+        return [[Segment("", 1000 * (i + 1) + 100 * k, 1000 * (i + 1) + 100 * k + 50, 0.9)
+                 for k, _ in enumerate(line)]
+                for block in seg_tokens for i, line in enumerate(block)]
+
+    monkeypatch.setattr(stage, "align_blocks", fake)
+    monkeypatch.setattr(stage, "trim_line_ends", lambda lines, path: lines)
+    meta = TrackMeta(Path("x.flac"), "A", "T", "", 20.0, "ja")
+    tr = Transcript("ja", [Word("\u307b\u3057", 1000, 1300, 0.9), Word("\u305d\u3089", 4000, 4300, 0.9),
+                           Word("\u3046\u307f", 7000, 7300, 0.9)])
+    res = stage.align(meta, Path("."), Candidate("lrclib", "\u307b\u3057\n\u305d\u3089\n\u3046\u307f"), tr,
+                      Path("v16.wav"))
+    assert [(b.line_start, b.line_end, b.start_ms, b.end_ms) for b in seen] == [(0, 3, 0, 20000)]
+    assert [l.start_ms for l in res.lines] == [1000, 2000, 3000]
