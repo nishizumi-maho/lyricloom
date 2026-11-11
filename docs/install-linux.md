@@ -1,6 +1,6 @@
 # Install LyricLoom on Linux
 
-LyricLoom 2.1.0 runs natively on 64-bit Linux. It needs **Python 3.11** (the project requires `>=3.11,<3.12`), Qt 6 runtime libraries, GStreamer for the built-in player, and ffmpeg for the audio stages.
+LyricLoom 2.1.1 runs natively on 64-bit Linux. It needs **Python 3.11** (the project requires `>=3.11,<3.12`), Qt 6 runtime libraries, GStreamer for the built-in player, and ffmpeg for the audio stages.
 
 The commands below use Debian/Ubuntu package names. Fedora, Arch and other distributions have equivalents; the important pieces are Qt 6, the XCB platform plugins, GStreamer with the usual codec plugins, ffmpeg, and Python 3.11.
 
@@ -23,14 +23,14 @@ This page covers:
 The release page provides a prebuilt Linux bundle:
 
 ```text
-LyricLoom-2.1.0-linux-x86_64.tar.gz
+LyricLoom-2.1.1-linux-x86_64.tar.gz
 ```
 
 It is built on Ubuntu 22.04 and contains the application, `LyricLoomWorker`, `whisper-cli`, Qt, and a per-user installer. It does not contain the large models.
 
 ```bash
-tar -xzf LyricLoom-2.1.0-linux-x86_64.tar.gz
-cd LyricLoom-2.1.0-linux-x86_64
+tar -xzf LyricLoom-2.1.1-linux-x86_64.tar.gz
+cd LyricLoom-2.1.1-linux-x86_64
 ./install.sh
 ```
 
@@ -128,7 +128,7 @@ sudo apt update
 sudo apt install -y python3.11 python3.11-venv python3.11-dev
 ```
 
-On distributions that already provide Python 3.11, install it with the normal package manager. Do not use Python 3.12 or newer for 2.1.0; the project intentionally pins `>=3.11,<3.12`.
+On distributions that already provide Python 3.11, install it with the normal package manager. Do not use Python 3.12 or newer for 2.1.1; the project intentionally pins `>=3.11,<3.12`.
 
 ## Install from source with a virtual environment
 
@@ -276,7 +276,7 @@ chmod +x ~/.local/share/applications/lyricloom.desktop
 update-desktop-database ~/.local/share/applications
 ```
 
-The icon name `audio-x-generic` is a standard themed icon. LyricLoom does not ship its own icon in 2.1.0; if your theme does not provide that name, pick another installed icon or leave the `Icon=` line out.
+The icon name `audio-x-generic` is a standard themed icon. LyricLoom does not ship its own icon in 2.1.1; if your theme does not provide that name, pick another installed icon or leave the `Icon=` line out.
 
 ## Download the models
 
@@ -415,11 +415,11 @@ Use the value that matches your GPU (`rocminfo | grep gfx`). Do not set an overr
 
 ### What runs on the GPU on Linux
 
-| Stage | Device in 2.1.0 |
+| Stage | Device in 2.1.1 |
 |---|---|
 | Vocal separation (Mel-Band RoFormer) | CUDA or ROCm when PyTorch sees the GPU; `LYRICLOOM_SEPARATOR_DEVICE=cpu` forces CPU. |
 | MMS_FA forced alignment | CUDA or ROCm when `LYRICLOOM_ALIGN_DEVICE=auto` (the default on Linux). |
-| English singing model (MTL) | **CPU** in 2.1.0. The Linux path does not pass `cuda=True` to the MTL worker. |
+| English singing model (MTL) | **CPU** in 2.1.1. The Linux path does not pass `cuda=True` to the MTL worker. |
 | Whisper transcription | whisper.cpp, depending on how you built it (CPU, CUDA or Vulkan). |
 
 If a GPU stage fails, LyricLoom can fall back to the CPU. Check the status bar in the app and the per-track log.

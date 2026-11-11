@@ -15,15 +15,43 @@ from ..workers import run_process
 
 
 def parse_whisper_json(data: dict) -> Transcript:
+    """Words from whisper.cpp's full JSON. A word starts at its first token's DTW time when the
+    run computed one (``t_dtw``, in centiseconds; -1 without DTW) and at the decoder's estimate
+    otherwise."""
     words = []
     for seg in data.get("transcription", []):
         text = seg.get("text", "").strip()
         if not text:
             continue
-        probs = [t["p"] for t in seg.get("tokens", []) if not t["text"].startswith("[_")]
-        words.append(Word(text, seg["offsets"]["from"], seg["offsets"]["to"],
-                          sum(probs) / len(probs) if probs else 0.0))
+        tokens = [t for t in seg.get("tokens", []) if not t["text"].startswith("[_")]
+        probs = [t["p"] for t in tokens]
+        start, end = seg["offsets"]["from"], seg["offsets"]["to"]
+        first = next((t for t in tokens if t["text"].strip()), None)
+        if first is not None and int(first.get("t_dtw", -1)) >= 0:
+            start = min(int(first["t_dtw"]) * 10, end)
+        words.append(Word(text, start, end, sum(probs) / len(probs) if probs else 0.0))
     return Transcript(data.get("result", {}).get("language", ""), words)
+
+
+# Decoding for sung vocals, measured 2026-11-11 on five songs (ja/en/pt) against their official
+# lyrics and human timing:
+# -mc 0 carries no text from one 30 s window into the next. With the text carried, Whisper repeated
+#   one window through a whole song (Reweave: no line of 58 heard; 44 without), and the character
+#   error against the lyrics fell from 63% to 20% (English), 155% to 26% and 72% to 33% (Japanese);
+#   Portuguese stayed at 6-7%.
+# -dtw times each token from the attention alignment instead of the decoder's estimate (whisper.cpp
+#   needs flash attention off for it, -nfa, which cost no time on the GPU measured). Anchors within
+#   0.5 s of a human sync: 53% -> 84% (English), 58% -> 75% and 97% (Japanese). Only for the official
+#   models, whose alignment heads whisper.cpp knows by name.
+SUNG_DECODING = ("-mc", "0")
+DTW_PRESETS = {"ggml-large-v3.bin": "large.v3", "ggml-large-v3-turbo.bin": "large.v3.turbo",
+               "ggml-medium.bin": "medium", "ggml-small.bin": "small"}
+
+
+def dtw_args(spec: models.ModelSpec) -> list[str]:
+    """``-dtw <preset> -nfa`` for a model whisper.cpp has alignment heads for, else nothing."""
+    preset = DTW_PRESETS.get(Path(spec.model_file().filename).name)
+    return ["-dtw", preset, "-nfa"] if preset else []
 
 
 # Phrases Whisper invents from video captions instead of transcribing (credits, subtitle notices).
@@ -123,7 +151,8 @@ def transcribe(vocals16k: Path, work: Path, lang: str | None, prompt: str | None
     code = lang if lang and lang not in ("", "other") else "auto"
     cmd = [str(cli), "-m", str(model_path), "-f", str(vocals16k),
            "-l", code, "-ojf", "-of", str(out),
-           "-ml", "1", "-sow", "--beam-size", "5", "--best-of", "5", "-t", str(config.CPU_THREADS), "-np", *extra]
+           "-ml", "1", "-sow", "--beam-size", "5", "--best-of", "5", "-t", str(config.CPU_THREADS), "-np",
+           *SUNG_DECODING, *dtw_args(spec), *extra]
     if prompt:
         cmd += ["--prompt", prompt]
     timeout_s = _timeout_s(vocals16k)

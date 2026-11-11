@@ -347,6 +347,126 @@ def word_fill(t_ms: float, start_ms: float | None, end_ms: float | None) -> floa
     return max(0.0, min(1.0, (float(t_ms) - float(start_ms)) / span))
 
 
+
+# Line-synced lyrics carry a time per line and none per word, so their sweep is an estimate.
+# Measured against word-timed songs (13 songs, ja/en/pt, 2026-11-10): sweeping at a fixed 85 ms
+# per letter reached 28% of the words more than 0.5 s before they were sung; stretching the
+# sweep to the next line left 26% more than 0.5 s late. Sweeping each line at the song's own
+# pace, by sung syllables, starting a little after the tag, left 13% early and 14% late.
+LINE_SWEEP_DELAY_MS = 150.0           # a human line tag usually comes slightly before the voice
+LINE_SWEEP_RATE_PERCENTILE = 75.0     # lines followed by an instrumental have time to spare
+LINE_SWEEP_DEFAULT_RATE = 4.3 / 1000.0   # sung units per ms (median of the measured songs)
+LINE_SWEEP_MIN_SAMPLES = 3
+LINE_SWEEP_MIN_UNITS = 2.0
+LINE_SWEEP_MIN_AVAILABLE_MS = 300.0
+
+_VOWELS = frozenset("aeiouyàáâãäåæèéêë"
+                    "ìíîïòóôõöùúû"
+                    "üýÿœ"
+                    # Cyrillic and Greek vowels
+                    "аеёиоуыэюяіїє"
+                    "αεηιουωάέήίόύώ")
+# Small kana extend the mora before them rather than adding one.
+_SMALL_KANA = frozenset("ぁぃぅぇぉゃゅょゎ"
+                        "ァィゥェォャュョヮ")
+
+
+def sung_weights(text: str) -> list[float]:
+    """How long each character takes to sing, in sung units (one per code point).
+
+    One unit per syllable nucleus (a vowel group in Latin script, a kana mora, a Hangul
+    syllable), about 1.7 per kanji, plus 0.25 per letter so a consonant cluster still takes a
+    little time. Spaces and punctuation take none: they light with the character before them."""
+    weights: list[float] = []
+    previous_vowel = False
+    for ch in text:
+        weight = 0.0
+        vowel = False
+        if "぀" <= ch <= "ヿ":
+            weight = 0.25 if ch in _SMALL_KANA else 1.0
+        elif "㐀" <= ch <= "鿿" or "豈" <= ch <= "﫿":
+            weight = 1.7
+        elif "가" <= ch <= "힣":
+            weight = 1.0
+        elif ch.isalnum():
+            vowel = ch.lower() in _VOWELS
+            weight = 0.25 + (1.0 if vowel and not previous_vowel else 0.0)
+        previous_vowel = vowel
+        weights.append(weight)
+    return weights
+
+
+def _percentile(values: list[float], percent: float) -> float:
+    """Linear interpolation between the closest ranks (numpy's default method)."""
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * percent / 100.0
+    low = math.floor(position)
+    high = min(low + 1, len(ordered) - 1)
+    return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def line_sweeps(starts: list[float | None], units: list[float],
+                estimate: list[bool]) -> list[tuple[float, float] | None]:
+    """Sweep windows for the lines of one song that have a line time but no word times.
+
+    ``starts`` are the line times in order (empty lines included: they mark where singing
+    stops), ``units`` the sung units of each line's text, ``estimate`` which lines need a window.
+    The song's pace is learned from its own lines: sung units per available millisecond, at the
+    75th percentile. Each window starts LINE_SWEEP_DELAY_MS after the tag, lasts the line's
+    units at that pace, and ends before the next line with a short breath."""
+    count = len(starts)
+    available: list[float] = [math.inf] * count
+    for i, start in enumerate(starts):
+        if start is None:
+            continue
+        for following in starts[i + 1:]:
+            if following is not None and following > start:
+                available[i] = following - start
+                break
+    samples = [units[i] / available[i] for i in range(count)
+               if estimate[i] and starts[i] is not None and units[i] >= LINE_SWEEP_MIN_UNITS
+               and LINE_SWEEP_MIN_AVAILABLE_MS < available[i] < math.inf]
+    rate = (_percentile(samples, LINE_SWEEP_RATE_PERCENTILE)
+            if len(samples) >= LINE_SWEEP_MIN_SAMPLES else LINE_SWEEP_DEFAULT_RATE)
+    out: list[tuple[float, float] | None] = []
+    for i in range(count):
+        start = starts[i]
+        if not estimate[i] or start is None:
+            out.append(None)
+            continue
+        room = available[i]
+        delay = min(LINE_SWEEP_DELAY_MS, 0.1 * room)
+        duration = units[i] / rate if rate > 0 else 0.0
+        if room < math.inf:
+            breath = min(250.0, 0.15 * room)
+            duration = max(min(duration, room - delay - breath), min(500.0, 0.5 * room))
+        out.append((start + delay, start + delay + duration))
+    return out
+
+
+def sweep_lit(weights: list[float], t_ms: float, window: tuple[float, float]) -> float:
+    """How many characters (fractional) are lit at ``t_ms`` when ``weights`` are swept over
+    ``window``. A weightless character lights together with the one before it."""
+    begin, end = window
+    if t_ms <= begin or not weights:
+        return 0.0
+    total = sum(weights)
+    if total <= 0.0:
+        return float(len(weights))
+    progress = word_fill(t_ms, begin, end) * total
+    lit, consumed = 0.0, 0.0
+    for weight in weights:
+        if weight <= 0.0:
+            lit += 1.0
+            continue
+        if progress >= consumed + weight:
+            consumed += weight
+            lit += 1.0
+            continue
+        lit += max(0.0, (progress - consumed) / weight)
+        break
+    return lit
+
 def normalize_divisor(divisor: int) -> int:
     """1 = match display, 2 = half refresh, 3 = third refresh."""
     try:

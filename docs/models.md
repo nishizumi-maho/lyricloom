@@ -108,7 +108,7 @@ the upstream LyricsAlignment-MTL repository (about 66 MB). Its license follows t
 check the upstream repository if you plan to redistribute the weights.
 
 The Windows app runs the model on the CPU by default. With WSL enabled it can run inside WSL on the
-GPU (see [docs/wsl-rocm.md](wsl-rocm.md)). On native Linux in 2.1.0 it runs on the CPU.
+GPU (see [docs/wsl-rocm.md](wsl-rocm.md)). On native Linux in 2.1.1 it runs on the CPU.
 
 ### NLTK data (`singing-nltk-data`)
 

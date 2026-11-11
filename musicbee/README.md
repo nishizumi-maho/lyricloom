@@ -3,7 +3,7 @@
 A karaoke window for MusicBee with a starry night sky. The current line lights up word by word in
 gold, with a soft edge and a glow. Japanese lyrics can be shown as romaji.
 
-Version 1.3.0. The plugin targets .NET Framework 4.8 (included in Windows 10 and 11) and runs inside
+Version 1.3.1. The plugin targets .NET Framework 4.8 (included in Windows 10 and 11) and runs inside
 MusicBee; it does not need admin rights. It is MIT-licensed and ships from the same repository as
 LyricLoom, under `musicbee/`.
 
@@ -21,7 +21,7 @@ and copies the plugin into `%APPDATA%\MusicBee\Plugins`.
 whether MusicBee was found and which plugin version is installed. The assistant refuses while
 MusicBee is running.
 
-**With the release zip.** Download `StarryKaraoke-MusicBee-1.3.0.zip` from the LyricLoom
+**With the release zip.** Download `StarryKaraoke-MusicBee-1.3.1.zip` from the LyricLoom
 [Releases page](https://github.com/nishizumi-maho/lyricloom/releases), extract it, and copy its
 **contents** into:
 

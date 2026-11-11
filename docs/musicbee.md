@@ -57,7 +57,7 @@ MusicBee, a browser or an account.
 [`musicbee/`](../musicbee/README.md). It has its own **MIT license** and is not part of LyricLoom's
 GPL code. LyricLoom writes the enhanced `.lrc`; the plugin displays it.
 
-Version 1.3.0 targets .NET Framework 4.8, which is included in Windows 10 and Windows 11, and runs
+Version 1.3.1 targets .NET Framework 4.8, which is included in Windows 10 and Windows 11, and runs
 inside MusicBee without administrator rights. It is bundled with LyricLoom's Windows build so the
 setup assistant (and the installer's optional MusicBee task) can put it in place for you.
 
@@ -80,7 +80,7 @@ There are three equivalent ways:
   Karaoke** or **Update Starry Karaoke**. It refuses while MusicBee is running, replaces the
   plugin's own files, replaces the shared `RomajiCore.dll`/`LibNMeCab.dll` only when the bundled
   version is newer, and copies the `RomajiLyrics\IpaDic` dictionary only when it is missing.
-- **The release ZIP:** download `StarryKaraoke-MusicBee-1.3.0.zip` from the
+- **The release ZIP:** download `StarryKaraoke-MusicBee-1.3.1.zip` from the
   [Releases page](https://github.com/nishizumi-maho/lyricloom/releases), extract it, and copy its
   **contents** into MusicBee's Plugins folder:
   - installed MusicBee: `%APPDATA%\MusicBee\Plugins`;
@@ -213,8 +213,11 @@ LyricLoom writes enhanced LRC:
 - The plugin turns each `<...>` segment gold as playback reaches it.
 - A final `<...>` with no text marks the end of the last word, so the last word does not stay lit
   through the next instrumental break.
-- If a file has no word tags, the plugin sweeps across the line over an estimated duration. That is a
-  fallback, not real word timing.
+- If a file has no word tags (lyrics synced per line, as LRCLIB and most players write them), the
+  plugin estimates the sweep: it learns the song's pace from its own lines, spreads each line by sung
+  syllables rather than letters, starts a moment after the line's time (a line time usually comes a
+  little before the voice) and finishes before the next line. The LyricLoom app does the same. It is
+  still an estimate, not real word timing; process the song with LyricLoom for word timing.
 - Japanese text is displayed without inserted spaces. LyricLoom segments Japanese with MeCab and
   keeps the original text in `.japanese.lrc`; the `.romaji.lrc` copy uses spaces between romanized
   segments.

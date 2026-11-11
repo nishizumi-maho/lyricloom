@@ -33,10 +33,11 @@ def _mock_client(handler):
 
 
 def test_version_comparison_handles_tags_and_prereleases():
-    assert updater.is_newer("2.1.1")
-    assert updater.is_newer("v2.2.0-beta.1")          # next minor, even as a prerelease
-    assert not updater.is_newer("2.1.0-beta.1")       # same numeric version as this build
-    assert not updater.is_newer("2.1.0")
+    major, minor, patch = (int(part) for part in updater.VERSION.split("."))
+    assert updater.is_newer(f"{major}.{minor}.{patch + 1}")
+    assert updater.is_newer(f"v{major}.{minor + 1}.0-beta.1")      # next minor, even as a prerelease
+    assert not updater.is_newer(f"{updater.VERSION}-beta.1")        # same numeric version as this build
+    assert not updater.is_newer(updater.VERSION)
     assert not updater.is_newer("2.0.9")
 
 
@@ -224,8 +225,8 @@ def test_download_refuses_a_redirect_outside_github(tmp_path, monkeypatch):
 
 def test_check_refuses_an_asset_outside_the_release(monkeypatch):
     release = {
-        "tag_name": "v2.1.1",
-        "html_url": "https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1",
+        "tag_name": "v9.9.9",
+        "html_url": "https://github.com/nishizumi-maho/lyricloom/releases/tag/v9.9.9",
         "body": "",
         "assets": [{"name": "LyricLoom-Setup.exe", "browser_download_url": "https://evil.example/setup.exe",
                     "size": 1, "digest": "sha256:" + SHA}],
@@ -237,12 +238,12 @@ def test_check_refuses_an_asset_outside_the_release(monkeypatch):
 
 def test_check_returns_the_linux_tarball_when_there_is_no_installer(monkeypatch):
     release = {
-        "tag_name": "v2.1.1",
-        "html_url": "https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1",
+        "tag_name": "v9.9.9",
+        "html_url": "https://github.com/nishizumi-maho/lyricloom/releases/tag/v9.9.9",
         "body": "notes",
-        "assets": [{"name": "LyricLoom-2.1.1-linux-x86_64.tar.gz",
+        "assets": [{"name": "LyricLoom-9.9.9-linux-x86_64.tar.gz",
                     "browser_download_url": "https://github.com/nishizumi-maho/lyricloom/releases/"
-                                            "download/v2.1.1/LyricLoom-2.1.1-linux-x86_64.tar.gz",
+                                            "download/v9.9.9/LyricLoom-9.9.9-linux-x86_64.tar.gz",
                     "size": 1}],
     }
     monkeypatch.setattr(updater, "_get_json", lambda url: release)
@@ -250,7 +251,7 @@ def test_check_returns_the_linux_tarball_when_there_is_no_installer(monkeypatch)
     info = updater.check()
     assert info is not None
     assert info.asset_url == ""
-    assert info.tarball_name == "LyricLoom-2.1.1-linux-x86_64.tar.gz"
+    assert info.tarball_name == "LyricLoom-9.9.9-linux-x86_64.tar.gz"
 
 
 def test_release_page_url_falls_back_to_this_projects_release_page():

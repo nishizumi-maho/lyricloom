@@ -1,3 +1,3 @@
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 # Bumped whenever a change would alter the .lrc produced for the same input.
-ENGINE_VERSION = "9"
+ENGINE_VERSION = "10"

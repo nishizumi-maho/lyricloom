@@ -2,8 +2,9 @@ import random
 
 import pytest
 
-from lyricloom.animation import (LineEmphasis, PlaybackClock, ScrollPath, effective_fps, normalize_divisor,
-                                 paused_fps, smootherstep, target_fps, word_fill)
+from lyricloom.animation import (LINE_SWEEP_DEFAULT_RATE, LINE_SWEEP_DELAY_MS, LineEmphasis, PlaybackClock,
+                                 ScrollPath, effective_fps, line_sweeps, normalize_divisor, paused_fps,
+                                 smootherstep, sung_weights, sweep_lit, target_fps, word_fill)
 
 
 FRAME_MS = 1000.0 / 144.0
@@ -208,3 +209,70 @@ def test_invalid_divisors_fall_back_to_match_display():
     assert normalize_divisor("half") == 1
     assert normalize_divisor(3) == 3
     assert target_fps(4, 144) == 144
+
+
+# ---------------------------------------------------------------- line-synced lyrics
+
+def test_sung_weights_count_syllables_rather_than_letters():
+    # "strength": one syllable in eight letters; "idea": three vowel groups... i-de-a is two
+    # groups here ("ea" is one), the point is that letters alone do not decide the time.
+    assert sum(sung_weights("strength")) == pytest.approx(8 * 0.25 + 1)
+    assert sum(sung_weights("idea")) == pytest.approx(4 * 0.25 + 2)
+    assert sung_weights("a b,") == [1.25, 0.0, 0.25, 0.0]
+    # kana: one unit per mora, a small kana only extends the one before; kanji about 1.7
+    assert sung_weights("きゃっと") == [1.0, 0.25, 1.0, 1.0]
+    assert sung_weights("歌") == [1.7]
+
+
+def _song(starts, unit_counts):
+    estimate = [True] * len(starts)
+    return line_sweeps(starts, unit_counts, estimate)
+
+
+def test_line_sweeps_learn_the_pace_of_the_song():
+    # eight lines of 10 units every 2.5 s: the pace is 10 units per 2.5 s (75th percentile)
+    starts = [1000.0 + 2500.0 * i for i in range(8)]
+    windows = _song(starts, [10.0] * 8)
+    begin, end = windows[0]
+    assert begin == pytest.approx(1000.0 + LINE_SWEEP_DELAY_MS)
+    # 10 units at 4 units/s would be 2500 ms; it must leave a breath before the next line
+    assert end <= starts[1] - 200.0
+    assert end - begin > 1800.0
+
+
+def test_line_sweeps_follow_a_slow_ballad_and_a_fast_rap_differently():
+    slow = _song([5000.0 * i for i in range(6)], [10.0] * 6)       # 2 units/s
+    fast = _song([1000.0 * i for i in range(6)], [10.0] * 6)       # 10 units/s
+    slow_length = slow[0][1] - slow[0][0]
+    fast_length = fast[0][1] - fast[0][0]
+    assert slow_length > 3.5 * fast_length
+
+
+def test_a_line_before_an_instrumental_is_not_stretched_over_it():
+    starts = [0.0, 2500.0, 5000.0, 7500.0, 30000.0, 32500.0]       # 20 s break after line 3
+    windows = _song(starts, [10.0] * 6)
+    before_break = windows[3][1] - windows[3][0]
+    regular = windows[1][1] - windows[1][0]
+    assert before_break == pytest.approx(regular, rel=0.25)
+    assert windows[3][1] < 11000.0
+
+
+def test_line_sweeps_fall_back_to_a_default_pace_with_too_few_lines():
+    windows = line_sweeps([1000.0, 60000.0], [8.6, 4.3], [True, True])
+    begin, end = windows[1]                                         # the last line: no next line
+    assert end - begin == pytest.approx(4.3 / LINE_SWEEP_DEFAULT_RATE)
+
+
+def test_line_sweeps_skip_lines_that_have_word_times_or_no_time():
+    windows = line_sweeps([1000.0, None, 5000.0], [5.0, 5.0, 5.0], [False, True, True])
+    assert windows[0] is None and windows[1] is None and windows[2] is not None
+
+
+def test_sweep_lit_starts_after_the_window_and_lights_spaces_with_their_letter():
+    weights = sung_weights("ba da")
+    window = (1000.0, 2000.0)
+    assert sweep_lit(weights, 1000.0, window) == 0.0
+    assert sweep_lit(weights, 2000.0, window) == pytest.approx(5.0)
+    half = sweep_lit(weights, 1500.0, window)        # "ba" and "da" weigh the same
+    assert half == pytest.approx(3.0)                # "ba" and its space are lit
+    assert 0.0 < sweep_lit(weights, 1050.0, window) < 1.0
