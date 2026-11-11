@@ -4,6 +4,31 @@ All notable changes to LyricLoom and Starry Karaoke are documented here. The for
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning for
 the application release.
 
+## [2.1.1] - 2026-11-11
+
+LyricLoom 2.1.1 and Starry Karaoke 1.3.1 make the karaoke sweep follow the singing, time words more
+precisely and make Whisper's transcription far more reliable.
+
+### Fixed
+
+- **Lyrics synced per line** (a time per line, none per word) are swept at the song's own pace in
+  Starry Karaoke 1.3.1 and in the app: the pace is learned from the song's lines, each line is
+  spread by sung syllables, and the sweep starts 150 ms after the line's time and ends before the
+  next line. The plugin used a fixed 85 ms per letter from the line's time (racing ahead of slow
+  lines), and the app stretched the sweep to the next line.
+- **Word timing:** every CTC block is aligned with the neighbouring block on each side and keeps
+  only its own lines, so a line's first word can no longer start on the previous line's last note.
+  Japanese is aligned in one pass over the whole song instead of blocks cut at Whisper's coarse
+  Japanese anchors.
+- **Transcription:** Whisper runs with `-mc 0` (no text carried between 30 s windows, which could
+  repeat one window through a whole song) and, for the official models, `-dtw <preset> -nfa`
+  (token times from the attention alignment).
+
+### Changed
+
+- Engine version 10 and transcribe stage version 4: songs are re-transcribed and re-timed when they
+  are processed again; the separated vocals are reused.
+
 ## [2.1.0] - 2026-11-09
 
 LyricLoom 2.1.0 adds the first-run setup assistant, a model catalog with per-language and per-song
@@ -215,6 +240,7 @@ LyricLoom 2.0.0 is the first public release. The project was previously called *
 - Chinese lyrics are not a separate language mode; Han-only text can be ambiguous with Japanese.
 - A line that cannot be word-aligned falls back to line-level timing; LyricLoom does not invent word times.
 
+[2.1.1]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1
 [2.1.0]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.0
 [Starry Karaoke 1.3.0]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.0
 [2.0.0]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.0.0

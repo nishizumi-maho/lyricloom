@@ -16,7 +16,7 @@ lyricloom --version
 ```
 
 The packaged Windows and Linux GUI builds are windowed applications and do not expose the console
-command in 2.1.0. Use **Help > Diagnostics…** (copy the text), **Help > Models…**, the status bar and
+command in 2.1.1. Use **Help > Diagnostics…** (copy the text), **Help > Models…**, the status bar and
 the per-track logs; the source/pipx commands below are still the clearest way to inspect a machine if
 you can install them.
 
@@ -463,7 +463,7 @@ Romanization uses MeCab/IPADic and pykakasi. Names, invented readings and unusua
 
 The detector looks for Japanese kana/kanji in the tags and lyric text. A Japanese song with an English title and English artist tags may be detected from the lyric text during alignment; if both the tags and lyric are ambiguous, it may use the non-Japanese path. The `.japanese.lrc`/`.romaji.lrc` files are only written when Japanese characters are found in the final lyric. Fix the tags or paste the Japanese lyric to force the issue.
 
-Chinese lyrics that use only Han characters can be ambiguous with Japanese kanji; 2.1.0 does not have a separate Chinese mode. Check the output and use manual editing if needed.
+Chinese lyrics that use only Han characters can be ambiguous with Japanese kanji; 2.1.1 does not have a separate Chinese mode. Check the output and use manual editing if needed.
 
 ## Word timing is missing or wrong
 

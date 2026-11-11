@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.1.0 (`ENGINE_VERSION = "9"`).
+This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.1.1 (`ENGINE_VERSION = "10"`).
 
 ## The short version
 

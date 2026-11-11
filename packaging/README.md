@@ -1,7 +1,7 @@
 # LyricLoom packaging and releases
 
-This directory contains the public-release scaffolding for LyricLoom 2.1.0 and the Starry Karaoke
-MusicBee plugin 1.3.0. It builds the Windows installer and portable zip, the Linux tarball, the
+This directory contains the public-release scaffolding for LyricLoom 2.1.1 and the Starry Karaoke
+MusicBee plugin 1.3.1. It builds the Windows installer and portable zip, the Linux tarball, the
 plugin zip, and the GitHub Actions workflows that attach those files to a release.
 
 Nothing in this directory adds models or helper binaries to the repository.
@@ -12,11 +12,11 @@ locally.
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| Windows | `LyricLoom-Setup-2.1.0.exe` | Inno Setup 6 per-user installer |
+| Windows | `LyricLoom-Setup-2.1.1.exe` | Inno Setup 6 per-user installer |
 | Windows | `LyricLoom-Setup.exe` | stable copy used by the auto-updater |
-| Windows | `LyricLoom-2.1.0-win64.zip` | portable PyInstaller one-folder bundle |
-| Linux | `LyricLoom-2.1.0-linux-x86_64.tar.gz` | bundle + `.desktop` + install script |
-| MusicBee | `StarryKaraoke-MusicBee-1.3.0.zip` | plugin, recorder, romaji DLLs and dictionary |
+| Windows | `LyricLoom-2.1.1-win64.zip` | portable PyInstaller one-folder bundle |
+| Linux | `LyricLoom-2.1.1-linux-x86_64.tar.gz` | bundle + `.desktop` + install script |
+| MusicBee | `StarryKaraoke-MusicBee-1.3.1.zip` | plugin, recorder, romaji DLLs and dictionary |
 | All | `*.sha256` | one checksum file per artifact |
 
 The release workflow also creates an aggregate `SHA256SUMS` asset and verifies every checksum before
@@ -148,9 +148,9 @@ What the script does:
    and the ggml DLLs, `_internal/wsl/setup-lyricloom-wsl.sh` plus the wheel, and the bundled plugin
    under `_internal/musicbee/`.
 5. Zips the whole one-folder bundle as
-   `dist/LyricLoom-2.1.0-win64.zip`.
+   `dist/LyricLoom-2.1.1-win64.zip`.
 6. Compiles `packaging/windows/LyricLoom.iss` into
-   `dist/LyricLoom-Setup-2.1.0.exe`, copies it to the stable name
+   `dist/LyricLoom-Setup-2.1.1.exe`, copies it to the stable name
    `dist/LyricLoom-Setup.exe`, and writes SHA256 files.
 
 The Windows installer:
@@ -200,14 +200,14 @@ Outputs:
 
 ```text
 dist/LyricLoom/
-dist/LyricLoom-2.1.0-linux-x86_64.tar.gz
-dist/LyricLoom-2.1.0-linux-x86_64.tar.gz.sha256
+dist/LyricLoom-2.1.1-linux-x86_64.tar.gz
+dist/LyricLoom-2.1.1-linux-x86_64.tar.gz.sha256
 ```
 
 The tarball contains:
 
 ```text
-LyricLoom-2.1.0-linux-x86_64/
+LyricLoom-2.1.1-linux-x86_64/
   LyricLoom/             PyInstaller one-folder bundle
   install.sh             per-user installer
   LyricLoom.desktop      desktop-entry template
@@ -216,8 +216,8 @@ LyricLoom-2.1.0-linux-x86_64/
 ### Installing the Linux tarball
 
 ```bash
-tar -xzf LyricLoom-2.1.0-linux-x86_64.tar.gz
-cd LyricLoom-2.1.0-linux-x86_64
+tar -xzf LyricLoom-2.1.1-linux-x86_64.tar.gz
+cd LyricLoom-2.1.1-linux-x86_64
 ./install.sh
 ```
 
@@ -288,14 +288,14 @@ verified against its pinned size and SHA-256 before use.
 The app version lives in three places that must be bumped together:
 
 1. `lyricloom/__init__.py` (`VERSION`);
-2. `pyproject.toml` (`project.version`, currently `2.1.0`);
+2. `pyproject.toml` (`project.version`, currently `2.1.1`);
 3. `packaging/windows/version_info.txt` (file/product version strings).
 
 The plugin version lives in `musicbee/src/StarryKaraoke/StarryKaraoke.csproj` (`<Version>`, currently
-`1.3.0`). `tests/test_versions.py` fails when the app version sources disagree, and the release
+`1.3.1`). `tests/test_versions.py` fails when the app version sources disagree, and the release
 workflow reads the plugin version from the project file.
 
-`packaging/windows/LyricLoom.iss` has a `2.1.0` fallback only; the build script
+`packaging/windows/LyricLoom.iss` has a `2.1.1` fallback only; the build script
 passes the real version with `/DMyAppVersion=...`.
 
 Then:
@@ -305,17 +305,17 @@ Then:
 3. Create and push a tag that exactly matches the version:
 
    ```bash
-   git tag v2.1.0
-   git push origin v2.1.0
+   git tag v2.1.1
+   git push origin v2.1.1
    ```
 
 4. The **Release** workflow validates that the tag equals `lyricloom.VERSION`,
    builds the Windows installer/portable ZIP, the Linux tarball and the plugin ZIP, verifies the
    checksums and publishes a GitHub Release with:
-   * `LyricLoom-Setup.exe` and `LyricLoom-Setup-2.1.0.exe`;
-   * `LyricLoom-2.1.0-win64.zip`;
-   * `LyricLoom-2.1.0-linux-x86_64.tar.gz`;
-   * `StarryKaraoke-MusicBee-1.3.0.zip`;
+   * `LyricLoom-Setup.exe` and `LyricLoom-Setup-2.1.1.exe`;
+   * `LyricLoom-2.1.1-win64.zip`;
+   * `LyricLoom-2.1.1-linux-x86_64.tar.gz`;
+   * `StarryKaraoke-MusicBee-1.3.1.zip`;
    * per-file `.sha256` files and `SHA256SUMS`.
 5. Manual runs are also possible from **Actions -> Release -> Run workflow**.
    A manual run uses the current `lyricloom.VERSION` and creates or updates the
