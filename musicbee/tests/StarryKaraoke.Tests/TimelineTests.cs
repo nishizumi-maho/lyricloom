@@ -81,6 +81,65 @@ namespace StarryKaraoke.Tests
         }
 
         [Fact]
+        public void Sung_weights_count_syllables_rather_than_letters()
+        {
+            Assert.Equal(8 * 0.25 + 1, LineSweep.Weights("strength").Sum(), 6);
+            Assert.Equal(4 * 0.25 + 2, LineSweep.Weights("idea").Sum(), 6);
+            Assert.Equal(new[] { 1.25, 0.0, 0.25, 0.0 }, LineSweep.Weights("a b,"));
+            // kana: one unit per mora, a small kana only extends the one before; kanji about 1.7
+            Assert.Equal(new[] { 1.0, 0.25, 1.0, 1.0 }, LineSweep.Weights("きゃっと"));
+            Assert.Equal(new[] { 1.7 }, LineSweep.Weights("歌"));
+            // the same weights as the app (tests/test_animation.py)
+            Assert.Equal(new[] { 0.25, 1.25, 0, 0.25, 1.25, 0, 0, 1.25, 0.25 }, LineSweep.Weights("Ça va, ok"));
+        }
+
+        [Fact]
+        public void Line_sweeps_match_the_app_for_the_same_song()
+        {
+            // the same song and numbers as lyricloom/animation.py line_sweeps
+            var units = LineSweep.Weights("the stars are falling down tonight").Sum();
+            Assert.Equal(16.25, units, 6);
+            var starts = Enumerable.Range(0, 6).Select(i => 1000.0 + 4000 * i).Concat(new[] { 40000.0 }).ToList();
+            var w = LineSweep.Windows(starts, Enumerable.Repeat(units, 6).Concat(new[] { 3.0 }).ToList(),
+                                      Enumerable.Repeat(true, 6).Concat(new[] { false }).ToList());
+            Assert.Equal(1150.0, w[0].Value.Begin, 6);
+            Assert.Equal(4750.0, w[0].Value.End, 6);
+            Assert.Equal(21150.0, w[5].Value.Begin, 6);
+            Assert.Equal(25150.0, w[5].Value.End, 6);
+            Assert.Null(w[6]);
+        }
+
+        [Fact]
+        public void Line_synced_lines_sweep_at_the_songs_pace_from_just_after_each_tag()
+        {
+            // A line tag usually comes a little before the voice, and a fixed pace ran ahead of slow
+            // lines: the sweep starts after the tag and lasts what the song's own lines take.
+            var lrc = string.Concat(Enumerable.Range(0, 6).Select(i =>
+                          $"[00:{1 + 4 * i:00}.00]the stars are falling down tonight\n"))
+                      + "[00:40.00]<00:40.00>one <00:40.40>more<00:41.00>\n";
+            var lines = Timeline.Build(Lrc.Parse(lrc), 60000, JapaneseMode.RomajiOnly, null);
+            var first = lines[0].Main;
+            Assert.Equal(0, first.LitChars(1100));                          // the tag alone lights nothing
+            Assert.True(first.LitChars(3500) < 0.8 * first.Text.Length);    // not done early and waiting
+            Assert.Equal(first.Text.Length, first.LitChars(4900), 6);
+            Assert.True(lines[0].EndMs < lines[1].StartMs);
+            // word-timed lines keep their own times
+            Assert.Equal(0, lines[6].Main.LitChars(40000));
+            Assert.True(lines[6].Main.LitChars(40450) >= 3);
+        }
+
+        [Fact]
+        public void A_line_before_an_instrumental_is_not_stretched_over_it()
+        {
+            var lrc = "[00:00.00]la la la la la la\n[00:02.50]la la la la la la\n[00:05.00]la la la la la la\n" +
+                      "[00:07.50]la la la la la la\n[00:30.00]la la la la la la\n[00:32.50]la la la la la la\n";
+            var lines = Timeline.Build(Lrc.Parse(lrc), 60000, JapaneseMode.RomajiOnly, null);
+            var regular = lines[1].EndMs - lines[1].StartMs;
+            Assert.True(lines[3].EndMs < 11000);
+            Assert.InRange(lines[3].EndMs - lines[3].StartMs, 0.75 * regular, 1.25 * regular + 200);
+        }
+
+        [Fact]
         public void Line_timed_ends_before_next_line()
         {
             var lines = Timeline.Build(Lrc.Parse(Plain), 60000, JapaneseMode.RomajiOnly, null);

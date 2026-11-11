@@ -211,8 +211,27 @@ def test_rtl_and_line_only_lyrics_are_understood(app):
     view.advance(1000.0)
     view.advance(3000.0)
     assert view.lit_units(0, 1000.0) == 0.0
-    assert 0.0 < view.lit_units(0, 3000.0) < len(doc.lines[0].text)
+    assert 0.0 < view.lit_units(0, 1300.0) < len(doc.lines[0].text)
     assert view.lit_units(0, 5000.0) == pytest.approx(len(doc.lines[0].text))
+    view.close()
+
+
+def test_line_synced_lyrics_sweep_at_the_songs_pace_from_just_after_each_tag(app):
+    """A line tag usually comes a little before the voice, and a fixed pace runs ahead of slow
+    lines: the sweep starts after the tag and lasts what the song's own lines take."""
+    lines = [Line(1000 + 4000 * i, [Segment("the stars are falling down tonight", None, None)])
+             for i in range(6)]
+    lines.append(Line(40000, [Segment("one", 40000, 40400), Segment(" more", 40400, 41000)]))
+    view = LyricView(animate_when_paused=False)
+    view.resize(800, 300)
+    view.set_doc(LrcDoc({}, lines))
+    assert view.lit_units(0, 1100.0) == 0.0                 # the tag alone lights nothing
+    # the line is sung over most of the 4 s before the next one, not in 3 s and then waiting
+    assert view.lit_units(0, 3500.0) < 0.8 * len(lines[0].text)
+    assert view.lit_units(0, 4900.0) == pytest.approx(len(lines[0].text))
+    # word-timed lines keep their own times
+    assert view.lit_units(6, 40000.0) == 0.0
+    assert view.lit_units(6, 40400.0) == pytest.approx(3.0)
     view.close()
 
 
