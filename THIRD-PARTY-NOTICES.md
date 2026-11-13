@@ -46,6 +46,20 @@ LyricLoom uses PySide6 under the **LGPL-3.0**. The Qt libraries are dynamically 
 | **FFmpeg** | LGPL-2.1-or-later or GPL-2.0-or-later, depending on the build | Audio decode/encode | <https://ffmpeg.org> |
 | **PyInstaller** | GPL-2.0-or-later with a special exception for bootloaders | Release builds (development tool) | <https://pyinstaller.org> |
 
+### Downloaded by the GPU on Windows setup
+
+These are not part of the installer. They are downloaded to `%LOCALAPPDATA%\LyricLoom\runtimes`
+only when you run the setup assistant's **GPU on Windows** setup, and removed by its **Remove…**
+button or by the uninstaller.
+
+| Component | License | Used for | Source |
+|---|---|---|---|
+| **uv** | MIT OR Apache-2.0 | Creates the runtime's Python environment and installs its packages | <https://github.com/astral-sh/uv> |
+| **CPython** (python-build-standalone) | PSF-2.0; the build bundles other open-source libraries under their own licenses | The runtime's interpreter | <https://github.com/astral-sh/python-build-standalone> |
+| **PyTorch, torchaudio, torchvision** (CUDA builds) | BSD-3-Clause; the wheels include NVIDIA CUDA and cuDNN libraries under NVIDIA's license agreements | GPU inference on NVIDIA cards | <https://pytorch.org> |
+| **torch-directml** | MIT; includes Microsoft's DirectML redistributable under its own license | GPU inference through DirectML | <https://github.com/microsoft/DirectML> |
+| **ONNX Runtime** (GPU / DirectML builds) | MIT | MDX-Net separator models | <https://onnxruntime.ai> |
+
 `pykakasi`, `mutagen` and `Unidecode` are GPL-licensed dependencies. Their licenses are compatible with LyricLoom's GPL-3.0-or-later. `PySide6` is used under the LGPL, not the GPL option.
 
 ## Machine-learning components

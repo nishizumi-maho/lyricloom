@@ -85,7 +85,7 @@ def _runner(output: bytes, calls=None):
 def test_rtx_50_series_gets_the_cuda_12_8_build(name):
     plan = gpu_runtime.plan_for("cuda", name)
     assert plan.torch_index == "https://download.pytorch.org/whl/cu128"
-    assert plan.torch_packages == ("torch==2.7.1", "torchaudio==2.7.1")
+    assert plan.torch_packages == ("torch==2.7.1", "torchaudio==2.7.1", "torchvision==0.22.1")
 
 
 @pytest.mark.parametrize("name", ["NVIDIA GeForce RTX 3060", "NVIDIA GeForce GTX 1660 SUPER",
@@ -94,7 +94,7 @@ def test_rtx_50_series_gets_the_cuda_12_8_build(name):
 def test_other_nvidia_cards_get_the_cuda_12_4_build(name):
     plan = gpu_runtime.plan_for("cuda", name)
     assert plan.torch_index == "https://download.pytorch.org/whl/cu124"
-    assert plan.torch_packages == ("torch==2.5.1", "torchaudio==2.5.1")
+    assert plan.torch_packages == ("torch==2.5.1", "torchaudio==2.5.1", "torchvision==0.20.1")
     assert plan.packages == ("audio-separator[gpu]==0.47.1", "g2p_en", "nltk")
 
 
@@ -124,7 +124,8 @@ def test_install_runs_the_uv_steps_in_order_inside_the_data_folder(tmp_path):
     assert uv.calls == [
         ["venv", "--python", "3.11", "--allow-existing", str(tmp_path / "runtimes" / "cuda")],
         ["pip", "install", "--python", python, "--default-index",
-         "https://download.pytorch.org/whl/cu124", "torch==2.5.1", "torchaudio==2.5.1"],
+         "https://download.pytorch.org/whl/cu124", "torch==2.5.1", "torchaudio==2.5.1",
+         "torchvision==0.20.1"],
         ["pip", "install", "--python", python, "audio-separator[gpu]==0.47.1", "g2p_en", "nltk"],
     ]
     env = uv.envs[0]
