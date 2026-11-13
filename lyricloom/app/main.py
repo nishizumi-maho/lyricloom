@@ -15,7 +15,8 @@ from pathlib import Path
 
 import mutagen
 
-from PySide6.QtCore import QByteArray, QElapsedTimer, QObject, QThread, QTimer, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import (QByteArray, QElapsedTimer, QLocale, QObject, QThread, QTimer, QUrl, Qt, Signal,
+                            Slot)
 from PySide6.QtGui import (QAction, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence,
                            QUndoCommand, QUndoStack)
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -25,9 +26,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QSplitter, QSystemTrayIcon, QTableView, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import cache, config, runner, runtime
+from .. import cache, config, gpu_runtime, runner, runtime
 from .. import models as model_catalog
 from .. import VERSION, updater
+from ..errtext import os_error_text
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
@@ -1333,7 +1335,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _show_io_error(self, action: str, path: Path, exc: OSError) -> None:
-        reason = exc.strerror or str(exc)
+        reason = os_error_text(exc)
         message = f"{action} failed:\n{path}\n\n{reason}"
         self.statusBar().showMessage(f"{action} failed: {reason}", 12000)
         QMessageBox.critical(self, action, message)
@@ -1925,6 +1927,9 @@ class MainWindow(QMainWindow):
             return "Device: CPU (fallback)"
         if device == "kept":
             return "Device: vocals already cached"
+        selected = gpu_runtime.selected()
+        if selected:
+            return "Device: " + {"cuda": "CUDA", "directml": "DirectML"}[selected]
         return (f"Device: ROCm (WSL {config.SEPARATOR_WSL_DISTRO})"
                 if config.SEPARATOR_WSL_ENABLED else "Device: CPU")
 
@@ -2746,6 +2751,15 @@ def startup_message(cli: CommandLine) -> dict | None:
     return None
 
 
+def apply_english_locale() -> None:
+    """Formats numbers and dates in English, as the rest of the interface is.
+
+    Qt takes its default locale from the Windows *regional format*, which is separate from the
+    display language: an English Windows set to a Brazilian format would otherwise show
+    "1,50" and Portuguese month names inside an English window."""
+    QLocale.setDefault(QLocale(QLocale.Language.English, QLocale.Country.UnitedStates))
+
+
 def run(argv: list[str] | None = None):
     argv = list(sys.argv if argv is None else argv)
     if len(argv) >= 2 and argv[0] == "--worker":
@@ -2767,6 +2781,7 @@ def run(argv: list[str] | None = None):
         # The constants were computed at import, before the migration rewrote the settings;
         # re-read them so this session uses the moved work/models folders (FRB-14).
         config.refresh_folder_constants()
+    apply_english_locale()
     app = QApplication(argv if has_program else [config.APP_NAME, *argv])
     install_shutdown_joins()
     if migrated:

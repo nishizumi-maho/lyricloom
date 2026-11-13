@@ -1,5 +1,7 @@
 """Worker: isolates the vocal stem. Payload {audio, out_dir, model, model_dir, model_files,...}.
-device "rocm" runs inside WSL, where audio-separator finds the GPU through torch's CUDA API."""
+device "rocm" runs inside WSL, where audio-separator finds the GPU through torch's CUDA API;
+"directml" runs in the Windows DirectML runtime.  The result names the device the model really
+used ("cuda", "dml" or "cpu"), which is not always the one that was asked for."""
 import os
 from pathlib import Path
 
@@ -39,10 +41,29 @@ def _missing_files(model_dir: Path, p: dict) -> list[str]:
     return [str(path) for path in needed if not path.is_file()]
 
 
+def actual_device(separator) -> str:
+    """Where the loaded model runs: "cuda", "dml" or "cpu".
+
+    audio-separator keeps RoFormer models on the CPU under DirectML (torch-directml cannot hold
+    their memory), so asking for DirectML does not mean getting it."""
+    instance = getattr(separator, "model_instance", None)
+    device = getattr(instance, "torch_device", None)
+    if device is None:
+        device = getattr(separator, "torch_device", None)
+    kind = str(getattr(device, "type", device) or "cpu")
+    return {"cuda": "cuda", "privateuseone": "dml"}.get(kind, "cpu")
+
+
 def main() -> None:
     p = read_payload()
     torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "6")))
     requested = p.get("device", "auto")
+    directml = requested == "directml"
+    if directml and p.get("directml_roformer"):
+        # audio-separator's own switch: run MDXC/RoFormer on DirectML instead of moving it to the
+        # CPU.  It needs most of a 16 GB card; when it does not fit the worker fails and the stage
+        # separates on the CPU.
+        os.environ["AUDIO_SEPARATOR_FORCE_DML_MDXC"] = "1"
     device = "cuda" if requested in ("auto", "cuda", "rocm") and torch.cuda.is_available() else "cpu"
     out_dir = Path(p["out_dir"])
     # Prefer the copy inside the distro when the setup helper made one; /mnt is the fallback.
@@ -56,10 +77,12 @@ def main() -> None:
             "the separator model is missing: " + ", ".join(missing)
             + ". Run `lyricloom models download <id>` or open Help > Models.")
     sep = Separator(output_dir=str(out_dir), model_file_dir=str(model_dir), output_format="WAV",
-                    output_single_stem="Vocals", use_directml=False,
+                    output_single_stem="Vocals", use_directml=directml,
                     mdxc_params={"segment_size": 256, "override_model_segment_size": False,
                                  "batch_size": 1, "overlap": p["overlap"], "pitch_shift": 0})
     sep.load_model(model_filename=p["model"])
+    if directml:
+        device = actual_device(sep)
     files = sep.separate(p["audio"], {"Vocals": "vocals_raw"})
     produced = [out_dir / Path(f).name for f in files]
     emit({"vocals": str(produced[0]), "device": device})

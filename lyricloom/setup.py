@@ -35,7 +35,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from . import config, downloads
+from . import config, downloads, gpu_runtime
+from .errtext import error_text
 from .workers import WorkerCancelled, run_process, run_process_stream, wsl_path
 from .workers.probe_gpu import RESULT_MARK as PROBE_MARK
 
@@ -171,6 +172,9 @@ class Recommendation:
     whisper_backend_reason: str
     whisper_model: str               # "whisper-large-v3" | "whisper-large-v3-turbo"
     whisper_model_reason: str
+    # The suggested place for separation and alignment: "cuda" | "cpu" (ACCELERATION_CHOICES).
+    acceleration: str = "cpu"
+    acceleration_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -275,8 +279,7 @@ def _decode(data: bytes) -> str:
 
 
 def _describe(exc: BaseException) -> str:
-    text = f"{type(exc).__name__}: {exc}".strip()
-    return text or type(exc).__name__
+    return error_text(exc)
 
 
 def _attempt(call: Callable[[], object], default):
@@ -336,10 +339,19 @@ def _disk_space(path: Path) -> tuple[int, int]:
     return int(usage.free), int(usage.total)
 
 
+# Win32_VideoController.AdapterRAM is a 32-bit value: every card with 4 GB or more reports 4 GB.
+# The display driver writes the real size to its registry class key, which is read when present.
+_GPU_CLASS_KEY = (r"HKLM:\SYSTEM\CurrentControlSet\Control\Class"
+                  r"\{4d36e968-e325-11ce-bfc1-08002be10318}\0*")
 GPU_QUERY = [
     "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-    "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion | "
-    "ConvertTo-Json",
+    "Get-CimInstance Win32_VideoController | ForEach-Object { $name = $_.Name; "
+    f"$real = (Get-ItemProperty '{_GPU_CLASS_KEY}' -ErrorAction SilentlyContinue | "
+    "Where-Object { $_.DriverDesc -eq $name } | Select-Object -First 1)."
+    "'HardwareInformation.qwMemorySize'; "
+    "[pscustomobject]@{ Name = $name; "
+    "AdapterRAM = $(if ($real) { [int64]$real } else { $_.AdapterRAM }); "
+    "DriverVersion = $_.DriverVersion } } | ConvertTo-Json",
 ]
 NVIDIA_QUERY = [
     "nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader",
@@ -461,6 +473,14 @@ def _probe_nvidia(runner: Runner) -> tuple[NvidiaGpu, ...]:
     return _parse_nvidia_smi(result.stdout)
 
 
+def _wsl_answers_version(runner: Runner) -> bool:
+    """True when ``wsl.exe --version`` succeeds: WSL is installed, in any display language."""
+    try:
+        return runner(["wsl.exe", "--version"], 10.0).returncode == 0
+    except Exception:  # noqa: BLE001 - an old in-box WSL has no --version; treat it as unknown
+        return False
+
+
 def _probe_wsl(runner: Runner) -> WslState:
     if not config.IS_WINDOWS:
         return WslState(error="WSL is only available on Windows")
@@ -473,10 +493,15 @@ def _probe_wsl(runner: Runner) -> WslState:
     distros = _parse_wsl_distros(result.stdout)
     if result.returncode != 0:
         text = (_decode(result.stdout) + "\n" + _decode(result.stderr)).lower()
-        if "no installed distributions" in text or "no distributions" in text:
+        # wsl.exe answers in the Windows display language, so the English sentence only matches
+        # on an English system.  ``wsl.exe --version`` succeeding means WSL itself is installed
+        # and the failed listing is the "no distro yet" case, whatever the language.
+        if ("no installed distributions" in text or "no distributions" in text
+                or _wsl_answers_version(runner)):
             return WslState(installed=True, version2=False)
-        detail = _tail(result.stderr) or _tail(result.stdout) or f"exit code {result.returncode}"
-        return WslState(installed=False, version2=False, error=f"wsl.exe -l -v failed: {detail}")
+        detail = _tail(result.stderr) or _tail(result.stdout) or "no output"
+        return WslState(installed=False, version2=False,
+                        error=f"wsl.exe -l -v failed (exit code {result.returncode}): {detail}")
     return WslState(installed=True, version2=any(distro.version >= 2 for distro in distros),
                     distros=distros)
 
@@ -571,6 +596,42 @@ def detect(runner: Runner | None = None) -> SystemReport:
     )
 
 
+ACCELERATION_CHOICES = ("cuda", "cpu")
+
+
+def choose_acceleration(report: SystemReport) -> tuple[str, str]:
+    """Where the assistant suggests running separation and alignment, and why.
+
+    Returns ``(choice, reason)`` with ``choice`` one of :data:`ACCELERATION_CHOICES`.  The reason is
+    plain English for a non-technical user, shown under "Suggested setup"; the choice preselects
+    the matching control on the Acceleration page.  Nothing is installed here.
+
+    The rule is deliberately small.  An NVIDIA card gets the CUDA runtime: it is one click and
+    puts every heavy stage on the GPU.  Every other machine gets the CPU, which needs no setup
+    and cannot fail; DirectML and WSL are named as options the user may pick, never suggested as
+    the default, because DirectML is experimental and WSL with ROCm takes real setup work.
+    """
+    nvidia = next((gpu for gpu in report.gpus if gpu.vendor == "nvidia"), None)
+    if nvidia is not None:
+        return "cuda", (f"{nvidia.name} was found. Use \"GPU on Windows\" below: one click "
+                        "downloads about 3 GB and runs separation and alignment on the "
+                        "graphics card.")
+    other = next((gpu for gpu in report.gpus if gpu.vendor in ("amd", "intel")), None)
+    if other is None:
+        return "cpu", ("No NVIDIA, AMD or Intel graphics card was found, so separation and "
+                       "alignment use the CPU, which needs no setup.")
+    reason = f"The CPU is the default for {other.name}: it needs no setup and always works."
+    if gpu_runtime.suggest_directml_roformer(other.memory_bytes):
+        reason += (" Optional: DirectML under \"GPU on Windows\" can run vocal separation on "
+                   "this card, 3 to 4 times faster in our test.")
+    else:
+        reason += (" Optional: DirectML under \"GPU on Windows\" speeds up MDX-Net separator "
+                   "models on this card.")
+    if other.vendor == "amd" and report.wsl.installed and report.wsl.version2:
+        reason += " WSL with ROCm, further down, runs every stage on the GPU but takes more setup."
+    return "cpu", reason
+
+
 def recommend(report: SystemReport) -> Recommendation:
     """Turns a report into the assistant's plain recommendations, each explained in one sentence."""
     gpu = next((adapter for adapter in report.gpus if adapter.vendor in ("nvidia", "amd")), None)
@@ -603,7 +664,10 @@ def recommend(report: SystemReport) -> Recommendation:
         model = "whisper-large-v3"
         reason = ("With at least 12 GB of RAM and 6 CPU cores, the full large-v3 model gives the "
                   "best accuracy.")
+    acceleration, acceleration_reason = choose_acceleration(report)
     return Recommendation(
+        acceleration=acceleration,
+        acceleration_reason=acceleration_reason,
         cpu_available=True,
         cpu_reason=("CPU processing needs no extra setup beyond downloading the Whisper model "
                     "and runs on every machine."),
@@ -755,6 +819,9 @@ def use_wsl_environment(environment: WslEnvironment) -> bool:
         "wsl_gpu": True,
         "wsl_distro": environment.distro,
         "wsl_python": environment.python,
+        # One choice is in effect at a time: the Windows GPU runtime is deselected, not removed.
+        "gpu_backend": "",
+        "gpu_python": "",
     })
     return True
 
@@ -981,6 +1048,7 @@ def use_bundled_whisper() -> Path:
 
 
 __all__ = [
+    "ACCELERATION_CHOICES",
     "BackendError",
     "CommandResult",
     "GpuAdapter",
@@ -999,6 +1067,7 @@ __all__ = [
     "WslSetupResult",
     "WslState",
     "bundled_wsl_files",
+    "choose_acceleration",
     "detect",
     "find_wsl_environments",
     "install_whisper_backend",

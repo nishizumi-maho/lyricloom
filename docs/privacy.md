@@ -51,7 +51,7 @@ that allowlist, over HTTPS, checked at every hop.
 LyricLoom respects sites that block scripted requests (HTTP 401, 403 or 429). It skips them instead
 of trying to bypass the block.
 
-**Turn it off:** there is no separate switch in 2.1.1, because finding lyrics is the purpose of the
+**Turn it off:** there is no separate switch in 2.2.0, because finding lyrics is the purpose of the
 lyrics stage. To avoid these requests entirely, do not process songs, or use an offline DNS/firewall
 rule for the hosts above. Skipped providers do not stop a local transcription from succeeding.
 
@@ -81,6 +81,25 @@ They do not include your music or library.
 
 **Turn it off:** download the models before processing, or block the hosts above; a missing model then
 fails the stage instead of being fetched.
+
+### Windows GPU runtime setup
+
+The optional **GPU on Windows** setup downloads software only when you click **Set up and use** on
+the setup assistant's **Acceleration** page:
+
+- the `uv` package installer from `github.com` (`astral-sh/uv` release 0.13.8, with its exact size
+  and SHA-256 pinned in the source);
+- a standalone Python 3.11 that `uv` fetches from `github.com`
+  (`astral-sh/python-build-standalone` release assets) and checks against its own checksum list;
+- PyTorch, torchaudio and torchvision wheels from `download.pytorch.org` (the CUDA 12.4 or 12.8
+  index) for the CUDA runtime, or from PyPI for the DirectML runtime;
+- `audio-separator`, `g2p_en`, `nltk`, `torch-directml` and their dependencies from PyPI (`pypi.org`
+  and `files.pythonhosted.org`).
+
+LyricLoom itself is not downloaded: the runtime imports it from the installed app. Everything is
+stored in `%LOCALAPPDATA%\LyricLoom\runtimes`. No audio, library path, settings file or key is sent
+to any of those hosts; they see your IP address and which packages were requested. The GPU test at
+the end of the setup runs on your computer and reports to no one.
 
 ### WSL environment setup
 
@@ -344,7 +363,7 @@ tool for processing audio files. It is not directed at children.
 
 ## Changes
 
-This page describes LyricLoom 2.1.1 and Starry Karaoke 1.3.1. If a later version adds a network
+This page describes LyricLoom 2.2.0 and Starry Karaoke 1.3.1. If a later version adds a network
 feature, it should be documented here and in the release notes. The short summary is in
 [PRIVACY.md](../PRIVACY.md).
 

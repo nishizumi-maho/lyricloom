@@ -19,7 +19,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QApplication, QDialog, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit,
                                QPushButton, QVBoxLayout, QWidget)
 
-from .. import VERSION, config, runtime
+from .. import VERSION, config, gpu_runtime, runtime
 
 APP_LOG_NAME = "app.log"
 
@@ -64,6 +64,11 @@ def assemblyai_state() -> str:
     return f"{enabled} ({origin} set; value not shown)"
 
 
+def _runtimes_state() -> str:
+    found = [name for name in config.GPU_BACKENDS if gpu_runtime.installed(name)]
+    return ", ".join(found) if found else "none installed"
+
+
 def _torch_state() -> str:
     try:
         import torch   # noqa: PLC0415 - optional and slow; Diagnostics only
@@ -104,6 +109,8 @@ def diagnostics_text(library_root: Path | None = None) -> str:
         "GPU and WSL",
         f"  separator device setting  {config.SEPARATOR_DEVICE}",
         f"  CPU threads               {config.CPU_THREADS}",
+        f"  acceleration in use       {gpu_runtime.acceleration_text()}",
+        f"  Windows GPU runtimes      {_runtimes_state()}",
         f"  WSL enabled               {config.SEPARATOR_WSL_ENABLED}",
         f"  WSL distro                {config.SEPARATOR_WSL_DISTRO or '(not set)'}",
         f"  WSL python                {config.SEPARATOR_WSL_PYTHON or '(not set)'}",

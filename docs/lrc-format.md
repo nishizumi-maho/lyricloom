@@ -24,7 +24,7 @@ The audio file itself is never modified.
 ```lrc
 [ti:Synthetic Song]
 [ar:Demo Artist]
-[re:LyricLoom 2.1.1]
+[re:LyricLoom 2.2.0]
 [#source:uta-net conf:0.94]
 [#engine:9]
 [#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]
@@ -53,7 +53,7 @@ Tags are written at the top, in this order when present:
 |---|---|---|
 | `[ti:...]` | `[ti:Synthetic Song]` | Track title from the audio tags. Falls back to the file stem. |
 | `[ar:...]` | `[ar:鈴木このみ]` | Artist from the audio tags. May be empty if the file has no artist tag. |
-| `[re:...]` | `[re:LyricLoom 2.1.1]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
+| `[re:...]` | `[re:LyricLoom 2.2.0]` | The application that wrote the file and its version. LyricLoom also accepts the legacy `LYRICS BOCA` marker when deciding whether a file is its own. |
 | `[#source:...]` | `[#source:uta-net conf:0.94]` | Where the lyric came from, followed by the track confidence. Sources include `lrclib`, `netease`, `qq`, `utaten`, `genius`, `websearch`, `transcription` and `manual`. |
 | `[#engine:...]` | `[#engine:10]` | The engine version that produced the timing. This is separate from the app version. A new engine version can change timings and cause reprocessing. |
 | `[#models:...]` | `[#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]` | The model each stage used for this song, as `stage=model-id` pairs separated by `;`. Written on every successful run. |

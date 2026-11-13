@@ -14,8 +14,10 @@ processed locally by Whisper, the vocal separator and the aligners.
   User-Agent). Turn them off in **Settings**. **Help > Check for updates…** still works as a manual
   check. When a newer release is found, **Settings > When an update is found** chooses automatic
   install on close, ask first, or notify only; a downloaded installer is SHA-256 verified.
-- **The WSL setup** downloads Python packages from your distro's package archive, `download.pytorch.org`
-  and PyPI only when you start it. The optional faster whisper.cpp builds come from the project's
+- **The GPU on Windows setup** downloads the `uv` installer and a standalone Python from GitHub, and
+  PyTorch and its packages from `download.pytorch.org` and PyPI, only when you click **Set up and
+  use**. **The WSL setup** downloads Python packages from your distro's package archive,
+  `download.pytorch.org` and PyPI only when you start it. The optional faster whisper.cpp builds come from the project's
   pinned GitHub release assets.
 - **Optional AssemblyAI:** cloud transcription is off by default. It runs only when you turn on
   `assemblyai_enabled`, keep a key, and allow cloud use for the run. It uploads the isolated vocal

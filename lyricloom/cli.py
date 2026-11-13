@@ -191,6 +191,9 @@ def _doctor() -> int:
     print(f"mms            {'ok' if runtime.mms_status() else 'missing'}")
     print(f"mtl            {'ok' if runtime.mtl_status() else 'missing'}")
     if config.IS_WINDOWS:
+        from . import gpu_runtime
+
+        print(f"acceleration   {gpu_runtime.acceleration_text()}")
         print(f"wsl enabled    {config.SEPARATOR_WSL_ENABLED}")
         if config.SEPARATOR_WSL_ENABLED:
             print(f"wsl distro     {config.SEPARATOR_WSL_DISTRO}")
