@@ -1,6 +1,7 @@
 """LyricLoom's interface is English whatever the Windows display language or regional format."""
 import ast
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from lyricloom.errtext import error_text, message_text, os_error_text
 from lyricloom.lyrics.sources import websearch
 
 PACKAGE = Path(__file__).resolve().parent.parent / "lyricloom"
+# OSError only keeps a Windows error code on Windows; elsewhere there is nothing to rewrite.
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="WinError exists on Windows")
 
 
 class Runner:
@@ -25,6 +28,7 @@ class Runner:
 # --------------------------------------------------------------------------- OS error text
 
 
+@windows_only
 def test_a_localized_windows_error_is_shown_in_english():
     # What Python builds on a Portuguese Windows for a missing program.
     exc = FileNotFoundError(2, "O sistema não pode encontrar o arquivo especificado", "uv.exe", 2)
@@ -34,17 +38,20 @@ def test_a_localized_windows_error_is_shown_in_english():
     assert error_text(exc).startswith("FileNotFoundError: [WinError 2]")
 
 
+@windows_only
 def test_a_sharing_violation_names_the_real_problem():
     exc = PermissionError(13, "O arquivo já está sendo usado por outro processo", "a.lrc", 32)
     assert os_error_text(exc) == "[WinError 32] The file is being used by another process: 'a.lrc'"
 
 
+@windows_only
 def test_an_unknown_windows_code_never_falls_back_to_the_localized_text():
     exc = OSError(22, "A operação solicitada requer elevação", None, 99999)
     text = os_error_text(exc)
     assert text == "[WinError 99999] Windows could not complete the operation"
 
 
+@windows_only
 def test_both_file_names_of_a_rename_are_kept():
     exc = OSError(13, "Acesso negado", "a.part", 5, "a.lrc")
     assert os_error_text(exc) == "[WinError 5] Access is denied: 'a.part' -> 'a.lrc'"

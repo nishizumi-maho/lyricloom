@@ -1,6 +1,7 @@
 """The Windows GPU runtime engine, with fakes in place of uv, the network and the GPU."""
 import json
 import subprocess
+import sys
 import threading
 import zipfile
 from pathlib import Path
@@ -224,6 +225,7 @@ def test_the_pinned_uv_release_is_an_https_github_asset():
 # --------------------------------------------------------------------------- probe
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="WinError exists on Windows")
 def test_probe_reports_a_broken_interpreter_instead_of_raising():
     def run(argv, timeout_s, **kwargs):
         raise FileNotFoundError(2, "O sistema não pode encontrar o arquivo", "python.exe", 2)

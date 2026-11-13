@@ -4,6 +4,49 @@ All notable changes to LyricLoom and Starry Karaoke are documented here. The for
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning for
 the application release.
 
+## [2.2.0] - 2026-11-13
+
+LyricLoom 2.2.0 adds GPU processing on Windows without WSL and keeps the interface English on any
+Windows language. Starry Karaoke stays at 1.3.1.
+
+### Added
+
+- **GPU on Windows.** The setup assistant's Acceleration page has a new **GPU on Windows** group.
+  **Set up and use** downloads the `uv` installer (pinned by size and SHA-256), builds a Python
+  3.11 environment in `%LOCALAPPDATA%\LyricLoom\runtimes` with a GPU build of PyTorch and
+  audio-separator, and runs a real operation on the GPU. The runtime is selected only when that
+  test passes and is used from the next song, with no restart.
+  - **NVIDIA GPU (CUDA):** vocal separation, forced alignment and the English singing model run
+    on the GPU. Only a current NVIDIA driver is needed. PyTorch 2.5.1 with CUDA 12.4 is used, or
+    2.7.1 with CUDA 12.8 for RTX 50-series cards.
+  - **DirectML (experimental):** speeds up MDX-Net and VR separator models on AMD, Intel and
+    NVIDIA GPUs. RoFormer models, including the suggested one, and both alignment models stay
+    on the CPU.
+- A failed, cancelled or interrupted setup changes no setting and can be resumed. A GPU stage
+  that fails during a song falls back to the CPU and records the reason, including a runtime
+  folder that was deleted by hand.
+- **Remove…** deletes a runtime; the uninstaller deletes the runtimes and installed whisper.cpp
+  builds with the rest of LyricLoom's data.
+- Settings, the assistant's summary, **Help > Diagnostics…** and `lyricloom doctor` name the
+  acceleration in use.
+
+### Fixed
+
+- **English interface on any Windows.** Windows error messages were shown in the system's
+  display language; they are now written in English from the error code. Numbers and dates
+  followed the Windows regional format and now use English formatting. WSL was reported as not
+  installed on a non-English Windows with no distro, because the check read `wsl.exe`'s English
+  sentence.
+- **Lyrics web search** added the Portuguese word "letra" to the query for every song that was
+  not Japanese. It now adds it only for Portuguese songs.
+- The separator worker reports the device the model really used, so a DirectML run that
+  audio-separator kept on the CPU is shown as CPU with the reason.
+
+### Changed
+
+- Choosing **CPU only**, a WSL environment or the Windows runtime deselects the other two. The
+  Settings group for WSL is now titled **GPU through WSL (advanced)**.
+
 ## [2.1.1] - 2026-11-11
 
 LyricLoom 2.1.1 and Starry Karaoke 1.3.1 make the karaoke sweep follow the singing, time words more
@@ -240,6 +283,7 @@ LyricLoom 2.0.0 is the first public release. The project was previously called *
 - Chinese lyrics are not a separate language mode; Han-only text can be ambiguous with Japanese.
 - A line that cannot be word-aligned falls back to line-level timing; LyricLoom does not invent word times.
 
+[2.2.0]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.2.0
 [2.1.1]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.1
 [2.1.0]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.0
 [Starry Karaoke 1.3.0]: https://github.com/nishizumi-maho/lyricloom/releases/tag/v2.1.0
