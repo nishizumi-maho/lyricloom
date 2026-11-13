@@ -36,6 +36,7 @@ from pathlib import Path, PurePosixPath
 from typing import Callable
 
 from . import config, downloads
+from .errtext import error_text
 from .workers import WorkerCancelled, run_process, run_process_stream, wsl_path
 from .workers.probe_gpu import RESULT_MARK as PROBE_MARK
 
@@ -275,8 +276,7 @@ def _decode(data: bytes) -> str:
 
 
 def _describe(exc: BaseException) -> str:
-    text = f"{type(exc).__name__}: {exc}".strip()
-    return text or type(exc).__name__
+    return error_text(exc)
 
 
 def _attempt(call: Callable[[], object], default):
@@ -461,6 +461,14 @@ def _probe_nvidia(runner: Runner) -> tuple[NvidiaGpu, ...]:
     return _parse_nvidia_smi(result.stdout)
 
 
+def _wsl_answers_version(runner: Runner) -> bool:
+    """True when ``wsl.exe --version`` succeeds: WSL is installed, in any display language."""
+    try:
+        return runner(["wsl.exe", "--version"], 10.0).returncode == 0
+    except Exception:  # noqa: BLE001 - an old in-box WSL has no --version; treat it as unknown
+        return False
+
+
 def _probe_wsl(runner: Runner) -> WslState:
     if not config.IS_WINDOWS:
         return WslState(error="WSL is only available on Windows")
@@ -473,10 +481,15 @@ def _probe_wsl(runner: Runner) -> WslState:
     distros = _parse_wsl_distros(result.stdout)
     if result.returncode != 0:
         text = (_decode(result.stdout) + "\n" + _decode(result.stderr)).lower()
-        if "no installed distributions" in text or "no distributions" in text:
+        # wsl.exe answers in the Windows display language, so the English sentence only matches
+        # on an English system.  ``wsl.exe --version`` succeeding means WSL itself is installed
+        # and the failed listing is the "no distro yet" case, whatever the language.
+        if ("no installed distributions" in text or "no distributions" in text
+                or _wsl_answers_version(runner)):
             return WslState(installed=True, version2=False)
-        detail = _tail(result.stderr) or _tail(result.stdout) or f"exit code {result.returncode}"
-        return WslState(installed=False, version2=False, error=f"wsl.exe -l -v failed: {detail}")
+        detail = _tail(result.stderr) or _tail(result.stdout) or "no output"
+        return WslState(installed=False, version2=False,
+                        error=f"wsl.exe -l -v failed (exit code {result.returncode}): {detail}")
     return WslState(installed=True, version2=any(distro.version >= 2 for distro in distros),
                     distros=distros)
 

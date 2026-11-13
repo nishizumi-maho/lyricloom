@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogBut
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import config, downloads, models, runtime
+from ..errtext import os_error_text
 from .model_status import snapshot as model_status_snapshot
 
 LOG = logging.getLogger(__name__)
@@ -96,7 +97,7 @@ def free_space_error(specs: list[models.ModelSpec], root: Path | None = None) ->
         free = shutil.disk_usage(probe).free
     except OSError as exc:
         return (f"Could not check the free disk space for the models folder:\n{root}\n\n"
-                f"{exc.strerror or exc}")
+                f"{os_error_text(exc)}")
     if free >= required:
         return None
     return (f"Not enough free disk space for this download.\n\nModels folder: {root}\n"
@@ -915,7 +916,7 @@ class ModelsWindow(QDialog):
             folder.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             QMessageBox.warning(self, "Models", f"Could not create the models folder:\n{folder}\n\n"
-                                                f"{exc.strerror or exc}")
+                                                f"{os_error_text(exc)}")
             return
         if sys.platform == "win32":
             os.startfile(folder)  # type: ignore[attr-defined]
@@ -967,7 +968,7 @@ class ModelsWindow(QDialog):
                 config.set_setting("model_language_codes", stored)
             except OSError as exc:
                 QMessageBox.warning(self, "Add language code",
-                                    f"Could not save the language code:\n{exc}")
+                                    f"Could not save the language code:\n{os_error_text(exc)}")
                 return False
         self._reload_language_codes()
         index = self.language_combo.findData(code)

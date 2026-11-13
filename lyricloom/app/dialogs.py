@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QProgressDialog, QPushButton, QVBoxLayout, QWidget)
 
 from .. import VERSION, config, runtime, setup, updater
+from ..errtext import os_error_text
 
 ASK_BEFORE_UPLOAD = "assemblyai_ask_before_upload"
 _TEST_KEEP_ALIVE: list[tuple[QThread, _SetupCheck]] = []
@@ -34,7 +35,7 @@ def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = F
     try:
         path = path.resolve()
     except OSError as exc:
-        return None, f"{field}: cannot use {path}:\n{exc.strerror or exc}"
+        return None, f"{field}: cannot use {path}:\n{os_error_text(exc)}"
     if path.parent == path:
         return None, f"{field}: choose a folder inside a drive, not the drive root ({path})."
     if not path.exists():
@@ -43,7 +44,7 @@ def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = F
         try:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            return None, f"{field}: cannot create {path}:\n{exc.strerror or exc}"
+            return None, f"{field}: cannot create {path}:\n{os_error_text(exc)}"
     if not path.is_dir():
         return None, f"{field}: this is a file, not a folder:\n{path}"
     probe = path / ".lyricloom-write-test"
@@ -51,7 +52,7 @@ def validate_folder(field: str, text: str, *, must_exist: bool, create: bool = F
         probe.write_text("", encoding="utf-8")
         probe.unlink()
     except OSError as exc:
-        return None, f"{field}: the folder is not writable:\n{path}\n{exc.strerror or exc}"
+        return None, f"{field}: the folder is not writable:\n{path}\n{os_error_text(exc)}"
     return path, None
 
 
@@ -354,7 +355,7 @@ class SettingsDialog(QDialog):
         except OSError as exc:
             QMessageBox.critical(
                 self, "Settings",
-                f"Could not save the settings to {config.SETTINGS_FILE}:\n{exc.strerror or exc}")
+                f"Could not save the settings to {config.SETTINGS_FILE}:\n{os_error_text(exc)}")
             return
         except (RuntimeError, ValueError) as exc:
             QMessageBox.critical(self, "AssemblyAI", str(exc))
@@ -573,7 +574,7 @@ class UpdateController(QObject):
             updater.skip_version(info.version)
         except OSError as exc:
             QMessageBox.warning(self._window, "Updates",
-                                f"Could not remember the skipped version:\n{exc}")
+                                f"Could not remember the skipped version:\n{os_error_text(exc)}")
         path = self.take_downloaded_update()
         if path is not None:
             try:

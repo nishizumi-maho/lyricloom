@@ -9,6 +9,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from .. import runner
+from ..errtext import message_text
 
 
 def _audio(path: Path) -> bool:
@@ -20,7 +21,7 @@ def validate_audio_file(item: str | Path) -> tuple[Path | None, str | None]:
     try:
         path = Path(item).expanduser().resolve()
     except (OSError, RuntimeError) as exc:
-        return None, f"{item}: {exc}"
+        return None, f"{item}: {message_text(exc)}"
     if not path.exists():
         return None, f"{path}: does not exist"
     if not path.is_file():
@@ -40,7 +41,7 @@ def expand_audio_paths(items: Iterable[str | Path]) -> tuple[list[Path], list[st
         try:
             resolved = path.resolve()
         except (OSError, RuntimeError) as exc:
-            rejected.append(f"{path}: {exc}")
+            rejected.append(f"{path}: {message_text(exc)}")
             return
         if resolved not in seen:
             seen.add(resolved)
@@ -50,7 +51,7 @@ def expand_audio_paths(items: Iterable[str | Path]) -> tuple[list[Path], list[st
         try:
             path = Path(item).expanduser().resolve()
         except (OSError, RuntimeError) as exc:
-            rejected.append(f"{item}: {exc}")
+            rejected.append(f"{item}: {message_text(exc)}")
             continue
         if path.is_dir():
             found = runner.find_audio(path)
