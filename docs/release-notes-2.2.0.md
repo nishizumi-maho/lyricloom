@@ -15,10 +15,14 @@ this release is unchanged.
     alignment and the English singing model run on the GPU. It downloads about 3 GB and needs
     about 8 GB of free disk space and a current NVIDIA driver. RTX 50-series cards get the
     CUDA 12.8 build they need; other cards get CUDA 12.4.
-  - **DirectML** is an experimental option for AMD, Intel and NVIDIA GPUs. It speeds up **MDX-Net
-    and VR separator models only**. RoFormer models, including the suggested Mel-Band RoFormer,
-    and both alignment models keep running on the CPU, so with the suggested models it changes
-    nothing. For an AMD card, the CPU default or WSL with ROCm remain the better choices.
+  - **DirectML** is an experimental option for AMD, Intel and NVIDIA GPUs that runs **vocal
+    separation**, the slow stage, on the GPU. MDX-Net and VR separator models work on any
+    supported card. RoFormer models, including the suggested Mel-Band RoFormer, need about
+    16 GB of video memory under DirectML, so **Run RoFormer models on the GPU too** is ticked
+    for you only on such a card. Measured on a Radeon RX 6900 XT (16 GB): the suggested model
+    3 to 4 times faster than the CPU with identical output, and MDX-Net Voc FT about 6 times
+    faster. Both alignment models stay on the CPU; WSL with ROCm remains the path that puts
+    every stage on an AMD GPU.
 - **CPU stays the default and the safety net.** A cancelled or failed setup changes no setting
   and can simply be run again. If a GPU stage fails while a song is processed, that song finishes
   on the CPU and the status bar and the track log say why.
@@ -64,8 +68,12 @@ before; the GPU runtime is downloaded only if you ask for it.
   hardware. The setup's own GPU test is what verifies it: if the test fails, nothing is changed
   and LyricLoom keeps using the CPU. Please report a failure with the text from
   **Help > Diagnostics…**.
-- **DirectML does not accelerate RoFormer separator models.** This is a limit of torch-directml
-  that audio-separator works around by running those models on the CPU.
+- **RoFormer models on DirectML take nearly all of a 16 GB card's video memory** (15.5 GB at
+  the peak in our test) because of how torch-directml allocates it. With a game or another
+  GPU program open, the attempt fails and the song is separated on the CPU. On cards with less
+  memory the option is off by default and RoFormer models stay on the CPU.
+- DirectML was tested on one AMD card. Intel and NVIDIA cards are expected to work the same way
+  but were not tested.
 - Whisper transcription on an NVIDIA GPU is still a separate choice: install the **cuBLAS**
   whisper.cpp build under **Faster transcription** on the same page.
 - The installer is **not code-signed**, so Windows SmartScreen can warn. Verify the published

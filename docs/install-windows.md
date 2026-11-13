@@ -154,10 +154,15 @@ choose another path:
     libraries come with PyTorch (CUDA 12.4, or 12.8 for RTX 50-series cards). Vocal separation,
     forced alignment and the English singing model then run on the GPU.
   - **DirectML (AMD, Intel or NVIDIA; experimental)** downloads about 600 MB and needs about
-    3 GB. It speeds up **MDX-Net and VR separator models only**. RoFormer models, including the
-    suggested Mel-Band RoFormer, and both alignment models keep running on the CPU, so with the
-    suggested models DirectML changes nothing. Pick it only together with an MDX-Net separator
-    from **Help > Models…**.
+    3 GB. It speeds up **vocal separation only**; both alignment models keep running on the
+    CPU. MDX-Net and VR separator models run on any supported GPU. RoFormer models, including
+    the suggested Mel-Band RoFormer, run on the GPU only with **Run RoFormer models on the GPU
+    too**: DirectML needs about 16 GB of video memory for them, with nothing else (a game, a
+    video editor) using the card. The box is ticked for you when the card has that much. A
+    song that does not fit is separated on the CPU after the failed attempt. Without the
+    option, RoFormer models stay on the CPU and DirectML helps only with an MDX-Net separator
+    from **Help > Models…**. Measured on a Radeon RX 6900 XT (16 GB): the suggested model 3 to
+    4 times faster than the CPU with identical output, MDX-Net Voc FT about 6 times faster.
 
   The log on the page shows each step. At the end the new environment runs a real operation on
   the GPU; the setting is saved only if that works, and the next song uses it with no restart.
@@ -255,9 +260,10 @@ LyricLoom works on the CPU everywhere. The GPU paths are optional and can be cha
   runtime in `%LOCALAPPDATA%\LyricLoom\runtimes\cuda`. Separation and both alignment models run
   on the GPU. Install the **cuBLAS** whisper.cpp build on the same page to transcribe on the GPU
   too.
-- **DirectML on Windows:** an experimental option for MDX-Net and VR separator models on any
-  vendor's GPU. The suggested RoFormer model is not accelerated; for an AMD card, the CPU default
-  or WSL with ROCm is the better choice.
+- **DirectML on Windows:** an experimental option that runs vocal separation on any vendor's
+  GPU without WSL. The suggested RoFormer model needs about 16 GB of video memory for it;
+  MDX-Net and VR models need much less. Alignment stays on the CPU. For an AMD card, WSL with
+  ROCm is the path that puts every stage on the GPU.
 - **Existing WSL GPU environment:** use the assistant's **Find WSL environments** and **Use this**
   for an environment that already has the packages and a working GPU. LyricLoom keeps the Windows
   app and sends only the heavy stages into WSL.
