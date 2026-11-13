@@ -6,7 +6,8 @@ import subprocess
 import threading
 from pathlib import Path
 
-from .. import config
+from .. import config, gpu_runtime
+from ..errtext import message_text
 from ..model import Segment
 from ..workers import WorkerError, run_worker, wsl_path
 from .anchors import Block
@@ -28,7 +29,8 @@ def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[lis
                  cancel: threading.Event | None = None) -> list[list[Segment | None]]:
     """seg_tokens[k][l] = MMS token strings of each segment of line l in block k.
     Returns, per lyric line in order, one Segment (absolute ms) or None per segment.
-    Runs on the GPU through ROCm in WSL when it is available, else on the CPU."""
+    Runs on the GPU (the Windows CUDA runtime, or ROCm/CUDA in WSL) when one is selected, else
+    on the CPU.  DirectML is not used here: torch-directml does not help this model."""
     # R3-27: point torch at our own cache unconditionally; a user-set TORCH_HOME must not make the
     # status check and the aligner disagree about where the checkpoint is.
     torch_home = config.MODELS / "torch"
@@ -38,7 +40,17 @@ def align_blocks(vocals16k: Path, blocks: list[Block], seg_tokens: list[list[lis
     payload = {"wav": str(vocals16k), "device": config.ALIGN_DEVICE, "blocks": [
         {"start_ms": b.start_ms, "end_ms": b.end_ms, "lines": lines} for b, lines in zip(blocks, seg_tokens)],
         "model_path": str(model_path), "model_size": spec.size, "torch_home": str(torch_home)}
-    if config.ALIGN_WSL_ENABLED:
+    runtime = config.gpu_runtime()
+    if runtime is not None and runtime[0] == "cuda":
+        try:
+            res = run_worker("lyricloom.workers.align_ctc", {**payload, "device": "cuda"},
+                             python=gpu_runtime.worker_python(runtime[1]),
+                             extra_env=gpu_runtime.worker_env(), cancel=cancel)
+            return _segments(blocks, res)
+        except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
+            log.warning("alignment on the Windows GPU runtime failed, aligning on the CPU "
+                        "instead: %s", message_text(e)[-300:])
+    elif config.ALIGN_WSL_ENABLED:
         try:
             wsl_torch_home = str(config.ALIGN_WSL_ENV.get("TORCH_HOME") or torch_home)
             mnt_model = wsl_path(payload["model_path"])

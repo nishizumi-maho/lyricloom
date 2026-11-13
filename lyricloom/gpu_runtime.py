@@ -49,6 +49,10 @@ class GpuRuntimeError(RuntimeError):
     """A runtime step could not be completed; the message is meant for the user."""
 
 
+class GpuRuntimeMissing(OSError):
+    """The selected runtime's interpreter is gone (the folder was deleted or moved)."""
+
+
 @dataclass(frozen=True)
 class UvRelease:
     """The official uv Windows zip, pinned like every other download."""
@@ -234,6 +238,15 @@ def worker_env() -> dict[str, str]:
     if source is not None:
         env["PYTHONPATH"] = str(source)
     return env
+
+
+def worker_python(python: str) -> str:
+    """``python`` when it still exists; a stage catches the error and uses the CPU instead."""
+    if not Path(python).is_file():
+        raise GpuRuntimeMissing(
+            f"the Windows GPU runtime is missing ({python}); set it up again in "
+            "Help > Setup assistant > Acceleration")
+    return python
 
 
 def _uv_env() -> dict[str, str]:
@@ -498,6 +511,7 @@ def remove(backend: str) -> bool:
 __all__ = [
     "RuntimeEnvironment",
     "GpuRuntimeError",
+    "GpuRuntimeMissing",
     "RuntimePlan",
     "RuntimeResult",
     "TOTAL_STEPS",
@@ -517,4 +531,5 @@ __all__ = [
     "use",
     "uv_path",
     "worker_env",
+    "worker_python",
 ]
