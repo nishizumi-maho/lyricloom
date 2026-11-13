@@ -62,6 +62,11 @@ Ready.
   *The GPU refused a test operation* means this build of PyTorch has no code for the card; send
   the message with **Help > Diagnostics…** in a bug report. In every case the acceleration
   setting is left as it was and LyricLoom keeps working on the CPU.
+- **A GPU runtime that worked now falls back to the CPU.** The status bar names the reason. A
+  power loss or crash shortly after the setup, or a cleanup tool, can leave the runtime folder
+  incomplete (for example *uv trampoline failed to spawn Python child process*). Click **Set up
+  and use** again: it rebuilds what is missing without downloading everything again. Songs keep
+  being processed on the CPU in the meantime.
 - **DirectML is set up but separation is still slow.** Without **Run RoFormer models on the GPU
   too**, the suggested Mel-Band RoFormer model stays on the CPU and the status bar says
   `Device: CPU (fallback)` with that reason. Tick the option on a card with about 16 GB of video

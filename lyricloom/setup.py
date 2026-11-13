@@ -35,7 +35,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from . import config, downloads
+from . import config, downloads, gpu_runtime
 from .errtext import error_text
 from .workers import WorkerCancelled, run_process, run_process_stream, wsl_path
 from .workers.probe_gpu import RESULT_MARK as PROBE_MARK
@@ -172,7 +172,7 @@ class Recommendation:
     whisper_backend_reason: str
     whisper_model: str               # "whisper-large-v3" | "whisper-large-v3-turbo"
     whisper_model_reason: str
-    # Where separation and alignment should run: "cuda" | "directml" | "wsl" | "cpu".
+    # The suggested place for separation and alignment: "cuda" | "cpu" (ACCELERATION_CHOICES).
     acceleration: str = "cpu"
     acceleration_reason: str = ""
 
@@ -596,26 +596,40 @@ def detect(runner: Runner | None = None) -> SystemReport:
     )
 
 
-ACCELERATION_CHOICES = ("cuda", "directml", "wsl", "cpu")
+ACCELERATION_CHOICES = ("cuda", "cpu")
 
 
 def choose_acceleration(report: SystemReport) -> tuple[str, str]:
     """Where the assistant suggests running separation and alignment, and why.
 
     Returns ``(choice, reason)`` with ``choice`` one of :data:`ACCELERATION_CHOICES`.  The reason is
-    one plain English sentence shown to a non-technical user under "Suggested setup"; the choice
-    preselects the matching control on the Acceleration page.  Nothing is installed here.
+    plain English for a non-technical user, shown under "Suggested setup"; the choice preselects
+    the matching control on the Acceleration page.  Nothing is installed here.
 
-    What the report offers: ``report.gpus`` (each with ``name``, ``vendor`` in nvidia/amd/intel/
-    other and ``memory_bytes``), ``report.wsl.installed``/``.version2``, ``report.disk_free_bytes``
-    (the drive the runtime is installed on) and ``report.ram_bytes``.  A CUDA runtime needs about
-    8 GB of free disk.  A DirectML one needs about 3 GB; it always speeds up MDX-Net/VR separator
-    models (measured 5.8x on an RX 6900 XT) and can run the suggested RoFormer model 3 to 4 times
-    faster, but only on a card with about 16 GB of video memory
-    (``gpu_runtime.suggest_directml_roformer(gpu.memory_bytes)``).
+    The rule is deliberately small.  An NVIDIA card gets the CUDA runtime: it is one click and
+    puts every heavy stage on the GPU.  Every other machine gets the CPU, which needs no setup
+    and cannot fail; DirectML and WSL are named as options the user may pick, never suggested as
+    the default, because DirectML is experimental and WSL with ROCm takes real setup work.
     """
-    # TODO(human): decide the suggestion from the report.
-    return "cpu", ("CPU processing needs no extra setup and runs on every machine.")
+    nvidia = next((gpu for gpu in report.gpus if gpu.vendor == "nvidia"), None)
+    if nvidia is not None:
+        return "cuda", (f"{nvidia.name} was found. Use \"GPU on Windows\" below: one click "
+                        "downloads about 3 GB and runs separation and alignment on the "
+                        "graphics card.")
+    other = next((gpu for gpu in report.gpus if gpu.vendor in ("amd", "intel")), None)
+    if other is None:
+        return "cpu", ("No NVIDIA, AMD or Intel graphics card was found, so separation and "
+                       "alignment use the CPU, which needs no setup.")
+    reason = f"The CPU is the default for {other.name}: it needs no setup and always works."
+    if gpu_runtime.suggest_directml_roformer(other.memory_bytes):
+        reason += (" Optional: DirectML under \"GPU on Windows\" can run vocal separation on "
+                   "this card, 3 to 4 times faster in our test.")
+    else:
+        reason += (" Optional: DirectML under \"GPU on Windows\" speeds up MDX-Net separator "
+                   "models on this card.")
+    if other.vendor == "amd" and report.wsl.installed and report.wsl.version2:
+        reason += " WSL with ROCm, further down, runs every stage on the GPU but takes more setup."
+    return "cpu", reason
 
 
 def recommend(report: SystemReport) -> Recommendation:
