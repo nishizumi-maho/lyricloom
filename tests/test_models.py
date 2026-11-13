@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,10 @@ def test_status_uses_a_sidecar_and_verify_rehashes(tmp_path):
     assert sidecar.is_file()
     assert models.status(spec, root=tmp_path) == "ready"
     file.write_bytes(b"abd")   # same size, different content; the sidecar's mtime is stale
+    # A rewrite within one tick of the Windows clock keeps the same mtime, and the test then
+    # failed at random on a fast machine.  A real edit happens later; say so explicitly.
+    stamp = file.stat()
+    os.utime(file, ns=(stamp.st_atime_ns, stamp.st_mtime_ns + 2_000_000_000))
     assert models.status(spec, root=tmp_path) == "unverified"
     assert models.verify(spec, root=tmp_path) == "corrupt"
 
