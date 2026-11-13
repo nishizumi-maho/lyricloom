@@ -193,6 +193,50 @@ def test_cuda_without_an_nvidia_card_asks_first_and_directml_is_the_default(app,
         assistant.reject()
 
 
+def test_roformer_on_the_gpu_is_ticked_for_a_16_gb_card_and_saved_with_the_setup(
+        app, monkeypatch, boxes):
+    assistant = SetupAssistant()
+    try:
+        page = assistant.acceleration_page
+        report = setup.SystemReport(
+            os_name="Windows 11", cpu_cores=8, ram_bytes=32 * setup.GiB,
+            gpus=(setup.GpuAdapter("AMD Radeon RX 6900 XT", "amd", 17_163_091_968),),
+            wsl=setup.WslState(installed=False))
+        page._apply_report(report)
+        assert page.gpu_backend.currentData() == "directml"
+        assert not page.gpu_roformer.isHidden() and page.gpu_roformer.isChecked()
+        assert config.setting("directml_roformer") is None        # a suggestion saves nothing
+
+        def install(backend, gpu_name="", on_line=None, cancel=None):
+            return gpu_runtime.RuntimeResult(
+                ok=True, backend=backend, python="python.exe",
+                environment=_environment("directml", "AMD Radeon RX 6900 XT"))
+
+        monkeypatch.setattr(gpu_runtime, "install", install)
+        page.start_gpu_setup()
+        _wait(app, lambda: page._job is None)
+        assert config.gpu_runtime() == ("directml", "python.exe")
+        assert gpu_runtime.directml_roformer() is True
+        # Unticking it later takes effect at once, without another setup.
+        page.gpu_roformer.click()
+        assert gpu_runtime.directml_roformer() is False
+        assert "CPU" in page.gpu_status.text()
+    finally:
+        assistant.reject()
+
+
+def test_the_roformer_option_is_hidden_for_cuda_and_unticked_for_a_small_card(app, boxes):
+    assistant = SetupAssistant()
+    try:
+        page = assistant.acceleration_page
+        page._apply_report(_report("AMD Radeon RX 6600", "amd"))      # 12 GB in this fixture
+        assert not page.gpu_roformer.isChecked()
+        page.gpu_backend.setCurrentIndex(page.gpu_backend.findData("cuda"))
+        assert page.gpu_roformer.isHidden()
+    finally:
+        assistant.reject()
+
+
 def test_choosing_the_cpu_deselects_the_runtime_and_wsl(app, boxes):
     assistant = SetupAssistant()
     try:

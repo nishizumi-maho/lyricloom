@@ -277,6 +277,35 @@ def test_a_missing_package_is_named_with_its_import_error():
 # --------------------------------------------------------------------------- settings
 
 
+def test_roformer_on_directml_is_off_until_chosen_and_only_applies_to_directml():
+    assert gpu_runtime.directml_roformer() is False
+    assert gpu_runtime.worker_options("directml") == {}
+    gpu_runtime.set_directml_roformer(True)
+    assert gpu_runtime.worker_options("directml") == {"directml_roformer": True}
+    assert gpu_runtime.worker_options("cuda") == {}
+
+
+@pytest.mark.parametrize("memory, expected", [
+    (17_163_091_968, True),          # a 16 GB card as its driver reports it
+    (24 * 1024 ** 3, True),
+    (12 * 1024 ** 3, False),
+    (4_293_918_720, False),          # the 4 GB ceiling of the old 32-bit value
+    (None, False),
+])
+def test_roformer_on_directml_is_suggested_only_for_cards_with_about_16_gb(memory, expected):
+    assert gpu_runtime.suggest_directml_roformer(memory) is expected
+
+
+def test_the_acceleration_line_says_what_directml_covers():
+    gpu_runtime.use(_passing("directml"), "directml")
+    assert "MDX-Net and VR separator models" in gpu_runtime.acceleration_text()
+    gpu_runtime.set_directml_roformer(True)
+    assert "RoFormer models included" in gpu_runtime.acceleration_text()
+    assert "the runtime is missing" in gpu_runtime.acceleration_text()   # no such python.exe
+    gpu_runtime.disable()
+    assert gpu_runtime.acceleration_text() == "CPU only"
+
+
 def _passing(backend="cuda"):
     return gpu_runtime._parse_probe(
         r"C:\data\runtimes\cuda\Scripts\python.exe",
