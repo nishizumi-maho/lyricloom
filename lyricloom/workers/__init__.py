@@ -2,6 +2,7 @@
 A process per stage releases all VRAM when it exits and lets a stage use another interpreter."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import queue
@@ -113,6 +114,43 @@ def _kill_tree(proc: subprocess.Popen) -> None:
             pass
 
 
+_DLL_SEARCH_LOCK = threading.Lock()
+
+
+def _outside_bundle(program: str) -> bool:
+    """True for a program given by absolute path that is not part of this installation."""
+    path = Path(program)
+    if not path.is_absolute():
+        return False
+    try:
+        path.resolve().relative_to(Path(sys.executable).resolve().parent)
+        return False
+    except (OSError, ValueError):
+        return True
+
+
+@contextlib.contextmanager
+def _system_dll_search(program: str):
+    """Starts a program that is not ours with the normal Windows DLL search path.
+
+    A PyInstaller build calls ``SetDllDirectoryW`` with its own folder, and child processes inherit
+    that: another Python (the GPU runtime) would load this build's C runtime and OpenMP DLLs
+    instead of its own.  The directory is cleared only while the child is being created."""
+    if not (config.IS_WINDOWS and config.IS_FROZEN and _outside_bundle(program)):
+        yield
+        return
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+    with _DLL_SEARCH_LOCK:
+        kernel32.SetDllDirectoryW(None)
+        try:
+            yield
+        finally:
+            kernel32.SetDllDirectoryW(str(config.RESOURCE_ROOT))
+
+
 def run_process(argv: list[str], *, input_bytes: bytes = b"", timeout_s: int | None = None,
                 env: dict | None = None, cwd: Path | str | None = None,
                 cancel: threading.Event | None = None) -> subprocess.CompletedProcess:
@@ -129,9 +167,10 @@ def run_process(argv: list[str], *, input_bytes: bytes = b"", timeout_s: int | N
         kwargs = {}
         if not config.IS_WINDOWS:
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(
-            argv, stdin=stdin, stdout=stdout, stderr=stderr, env=env,
-            cwd=str(cwd) if cwd is not None else None, creationflags=_process_flags(), **kwargs)
+        with _system_dll_search(argv[0]):
+            proc = subprocess.Popen(
+                argv, stdin=stdin, stdout=stdout, stderr=stderr, env=env,
+                cwd=str(cwd) if cwd is not None else None, creationflags=_process_flags(), **kwargs)
         started = time.monotonic()
         while True:
             code = proc.poll()
@@ -172,9 +211,10 @@ def run_process_stream(argv: list[str], *, input_bytes: bytes = b"", timeout_s: 
         kwargs = {}
         if not config.IS_WINDOWS:
             kwargs["start_new_session"] = True
-        proc = subprocess.Popen(
-            argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-            cwd=str(cwd) if cwd is not None else None, creationflags=_process_flags(), **kwargs)
+        with _system_dll_search(argv[0]):
+            proc = subprocess.Popen(
+                argv, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                cwd=str(cwd) if cwd is not None else None, creationflags=_process_flags(), **kwargs)
 
         def pump(stream, kind: str, parts: list[bytes]) -> None:
             try:
@@ -237,10 +277,11 @@ def windows_path(path: str) -> Path:
 
 def run_worker(module: str, payload: dict, python: str | None = None, timeout_s: int = 3600,
                cwd: Path | None = None, wsl: str | None = None, wsl_env: dict | None = None,
-               cancel: threading.Event | None = None) -> dict:
+               cancel: threading.Event | None = None, extra_env: dict | None = None) -> dict:
     """`wsl` names a WSL distro to run the worker in, with `python` being that distro's
     interpreter and `wsl_env` extra variables for it; paths in the payload are the caller's job.
-    `cancel` stops the process tree when it is set."""
+    `extra_env` adds variables for a worker started on Windows with another interpreter (the GPU
+    runtime).  `cancel` stops the process tree when it is set."""
     check_cancelled(cancel)
     threads = {"OMP_NUM_THREADS": str(config.CPU_THREADS), "MKL_NUM_THREADS": str(config.CPU_THREADS)}
     cwd = cwd or (config.APP_DATA if config.IS_FROZEN else config.PROJECT_ROOT)
@@ -266,7 +307,7 @@ def run_worker(module: str, payload: dict, python: str | None = None, timeout_s:
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1",
                "PATH": os.pathsep.join(path_parts + [os.environ.get("PATH", "")]),
                # Caps torch/numpy/onnxruntime thread pools in the worker (see config.CPU_THREADS).
-               **threads}
+               **threads, **(extra_env or {})}
         argv = _worker_argv(module) if _is_this_interpreter(python) else [python, "-m", module]
     proc = run_process(argv, input_bytes=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                        timeout_s=timeout_s, env=env, cwd=cwd, cancel=cancel)
