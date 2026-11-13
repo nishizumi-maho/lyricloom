@@ -19,9 +19,11 @@ Windows language. Starry Karaoke stays at 1.3.1.
   - **NVIDIA GPU (CUDA):** vocal separation, forced alignment and the English singing model run
     on the GPU. Only a current NVIDIA driver is needed. PyTorch 2.5.1 with CUDA 12.4 is used, or
     2.7.1 with CUDA 12.8 for RTX 50-series cards.
-  - **DirectML (experimental):** speeds up MDX-Net and VR separator models on AMD, Intel and
-    NVIDIA GPUs. RoFormer models, including the suggested one, and both alignment models stay
-    on the CPU.
+  - **DirectML (experimental):** runs vocal separation on AMD, Intel and NVIDIA GPUs. MDX-Net
+    and VR models always use the GPU. RoFormer models, including the suggested one, use it
+    with **Run RoFormer models on the GPU too**, which needs about 16 GB of video memory and is
+    ticked by default only for such a card; otherwise they stay on the CPU. Both alignment
+    models stay on the CPU.
 - A failed, cancelled or interrupted setup changes no setting and can be resumed. A GPU stage
   that fails during a song falls back to the CPU and records the reason, including a runtime
   folder that was deleted by hand.
@@ -41,6 +43,8 @@ Windows language. Starry Karaoke stays at 1.3.1.
   not Japanese. It now adds it only for Portuguese songs.
 - The separator worker reports the device the model really used, so a DirectML run that
   audio-separator kept on the CPU is shown as CPU with the reason.
+- **System check:** a graphics card with 4 GB or more of video memory was always shown as
+  4 GB (a 32-bit Windows value); the real size is now read from the display driver.
 
 ### Changed
 

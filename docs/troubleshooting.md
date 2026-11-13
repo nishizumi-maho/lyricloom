@@ -62,10 +62,15 @@ Ready.
   *The GPU refused a test operation* means this build of PyTorch has no code for the card; send
   the message with **Help > Diagnostics…** in a bug report. In every case the acceleration
   setting is left as it was and LyricLoom keeps working on the CPU.
-- **DirectML is set up but separation is still slow.** DirectML speeds up MDX-Net and VR
-  separator models only. The suggested Mel-Band RoFormer model and both alignment models run on
-  the CPU, and the status bar says `Device: CPU (fallback)` with that reason. Choose an MDX-Net
-  model in **Help > Models…** to use the GPU, at some cost in separation quality.
+- **DirectML is set up but separation is still slow.** Without **Run RoFormer models on the GPU
+  too**, the suggested Mel-Band RoFormer model stays on the CPU and the status bar says
+  `Device: CPU (fallback)` with that reason. Tick the option on a card with about 16 GB of video
+  memory, or choose an MDX-Net model in **Help > Models…**, which needs far less memory at some
+  cost in separation quality. Both alignment models always run on the CPU with DirectML.
+- **DirectML: "not enough GPU video memory".** DirectML ran out of video memory for a RoFormer
+  model; the song was separated on the CPU instead. Close games and other programs that use the
+  graphics card and try again. If it keeps happening, untick **Run RoFormer models on the GPU
+  too** so no time is lost on the failed attempt.
 - **The setup assistant has no WSL setup script.** A source checkout does not build the wheel. Use the
   manual procedure in [docs/wsl-rocm.md](wsl-rocm.md), or a packaged Windows build.
 - **A model is missing or corrupt.** Open **Help > Models…**. Select the row and use **Download**,
