@@ -482,6 +482,16 @@ class AccelerationPage(_JobPage):
         self.gpu_note = QLabel("")
         self.gpu_note.setWordWrap(True)
         gpu_layout.addWidget(self.gpu_note)
+        self.gpu_roformer = QCheckBox(
+            "Run RoFormer models on the GPU too (needs about 16 GB of video memory that nothing "
+            "else is using)")
+        self.gpu_roformer.setToolTip(
+            "DirectML needs far more video memory for these models than they do themselves. With "
+            "enough of it, separation is 3 to 4 times faster than the CPU. A song that does not "
+            "fit is separated on the CPU instead, after the failed attempt.")
+        self.gpu_roformer.setChecked(gpu_runtime.directml_roformer())
+        self.gpu_roformer.clicked.connect(self._gpu_roformer_clicked)
+        gpu_layout.addWidget(self.gpu_roformer)
         row = QHBoxLayout()
         self.gpu_setup_btn = QPushButton("Set up and use")
         self.gpu_setup_btn.setToolTip(
@@ -623,7 +633,7 @@ class AccelerationPage(_JobPage):
         self._busy_buttons = [self.scan_btn, self.use_btn, self.wsl_setup_btn,
                               self.install_wsl_btn, self.transcription_btn,
                               self.gpu_setup_btn, self.gpu_remove_btn, self.cpu_radio,
-                              self.gpu_backend]
+                              self.gpu_backend, self.gpu_roformer]
         self._load_bundled_wsl()
         self._refresh_selection()
 
@@ -676,6 +686,11 @@ class AccelerationPage(_JobPage):
                    if recommendation.acceleration in config.GPU_BACKENDS
                    else ("cuda" if recommendation.gpu_vendor == "nvidia" else "directml"))
         self.gpu_backend.setCurrentIndex(max(0, self.gpu_backend.findData(backend)))
+        if config.setting("directml_roformer") is None:
+            # Never chosen: tick it only for a card that has the memory.  Nothing is saved here.
+            memory = max((gpu.memory_bytes or 0 for gpu in report.gpus
+                          if gpu.vendor in ("amd", "intel", "nvidia")), default=0)
+            self.gpu_roformer.setChecked(gpu_runtime.suggest_directml_roformer(memory))
         self._refresh_selection()
         index = self.transcription.findData(recommendation.whisper_backend)
         if index >= 0:
@@ -725,10 +740,25 @@ class AccelerationPage(_JobPage):
         wanted = ("nvidia",) if backend == "cuda" else ("amd", "intel", "nvidia")
         return next((gpu.name for gpu in report.gpus if gpu.vendor in wanted), "")
 
+    def _gpu_roformer_clicked(self, checked: bool) -> None:
+        """Saved at once when DirectML is already in use; otherwise with the setup."""
+        if gpu_runtime.selected() != "directml":
+            return
+        try:
+            gpu_runtime.set_directml_roformer(checked)
+        except OSError as exc:
+            QMessageBox.critical(self, "Acceleration",
+                                 f"Could not save the setting:\n{os_error_text(exc)}")
+            return
+        self.gpu_status.setText(
+            "RoFormer models are tried on the GPU from the next song on." if checked else
+            "RoFormer models run on the CPU from the next song on.")
+
     def _gpu_backend_changed(self, *_args) -> None:
         backend = self.gpu_backend.currentData()
         if backend is None:
             return
+        self.gpu_roformer.setVisible(backend == "directml")
         plan = gpu_runtime.plan_for(backend, self._gpu_name(backend))
         if gpu_runtime.selected() == backend:
             state = "in use"
@@ -791,6 +821,8 @@ class AccelerationPage(_JobPage):
         name = gpu_runtime.BACKEND_NAMES.get(result.backend, result.backend)
         if (result.ok and result.environment is not None
                 and gpu_runtime.use(result.environment, result.backend)):
+            if result.backend == "directml":
+                gpu_runtime.set_directml_roformer(self.gpu_roformer.isChecked())
             self.gpu_progress.setValue(self.gpu_progress.maximum())
             self.gpu_progress.setFormat("Finished")
             self.gpu_status.setText(

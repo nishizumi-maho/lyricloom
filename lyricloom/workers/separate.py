@@ -59,6 +59,11 @@ def main() -> None:
     torch.set_num_threads(int(os.environ.get("OMP_NUM_THREADS", "6")))
     requested = p.get("device", "auto")
     directml = requested == "directml"
+    if directml and p.get("directml_roformer"):
+        # audio-separator's own switch: run MDXC/RoFormer on DirectML instead of moving it to the
+        # CPU.  It needs most of a 16 GB card; when it does not fit the worker fails and the stage
+        # separates on the CPU.
+        os.environ["AUDIO_SEPARATOR_FORCE_DML_MDXC"] = "1"
     device = "cuda" if requested in ("auto", "cuda", "rocm") and torch.cuda.is_available() else "cpu"
     out_dir = Path(p["out_dir"])
     # Prefer the copy inside the distro when the setup helper made one; /mnt is the fallback.

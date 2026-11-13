@@ -90,8 +90,13 @@ class RuntimePlan:
 _CUDA_NOTE = ("Runs vocal separation and both alignment models on an NVIDIA GPU. Needs only a "
               "current NVIDIA driver; the CUDA libraries come with PyTorch.")
 _DIRECTML_NOTE = ("Experimental. DirectML speeds up MDX-Net and VR separator models on AMD, Intel "
-                  "and NVIDIA GPUs. RoFormer models (including the suggested one) and both "
-                  "alignment models keep running on the CPU.")
+                  "and NVIDIA GPUs. RoFormer models (including the suggested one) run on the GPU "
+                  "only with the option below, which needs about 16 GB of video memory; otherwise "
+                  "they stay on the CPU. Both alignment models always use the CPU.")
+# RoFormer under torch-directml: measured on a 16 GB card, the separation took all of the video
+# memory (15.5 GB) and finished 3 to 4 times faster than the CPU with identical output; with a
+# game holding memory it failed at once.  Below this size it is not offered by default.
+DIRECTML_ROFORMER_MIN_BYTES = 15 * GiB
 _GPU_IMPORTS = ("torch", "torchaudio", "audio_separator", "g2p_en", "nltk", "lyricloom")
 
 
@@ -233,6 +238,31 @@ def package_source() -> Path | None:
         wheels = sorted((Path(config.RESOURCE_ROOT) / "wsl").glob("lyricloom-*.whl"))
         return wheels[-1] if wheels else None
     return Path(config.PROJECT_ROOT)
+
+
+def directml_roformer() -> bool:
+    """Whether RoFormer separator models are tried on the GPU under DirectML (default: no).
+
+    audio-separator keeps them on the CPU because torch-directml's allocator needs far more video
+    memory than the model does.  On a card with enough of it the GPU is several times faster, and
+    a run that does not fit fails and is redone on the CPU like any other GPU failure."""
+    return config._flag(config.setting("directml_roformer", False))
+
+
+def set_directml_roformer(value: bool) -> None:
+    config.set_setting("directml_roformer", bool(value))
+
+
+def suggest_directml_roformer(memory_bytes: int | None) -> bool:
+    """True for a card with enough video memory to run RoFormer models under DirectML."""
+    return memory_bytes is not None and memory_bytes >= DIRECTML_ROFORMER_MIN_BYTES
+
+
+def worker_options(backend: str) -> dict:
+    """Extra payload keys for a separation worker started in the runtime of ``backend``."""
+    if backend == "directml" and directml_roformer():
+        return {"directml_roformer": True}
+    return {}
 
 
 def worker_env() -> dict[str, str]:
@@ -504,7 +534,8 @@ def acceleration_text() -> str:
         backend, python = runtime
         text = BACKEND_NAMES[backend]
         if backend == "directml":
-            text += " (MDX-Net and VR separator models; everything else on the CPU)"
+            text += (" (separation only, RoFormer models included)" if directml_roformer()
+                     else " (MDX-Net and VR separator models; everything else on the CPU)")
         if not Path(python).is_file():
             text += " — the runtime is missing, so the CPU is used"
         return text
@@ -533,6 +564,11 @@ def remove(backend: str) -> bool:
 
 
 __all__ = [
+    "DIRECTML_ROFORMER_MIN_BYTES",
+    "directml_roformer",
+    "set_directml_roformer",
+    "suggest_directml_roformer",
+    "worker_options",
     "BACKEND_NAMES",
     "acceleration_text",
     "RuntimeEnvironment",

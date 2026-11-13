@@ -339,10 +339,19 @@ def _disk_space(path: Path) -> tuple[int, int]:
     return int(usage.free), int(usage.total)
 
 
+# Win32_VideoController.AdapterRAM is a 32-bit value: every card with 4 GB or more reports 4 GB.
+# The display driver writes the real size to its registry class key, which is read when present.
+_GPU_CLASS_KEY = (r"HKLM:\SYSTEM\CurrentControlSet\Control\Class"
+                  r"\{4d36e968-e325-11ce-bfc1-08002be10318}\0*")
 GPU_QUERY = [
     "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-    "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion | "
-    "ConvertTo-Json",
+    "Get-CimInstance Win32_VideoController | ForEach-Object { $name = $_.Name; "
+    f"$real = (Get-ItemProperty '{_GPU_CLASS_KEY}' -ErrorAction SilentlyContinue | "
+    "Where-Object { $_.DriverDesc -eq $name } | Select-Object -First 1)."
+    "'HardwareInformation.qwMemorySize'; "
+    "[pscustomobject]@{ Name = $name; "
+    "AdapterRAM = $(if ($real) { [int64]$real } else { $_.AdapterRAM }); "
+    "DriverVersion = $_.DriverVersion } } | ConvertTo-Json",
 ]
 NVIDIA_QUERY = [
     "nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader",
@@ -600,7 +609,10 @@ def choose_acceleration(report: SystemReport) -> tuple[str, str]:
     What the report offers: ``report.gpus`` (each with ``name``, ``vendor`` in nvidia/amd/intel/
     other and ``memory_bytes``), ``report.wsl.installed``/``.version2``, ``report.disk_free_bytes``
     (the drive the runtime is installed on) and ``report.ram_bytes``.  A CUDA runtime needs about
-    8 GB of free disk; a DirectML one about 3 GB and only speeds up MDX-Net/VR separator models.
+    8 GB of free disk.  A DirectML one needs about 3 GB; it always speeds up MDX-Net/VR separator
+    models (measured 5.8x on an RX 6900 XT) and can run the suggested RoFormer model 3 to 4 times
+    faster, but only on a card with about 16 GB of video memory
+    (``gpu_runtime.suggest_directml_roformer(gpu.memory_bytes)``).
     """
     # TODO(human): decide the suggestion from the report.
     return "cpu", ("CPU processing needs no extra setup and runs on every machine.")

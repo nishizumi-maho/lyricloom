@@ -83,8 +83,49 @@ def test_directml_with_a_roformer_model_is_reported_as_cpu_with_the_reason(
     _, device, fallback = sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
     assert device == "cpu" and len(calls) == 1
     assert calls[0]["payload"]["device"] == "directml"
-    assert fallback.startswith("DirectML cannot run Mel-Band RoFormer")
-    assert "MDX-Net" in fallback
+    assert fallback.startswith("DirectML keeps Mel-Band RoFormer")
+    assert "MDX-Net" in fallback and "16 GB" in fallback
+    assert "directml_roformer" not in calls[0]["payload"]      # off unless the user asked
+
+
+def test_roformer_on_directml_is_requested_only_when_the_option_is_on(tmp_path, runtime,
+                                                                      monkeypatch):
+    runtime("directml")
+    gpu_runtime.set_directml_roformer(True)
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _separator(calls, device="dml"))
+    _, device, fallback = sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
+    assert calls[0]["payload"]["directml_roformer"] is True
+    assert (device, fallback) == ("dml", None)
+
+
+def test_the_option_is_never_sent_to_a_cuda_runtime(tmp_path, runtime, monkeypatch):
+    runtime("cuda")
+    gpu_runtime.set_directml_roformer(True)
+    calls = []
+    monkeypatch.setattr(sep_mod, "run_worker", _separator(calls, device="cuda"))
+    sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
+    assert "directml_roformer" not in calls[0]["payload"]
+
+
+def test_running_out_of_video_memory_falls_back_with_a_hint(tmp_path, runtime, monkeypatch):
+    python = runtime("directml")
+    gpu_runtime.set_directml_roformer(True)
+    calls = []
+
+    def run(module, payload, python=None, **kw):
+        calls.append(python)
+        if python == runtime_python:
+            raise WorkerError(module, "RuntimeError: Could not allocate tensor with 405868544 "
+                                      "bytes. There is not enough GPU video memory available!")
+        return {"vocals": str(Path(payload["out_dir"]) / "vocals_raw.wav")}
+
+    runtime_python = python
+    monkeypatch.setattr(sep_mod, "run_worker", run)
+    _, device, fallback = sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
+    assert calls == [python, config.SEPARATOR_PYTHON]
+    assert "not enough GPU video memory" in fallback
+    assert fallback.endswith("choose a smaller separator model.)")
 
 
 def test_directml_with_a_supported_model_is_reported_as_dml(tmp_path, runtime, monkeypatch):
