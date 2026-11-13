@@ -133,9 +133,10 @@ def _outside_bundle(program: str) -> bool:
 def _system_dll_search(program: str):
     """Starts a program that is not ours with the normal Windows DLL search path.
 
-    A PyInstaller build calls ``SetDllDirectoryW`` with its own folder, and child processes inherit
-    that: another Python (the GPU runtime) would load this build's C runtime and OpenMP DLLs
-    instead of its own.  The directory is cleared only while the child is being created."""
+    A PyInstaller build may call ``SetDllDirectoryW`` with its own folder, and child processes
+    inherit that: another Python (the GPU runtime) would load this build's C runtime and OpenMP
+    DLLs instead of its own.  When such a directory is set, it is cleared only while the child is
+    being created and then restored exactly; when none is set, nothing is touched."""
     if not (config.IS_WINDOWS and config.IS_FROZEN and _outside_bundle(program)):
         yield
         return
@@ -143,12 +144,20 @@ def _system_dll_search(program: str):
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.SetDllDirectoryW.argtypes = [ctypes.c_wchar_p]
+    kernel32.GetDllDirectoryW.argtypes = [ctypes.c_ulong, ctypes.c_wchar_p]
+    kernel32.GetDllDirectoryW.restype = ctypes.c_ulong
     with _DLL_SEARCH_LOCK:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel32.GetDllDirectoryW(len(buffer), buffer)
+        current = buffer.value if 0 < length < len(buffer) else ""
+        if not current:
+            yield
+            return
         kernel32.SetDllDirectoryW(None)
         try:
             yield
         finally:
-            kernel32.SetDllDirectoryW(str(config.RESOURCE_ROOT))
+            kernel32.SetDllDirectoryW(current)
 
 
 def run_process(argv: list[str], *, input_bytes: bytes = b"", timeout_s: int | None = None,

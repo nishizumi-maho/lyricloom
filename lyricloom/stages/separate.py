@@ -228,6 +228,10 @@ def _run_separator(audio: Path, work: Path, spec: models.ModelSpec | None = None
             if "memory" in fallback.lower():
                 fallback += (" (The GPU ran out of video memory: close programs that use it, or "
                              "choose a smaller separator model.)")
+            else:
+                # A runtime damaged by a power loss or a cleanup tool is rebuilt by its setup.
+                fallback += (" (If this repeats, run \"Set up and use\" again in Help > Setup "
+                             "assistant > Acceleration to repair the runtime.)")
     elif config.SEPARATOR_WSL_ENABLED:
         try:
             mnt_model_dir = wsl_path(payload["model_dir"])

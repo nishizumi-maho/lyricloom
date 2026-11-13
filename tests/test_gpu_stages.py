@@ -65,6 +65,24 @@ def test_separation_falls_back_to_the_bundled_cpu_worker_when_the_runtime_fails(
     assert "CUDA out of memory" in fallback
 
 
+def test_a_broken_runtime_falls_back_and_says_how_to_repair_it(tmp_path, runtime, monkeypatch):
+    """What a power loss right after the setup left behind on a real machine."""
+    python = runtime("directml")
+
+    def run(module, payload, python=None, **kw):
+        if python == runtime_python:
+            raise WorkerError(module, "error: uv trampoline failed to spawn Python child process"
+                                      "\n  Caused by: entity not found (os error 2)")
+        return {"vocals": str(Path(payload["out_dir"]) / "vocals_raw.wav")}
+
+    runtime_python = python
+    monkeypatch.setattr(sep_mod, "run_worker", run)
+    _, device, fallback = sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
+    assert device == config.SEPARATOR_DEVICE
+    assert "uv trampoline failed" in fallback
+    assert 'run "Set up and use" again' in fallback
+
+
 def test_a_deleted_runtime_is_named_in_the_fallback_instead_of_crashing(tmp_path, monkeypatch):
     calls = []
     missing = str(tmp_path / "gone" / "python.exe")
@@ -73,6 +91,7 @@ def test_a_deleted_runtime_is_named_in_the_fallback_instead_of_crashing(tmp_path
     _, _, fallback = sep_mod._run_separator(tmp_path / "song.flac", tmp_path)
     assert len(calls) == 1 and calls[0]["python"] == config.SEPARATOR_PYTHON
     assert "the Windows GPU runtime is missing" in fallback and "Setup assistant" in fallback
+    assert 'run "Set up and use" again' in fallback
 
 
 def test_directml_with_a_roformer_model_is_reported_as_cpu_with_the_reason(
