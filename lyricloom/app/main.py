@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QSplitter, QSystemTrayIcon, QTableView, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import cache, config, runner, runtime
+from .. import cache, config, gpu_runtime, runner, runtime
 from .. import models as model_catalog
 from .. import VERSION, updater
 from ..errtext import os_error_text
@@ -1927,6 +1927,9 @@ class MainWindow(QMainWindow):
             return "Device: CPU (fallback)"
         if device == "kept":
             return "Device: vocals already cached"
+        selected = gpu_runtime.selected()
+        if selected:
+            return "Device: " + {"cuda": "CUDA", "directml": "DirectML"}[selected]
         return (f"Device: ROCm (WSL {config.SEPARATOR_WSL_DISTRO})"
                 if config.SEPARATOR_WSL_ENABLED else "Device: CPU")
 

@@ -1,13 +1,13 @@
 """The first-run setup assistant: library, system check, acceleration, models and privacy.
 
 The assistant only draws the process.  Every long call (``setup.detect``,
-``setup.find_wsl_environments``, ``setup.run_wsl_setup``,
+``setup.find_wsl_environments``, ``setup.run_wsl_setup``, ``gpu_runtime.install``,
 ``setup.install_whisper_backend`` and the model downloads) runs in a worker ``QObject`` moved to a
 ``QThread``.  The worker's signals are queued to the page, so no widget is touched from a worker
 thread, and every job has a cancellation event that reaches the engine.
 
-The engine owns every setting: ``use_wsl_environment`` writes the WSL settings only after a
-passing probe, ``install_whisper_backend``/``use_bundled_whisper`` write ``whisper_cli``,
+The engine owns every setting: ``use_wsl_environment`` and ``gpu_runtime.use`` write the GPU
+settings only after a passing probe, ``install_whisper_backend``/``use_bundled_whisper`` write ``whisper_cli``,
 ``models.download`` verifies each file, and ``assemblyai_enabled`` is a separate consent flag from
 the API key.  The assistant adds only ``setup_complete`` (on Finish).
 """
@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
                                QProgressBar, QPushButton, QRadioButton, QScrollArea, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWizard, QWizardPage, QWidget)
 
-from .. import config, models, musicbee, runtime, setup, updater
+from .. import config, gpu_runtime, models, musicbee, runtime, setup, updater
 from ..workers import WorkerCancelled
 from ..errtext import error_text, os_error_text
 from .dialogs import validate_folder
@@ -466,8 +466,53 @@ class AccelerationPage(_JobPage):
         cpu_layout = QVBoxLayout(cpu)
         self.cpu_radio = QRadioButton("CPU only — works on every machine and needs no extra setup.")
         self.cpu_radio.setChecked(True)
+        self.cpu_radio.clicked.connect(self._use_cpu)
         cpu_layout.addWidget(self.cpu_radio)
         layout.addWidget(cpu)
+
+        gpu = QGroupBox("GPU on Windows")
+        gpu_layout = QVBoxLayout(gpu)
+        form = QFormLayout()
+        self.gpu_backend = QComboBox()
+        self.gpu_backend.addItem("NVIDIA GPU (CUDA)", "cuda")
+        self.gpu_backend.addItem("DirectML (AMD, Intel or NVIDIA; experimental)", "directml")
+        self.gpu_backend.currentIndexChanged.connect(self._gpu_backend_changed)
+        form.addRow("Backend", self.gpu_backend)
+        gpu_layout.addLayout(form)
+        self.gpu_note = QLabel("")
+        self.gpu_note.setWordWrap(True)
+        gpu_layout.addWidget(self.gpu_note)
+        row = QHBoxLayout()
+        self.gpu_setup_btn = QPushButton("Set up and use")
+        self.gpu_setup_btn.setToolTip(
+            "Downloads what is missing, tests the GPU and, only if the test passes, uses it")
+        self.gpu_setup_btn.clicked.connect(self.start_gpu_setup)
+        self.gpu_cancel_btn = QPushButton("Cancel")
+        self.gpu_cancel_btn.setEnabled(False)
+        self.gpu_cancel_btn.clicked.connect(self._cancel_gpu_setup)
+        self.gpu_remove_btn = QPushButton("Remove…")
+        self.gpu_remove_btn.setToolTip("Delete the downloaded runtime and free its disk space")
+        self.gpu_remove_btn.clicked.connect(self.remove_gpu_runtime)
+        row.addWidget(self.gpu_setup_btn)
+        row.addWidget(self.gpu_cancel_btn)
+        row.addStretch(1)
+        row.addWidget(self.gpu_remove_btn)
+        gpu_layout.addLayout(row)
+        self.gpu_progress = QProgressBar()
+        self.gpu_progress.setRange(0, gpu_runtime.TOTAL_STEPS)
+        self.gpu_progress.setValue(0)
+        gpu_layout.addWidget(self.gpu_progress)
+        self.gpu_log = QTableWidget(0, 1)
+        self.gpu_log.setHorizontalHeaderLabels(["Setup log"])
+        self.gpu_log.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.gpu_log.verticalHeader().setVisible(False)
+        self.gpu_log.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.gpu_log.setMinimumHeight(110)
+        gpu_layout.addWidget(self.gpu_log)
+        self.gpu_status = QLabel("")
+        self.gpu_status.setWordWrap(True)
+        gpu_layout.addWidget(self.gpu_status)
+        layout.addWidget(gpu)
 
         existing = QGroupBox("Use an existing WSL GPU environment")
         existing_layout = QVBoxLayout(existing)
@@ -576,8 +621,11 @@ class AccelerationPage(_JobPage):
         layout.addStretch(1)
 
         self._busy_buttons = [self.scan_btn, self.use_btn, self.wsl_setup_btn,
-                              self.install_wsl_btn, self.transcription_btn]
+                              self.install_wsl_btn, self.transcription_btn,
+                              self.gpu_setup_btn, self.gpu_remove_btn, self.cpu_radio,
+                              self.gpu_backend]
         self._load_bundled_wsl()
+        self._refresh_selection()
 
     def _load_bundled_wsl(self) -> None:
         try:
@@ -620,11 +668,15 @@ class AccelerationPage(_JobPage):
         recommendation = setup.recommend(report)
         self.recommendation.setText(
             "<b>Suggested setup</b><br>"
-            f"Separation and alignment: {recommendation.wsl_gpu_reason}<br>"
+            f"Separation and alignment: {recommendation.acceleration_reason}<br>"
             f"Transcription: {recommendation.whisper_backend_reason}<br>"
             f"Model: {recommendation.whisper_model_reason}")
-        if recommendation.wsl_gpu:
-            self.cpu_radio.setChecked(False)
+        # The combo starts on the backend this machine can use; it selects nothing by itself.
+        backend = (recommendation.acceleration
+                   if recommendation.acceleration in config.GPU_BACKENDS
+                   else ("cuda" if recommendation.gpu_vendor == "nvidia" else "directml"))
+        self.gpu_backend.setCurrentIndex(max(0, self.gpu_backend.findData(backend)))
+        self._refresh_selection()
         index = self.transcription.findData(recommendation.whisper_backend)
         if index >= 0:
             self.transcription.setCurrentIndex(index)
@@ -644,6 +696,161 @@ class AccelerationPage(_JobPage):
                 "environment” after installing WSL 2.")
         else:
             self.existing_note.setText("WSL is not installed, so there is no WSL environment to use.")
+
+    # ---------- CPU and the GPU runtime on Windows
+    def _refresh_selection(self) -> None:
+        """Shows which choice is in effect: the CPU radio, and the state of the chosen backend."""
+        self.cpu_radio.setChecked(not gpu_runtime.selected()
+                                  and not config.setting("wsl_gpu", False))
+        self._gpu_backend_changed()
+
+    def _use_cpu(self) -> None:
+        try:
+            gpu_runtime.disable()
+            config.set_setting("wsl_gpu", False)
+        except OSError as exc:
+            QMessageBox.critical(self, "Acceleration",
+                                 f"Could not save the setting:\n{os_error_text(exc)}")
+        self._refresh_selection()
+        text = "Separation and alignment use the CPU from the next song on."
+        if config.SEPARATOR_WSL_ENABLED:
+            text += " Restart LyricLoom to stop using WSL."
+        self.gpu_status.setText(text)
+
+    def _gpu_name(self, backend: str) -> str:
+        """The adapter the runtime is for; empty when the report has none of that kind."""
+        report = self._report or getattr(self.wizard(), "report", None)
+        if report is None:
+            return ""
+        wanted = ("nvidia",) if backend == "cuda" else ("amd", "intel", "nvidia")
+        return next((gpu.name for gpu in report.gpus if gpu.vendor in wanted), "")
+
+    def _gpu_backend_changed(self, *_args) -> None:
+        backend = self.gpu_backend.currentData()
+        if backend is None:
+            return
+        plan = gpu_runtime.plan_for(backend, self._gpu_name(backend))
+        if gpu_runtime.selected() == backend:
+            state = "in use"
+        elif gpu_runtime.installed(backend):
+            state = "installed, not in use"
+        else:
+            state = "not installed"
+        self.gpu_note.setText(
+            f"{plan.note} The setup downloads about {runtime.human_size(plan.download_bytes)} "
+            f"and needs about {plan.disk_bytes // gpu_runtime.GiB} GB of free disk space. "
+            f"Nothing is changed unless the GPU passes a test at the end.<br><b>Status:</b> {state}.")
+        self.gpu_remove_btn.setEnabled(self._job is None and gpu_runtime.installed(backend))
+
+    def start_gpu_setup(self) -> None:
+        if self._job is not None:
+            return
+        backend = self.gpu_backend.currentData()
+        name = self._gpu_name(backend)
+        if backend == "cuda" and not name:
+            answer = QMessageBox.question(
+                self, "GPU on Windows",
+                "No NVIDIA GPU was found on this computer, so the CUDA runtime will most likely "
+                "fail its test after a large download.\n\nSet it up anyway?")
+            if answer != QMessageBox.Yes:
+                return
+        self.gpu_log.setRowCount(0)
+        self.gpu_progress.setRange(0, gpu_runtime.TOTAL_STEPS)
+        self.gpu_progress.setValue(0)
+        self.gpu_progress.setFormat("Starting…")
+        self.gpu_status.setText("")
+        self.gpu_cancel_btn.setEnabled(True)
+        self._set_busy(True)
+
+        def run(worker):
+            return gpu_runtime.install(backend, name, on_line=worker.line.emit,
+                                       cancel=worker.cancel)
+
+        self._start_job(run, on_done=self._gpu_setup_done, on_failed=self._gpu_setup_failed,
+                        on_cancelled=self._gpu_setup_cancelled, on_line=self._gpu_line,
+                        on_finished=self._gpu_setup_finished)
+
+    @Slot(str)
+    def _gpu_line(self, text: str) -> None:
+        row = self.gpu_log.rowCount()
+        self.gpu_log.insertRow(row)
+        item = QTableWidgetItem(text)
+        item.setToolTip(text)
+        self.gpu_log.setItem(row, 0, item)
+        self.gpu_log.scrollToBottom()
+        match = re.search(r"@@step\s+(\d+)\s*/\s*(\d+)\s*(.*)", text)
+        if match:
+            done, total = int(match.group(1)), max(1, int(match.group(2)))
+            self.gpu_progress.setRange(0, total)
+            # A step is announced when it starts, so the bar shows the finished ones.
+            self.gpu_progress.setValue(max(0, min(done - 1, total)))
+            self.gpu_progress.setFormat(f"Step {done} of {total}: {match.group(3)}")
+
+    @Slot(object)
+    def _gpu_setup_done(self, result) -> None:
+        name = gpu_runtime.BACKEND_NAMES.get(result.backend, result.backend)
+        if (result.ok and result.environment is not None
+                and gpu_runtime.use(result.environment, result.backend)):
+            self.gpu_progress.setValue(self.gpu_progress.maximum())
+            self.gpu_progress.setFormat("Finished")
+            self.gpu_status.setText(
+                f"{name} is ready and in use ({result.environment.device_name}). The next song "
+                "uses it; no restart is needed.")
+            return
+        self.gpu_progress.setFormat("Failed")
+        message = result.error or "The GPU runtime did not pass its test."
+        self.gpu_status.setText(
+            "The GPU setup did not finish, so the acceleration setting was left as it was.")
+        QMessageBox.warning(self, "GPU on Windows", message)
+
+    @Slot(str)
+    def _gpu_setup_failed(self, message: str) -> None:
+        self.gpu_progress.setFormat("Failed")
+        self.gpu_status.setText(
+            "The GPU setup did not finish, so the acceleration setting was left as it was.")
+        QMessageBox.critical(self, "GPU on Windows", message)
+
+    @Slot()
+    def _gpu_setup_cancelled(self) -> None:
+        self.gpu_progress.setFormat("Cancelled")
+        self.gpu_status.setText(
+            "The GPU setup was cancelled. No setting was changed, and what was already "
+            "downloaded is kept for the next attempt.")
+
+    @Slot()
+    def _gpu_setup_finished(self) -> None:
+        self.gpu_cancel_btn.setEnabled(False)
+        self._set_busy(False)
+        self._refresh_selection()
+
+    def _cancel_gpu_setup(self) -> None:
+        self.cancel_job()
+        self.gpu_cancel_btn.setEnabled(False)
+        self.gpu_status.setText("Cancelling the GPU setup…")
+
+    def remove_gpu_runtime(self) -> None:
+        if self._job is not None:
+            return
+        backend = self.gpu_backend.currentData()
+        name = gpu_runtime.BACKEND_NAMES.get(backend, backend)
+        answer = QMessageBox.question(
+            self, "GPU on Windows",
+            f"Delete the downloaded {name} runtime?\n\nSeparation and alignment go back to the "
+            "CPU if it is in use. Your models, settings and lyrics are not touched.")
+        if answer != QMessageBox.Yes:
+            return
+        self._set_busy(True)
+        self.gpu_status.setText("Removing the runtime…")
+
+        def run(worker):
+            return gpu_runtime.remove(backend)
+
+        self._start_job(
+            run,
+            on_done=lambda _removed: self.gpu_status.setText(f"The {name} runtime was removed."),
+            on_failed=lambda message: self.gpu_status.setText(
+                "The runtime could not be removed completely: " + message),
+            on_finished=self._gpu_setup_finished)
 
     # ---------- existing environments
     def _wsl2_distros(self) -> list[str]:
@@ -723,6 +930,7 @@ class AccelerationPage(_JobPage):
         if setup.use_wsl_environment(environment):
             self.existing_status.setText(
                 "Saved. Restart LyricLoom to run separation and alignment on the GPU.")
+            self._refresh_selection()
         else:
             self.existing_status.setText(
                 "This environment did not pass, so the settings were not changed.")
@@ -911,6 +1119,7 @@ class AccelerationPage(_JobPage):
             self._environment_changed()
             if self._wsl_wheel is None:
                 self.wsl_setup_btn.setEnabled(False)
+            self._gpu_backend_changed()
 
     def validatePage(self) -> bool:
         if self._job is not None:
@@ -923,6 +1132,7 @@ class AccelerationPage(_JobPage):
     def shutdown(self) -> None:
         super().shutdown()
         self.wsl_cancel_btn.setEnabled(False)
+        self.gpu_cancel_btn.setEnabled(False)
         self.transcription_cancel_btn.setEnabled(False)
 
 
@@ -1425,11 +1635,7 @@ class SetupAssistant(QWizard):
 
     def summary_text(self) -> str:
         library = config.library_root()
-        if config.setting("wsl_gpu"):
-            acceleration = (f"WSL {config.setting('wsl_distro') or 'auto'} · "
-                            f"{config.setting('wsl_python') or 'python3'}")
-        else:
-            acceleration = "CPU"
+        acceleration = gpu_runtime.acceleration_text()
         ready_text = self.models_page.status_summary()
         updates = (f"on ({ {'auto': 'install automatically', 'ask': 'ask first', 'notify': 'notify only'}.get(updater.install_mode(), 'install automatically') })"
                    if updater.check_enabled() else "off")

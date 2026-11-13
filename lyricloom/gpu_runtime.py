@@ -490,6 +490,26 @@ def selected() -> str:
     return runtime[0] if runtime else ""
 
 
+BACKEND_NAMES = {"cuda": "NVIDIA GPU on Windows (CUDA)", "directml": "DirectML on Windows"}
+
+
+def acceleration_text() -> str:
+    """One line on where separation and alignment run now, for Settings and the summaries."""
+    runtime = config.gpu_runtime()
+    if runtime is not None:
+        backend, python = runtime
+        text = BACKEND_NAMES[backend]
+        if backend == "directml":
+            text += " (MDX-Net and VR separator models; everything else on the CPU)"
+        if not Path(python).is_file():
+            text += " — the runtime is missing, so the CPU is used"
+        return text
+    if config.setting("wsl_gpu", False):
+        return (f"WSL {config.setting('wsl_distro') or 'auto'} · "
+                f"{config.setting('wsl_python') or 'python3'}")
+    return "CPU only"
+
+
 def remove(backend: str) -> bool:
     """Deletes the environment of ``backend`` and deselects it; True when something was deleted.
 
@@ -509,6 +529,8 @@ def remove(backend: str) -> bool:
 
 
 __all__ = [
+    "BACKEND_NAMES",
+    "acceleration_text",
     "RuntimeEnvironment",
     "GpuRuntimeError",
     "GpuRuntimeMissing",
