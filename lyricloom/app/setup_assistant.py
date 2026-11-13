@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDia
 
 from .. import config, models, musicbee, runtime, setup, updater
 from ..workers import WorkerCancelled
+from ..errtext import error_text, os_error_text
 from .dialogs import validate_folder
 from .model_status import snapshot as model_status_snapshot
 
@@ -64,7 +65,7 @@ def _human_size(n: int | None) -> str:
 
 
 def _error_text(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}"
+    return error_text(exc)
 
 
 def _detect(worker: "_Worker"):
@@ -342,7 +343,7 @@ class LibraryPage(QWizardPage):
             config.set_library_root(path)
         except OSError as exc:
             QMessageBox.critical(self, "Music library",
-                                 f"Could not save the library folder:\n{exc.strerror or exc}")
+                                 f"Could not save the library folder:\n{os_error_text(exc)}")
             return False
         self.library.setText(str(path))
         return True
@@ -1263,7 +1264,7 @@ class PrivacyPage(QWizardPage):
         try:
             config.set_assemblyai_key("")
         except (OSError, RuntimeError) as exc:
-            QMessageBox.critical(self, "AssemblyAI", f"Could not remove the key:\n{exc}")
+            QMessageBox.critical(self, "AssemblyAI", f"Could not remove the key:\n{error_text(exc)}")
             return
         self.key.clear()
         self.key.setPlaceholderText("Paste your AssemblyAI API key (optional)")
@@ -1286,7 +1287,7 @@ class PrivacyPage(QWizardPage):
             })
         except OSError as exc:
             QMessageBox.critical(self, "Privacy",
-                                 f"Could not save the privacy settings:\n{exc.strerror or exc}")
+                                 f"Could not save the privacy settings:\n{os_error_text(exc)}")
             return False
         except (RuntimeError, ValueError) as exc:
             QMessageBox.critical(self, "AssemblyAI", str(exc))
@@ -1461,7 +1462,7 @@ class SetupAssistant(QWizard):
             config.set_setting(SETUP_COMPLETE, True)
         except OSError as exc:
             QMessageBox.critical(self, "Setup",
-                                 f"Could not save the setup result:\n{exc.strerror or exc}")
+                                 f"Could not save the setup result:\n{os_error_text(exc)}")
             return
         super().accept()
 

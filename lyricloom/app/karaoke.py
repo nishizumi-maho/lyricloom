@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainW
                                QSlider, QVBoxLayout, QWidget)
 
 from .. import config
+from ..errtext import message_text
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Line
 from .lyric_view import LyricView
@@ -364,7 +365,7 @@ class KaraokeWindow(QMainWindow):
             self.doc = parse_lrc(self.lyrics_path.read_text(encoding="utf-8", errors="replace"))
         except OSError as exc:
             self.doc = None
-            self._show_message("The lyrics file could not be read", str(exc))
+            self._show_message("The lyrics file could not be read", message_text(exc))
             return
         if not self.doc.lines:
             self.doc = None
