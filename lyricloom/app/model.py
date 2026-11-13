@@ -16,6 +16,7 @@ from .. import config
 from .. import models as model_catalog
 from ..align.refine import refine
 from ..brand import is_ours
+from ..errtext import error_text
 from ..lrc import parse_lrc
 from ..model import Line, LrcDoc, Segment
 from ..runner import find_audio
@@ -297,7 +298,7 @@ def _row_from_json(d: dict) -> TrackRow:
 
 def _unreadable_row(audio: Path, exc: Exception) -> TrackRow:
     folder = audio.parent.parent.name if audio.parent.parent != audio.parent else ""
-    return TrackRow(audio, folder, audio.stem, "other", error=f"could not read this file: {type(exc).__name__}: {exc}")
+    return TrackRow(audio, folder, audio.stem, "other", error=f"could not read this file: {error_text(exc)}")
 
 
 def load_cached_rows(root: Path) -> list[TrackRow]:

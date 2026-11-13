@@ -1,6 +1,6 @@
 """English word alignment with LyricsAlignment-MTL, a model trained on sung vocals (DALI).
-It runs on the GPU through ROCm in WSL (its own copy of the repo), falling back to its own venv
-(.venv-mtl) on Windows when WSL fails."""
+It runs on the GPU in the Windows CUDA runtime or through ROCm in WSL (its own copy of the repo),
+falling back to the bundled CPU worker when the GPU run fails."""
 from __future__ import annotations
 
 import logging
@@ -9,7 +9,8 @@ import subprocess
 import threading
 from pathlib import Path
 
-from .. import config
+from .. import config, gpu_runtime
+from ..errtext import message_text
 from ..model import Segment
 from ..workers import WorkerError, run_worker, wsl_path
 
@@ -51,7 +52,17 @@ def align_lines_mtl(vocals: Path, seg_texts: list[list[str]],
                "checkpoint_dir": str(checkpoint.parent.parent),
                "checkpoint_size": spec.size,
                "nltk_dir": str(config.MODELS / "nltk")}
-    if config.MTL_WSL_ENABLED:
+    runtime = config.gpu_runtime()
+    if runtime is not None and runtime[0] == "cuda":
+        try:
+            res = run_worker("lyricloom.workers.align_mtl", {**payload, "cuda": True},
+                             python=gpu_runtime.worker_python(runtime[1]),
+                             extra_env=gpu_runtime.worker_env(), cancel=cancel)
+            return map_words(seg_texts, res["words"])
+        except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
+            log.warning("singing model on the Windows GPU runtime failed, using the CPU: %s",
+                        message_text(e)[-300:])
+    elif config.MTL_WSL_ENABLED:
         try:
             mnt_checkpoint_dir = wsl_path(payload["checkpoint_dir"])
             candidates = [d for d in (config.MTL_WSL_CHECKPOINT, mnt_checkpoint_dir) if d]

@@ -384,6 +384,30 @@ CPU_THREADS = max(1, int(os.environ.get("LYRICLOOM_CPU_THREADS", _cpu_default)))
 SEPARATOR_PYTHON = sys.executable
 
 
+# --------------------------------------------------------------------------- GPU runtime (Windows)
+
+# The packaged app carries a CPU-only torch that cannot be swapped.  A GPU build of torch lives in
+# its own Python environment under RUNTIMES, built by lyricloom.gpu_runtime when the user asks.
+RUNTIMES = APP_DATA / "runtimes"
+GPU_BACKENDS = ("cuda", "directml")
+
+
+def gpu_runtime() -> tuple[str, str] | None:
+    """``(backend, python.exe)`` of the Windows GPU runtime the user selected, else None.
+
+    Read from the settings on every call, so a runtime set up in the assistant is used by the next
+    track without restarting.  The interpreter is not checked here: a stage that finds it missing
+    says so in the track's fallback note instead of silently using the CPU."""
+    if not IS_WINDOWS:
+        return None
+    data = _settings()
+    backend = str(data.get("gpu_backend") or "")
+    python = str(data.get("gpu_python") or "")
+    if backend not in GPU_BACKENDS or not python:
+        return None
+    return backend, python
+
+
 # --------------------------------------------------------------------------- WSL / ROCm (Windows)
 
 def _decode_wsl_output(data: bytes) -> str:

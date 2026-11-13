@@ -1,4 +1,4 @@
-"""Probe one WSL interpreter for GPU support and the packages LyricLoom needs.
+"""Probe one interpreter (WSL or the Windows GPU runtime) for GPU support and LyricLoom's packages.
 
 Run this file as ``<python> -`` with the source on stdin, not with ``-m``: the environment being
 probed may not have the ``lyricloom`` package installed, so it must not import anything from the
@@ -10,6 +10,7 @@ The caller (:func:`lyricloom.setup.find_wsl_environments`) sets the environment 
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import platform
 import sys
@@ -28,6 +29,36 @@ def _import(name: str) -> tuple[bool, str | None, str]:
         return False, None, f"{type(exc).__name__}: {exc}"
 
 
+def _smoke(torch, device) -> str | None:
+    """Runs one small convolution on ``device``; None when it worked.
+
+    ``torch.cuda.is_available()`` only says a driver answered.  A torch build without kernels for
+    the card (an RTX 50-series GPU with an older CUDA build) fails on the first real operation."""
+    try:
+        layer = torch.nn.Conv1d(4, 4, 3).to(device)
+        value = layer(torch.ones((1, 4, 64), device=device)).sum().item()
+        return None if value == value else "the GPU returned NaN for a simple operation"
+    except Exception as exc:  # noqa: BLE001 - any failure is the answer
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _directml(torch, result: dict) -> None:
+    """Fills in the DirectML device when torch-directml is installed and has an adapter."""
+    try:
+        if importlib.util.find_spec("torch_directml") is None:
+            return
+        import torch_directml
+
+        if not torch_directml.is_available():
+            return
+        result["gpu_available"] = True
+        result["device_name"] = str(torch_directml.device_name(0))
+        result["backend"] = "directml"
+        result["smoke_error"] = _smoke(torch, torch_directml.device())
+    except Exception as exc:  # noqa: BLE001 - a broken DirectML install is a reported failure
+        result["error"] = f"{type(exc).__name__}: {exc}"
+
+
 def probe() -> dict:
     result: dict = {
         "python": sys.executable,
@@ -36,6 +67,7 @@ def probe() -> dict:
         "gpu_available": False,
         "device_name": None,
         "backend": "cpu",
+        "smoke_error": None,
         "imports": {},
         "import_versions": {},
         "import_errors": {},
@@ -62,6 +94,9 @@ def probe() -> dict:
             if available:
                 result["device_name"] = str(torch.cuda.get_device_name(0))
                 result["backend"] = "rocm" if getattr(torch.version, "hip", None) else "cuda"
+                result["smoke_error"] = _smoke(torch, "cuda")
+            else:
+                _directml(torch, result)
         except Exception as exc:  # noqa: BLE001 - a broken GPU runtime is a reported failure
             result["error"] = f"{type(exc).__name__}: {exc}"
     except Exception as exc:  # noqa: BLE001 - already imported once, but never crash the probe

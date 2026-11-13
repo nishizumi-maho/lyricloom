@@ -36,8 +36,14 @@ def allowed_page(url: str) -> bool:
     return False
 
 
+def search_word(lang: str) -> str:
+    """The word for "lyrics" added to the query, in the language of the song (never the
+    developer's: "letra" used to be sent for every song that was not Japanese)."""
+    return {"ja": "歌詞", "pt": "letra lyrics"}.get(lang, "lyrics")
+
+
 def search(meta: TrackMeta, client: httpx.Client) -> list[RawResult]:
-    word = "歌詞" if meta.lang == "ja" else "letra lyrics"
+    word = search_word(meta.lang)
     r = check(client.get("https://html.duckduckgo.com/html/", params={"q": f"{meta.artist} {meta.title} {word}"}))
     out = []
     for url in parse_results(r.text)[:8]:

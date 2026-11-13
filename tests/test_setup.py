@@ -211,7 +211,7 @@ def test_find_wsl_environments_probes_the_configured_and_opt_interpreters(monkey
     assert "env" in argv
     assert "HSA_OVERRIDE_GFX_VERSION=10.3.0" in argv
     assert "PYTHONIOENCODING=utf-8" in argv
-    assert script.startswith(b'"""Probe one WSL interpreter')
+    assert script.startswith(b'"""Probe one interpreter')
     assert probe_calls[0][0][-2:] == ["/opt/torch/bin/python", "-"]
 
 
@@ -294,6 +294,62 @@ def test_use_wsl_environment_writes_settings_only_after_a_passing_probe():
     # The user's env values survive untouched.
     assert config.setting("wsl_env") == {"HSA_OVERRIDE_GFX_VERSION": "10.3.0"}
     assert config.setting("wsl_hsa_override") == "10.3.0"
+
+
+# --------------------------------------------------------------------------- acceleration choice
+
+
+def test_an_nvidia_card_is_offered_the_cuda_runtime():
+    choice, reason = setup.choose_acceleration(_report())
+    assert choice == "cuda"
+    assert reason.startswith("NVIDIA GeForce RTX 4070 was found.")
+    assert "GPU on Windows" in reason and "3 GB" in reason
+    recommendation = setup.recommend(_report())
+    assert (recommendation.acceleration, recommendation.acceleration_reason) == (choice, reason)
+
+
+def test_nvidia_wins_when_the_machine_also_has_an_integrated_adapter():
+    report = _report(gpus=(setup.GpuAdapter("Intel(R) UHD Graphics 770", "intel", None),
+                           setup.GpuAdapter("NVIDIA GeForce RTX 3060", "nvidia", 12 * setup.GiB)))
+    choice, reason = setup.choose_acceleration(report)
+    assert choice == "cuda" and "RTX 3060" in reason
+
+
+def test_an_amd_card_keeps_the_cpu_default_and_hears_about_directml_and_wsl():
+    report = _report(gpus=(setup.GpuAdapter("AMD Radeon RX 6900 XT", "amd", 17_163_091_968),))
+    choice, reason = setup.choose_acceleration(report)
+    assert choice == "cpu"
+    assert reason.startswith("The CPU is the default for AMD Radeon RX 6900 XT")
+    assert "Optional: DirectML" in reason and "3 to 4 times faster" in reason
+    assert "WSL with ROCm" in reason
+
+
+def test_a_small_amd_card_is_told_what_directml_really_speeds_up():
+    report = _report(gpus=(setup.GpuAdapter("AMD Radeon RX 6600", "amd", 8 * setup.GiB),),
+                     wsl=setup.WslState(installed=False))
+    choice, reason = setup.choose_acceleration(report)
+    assert choice == "cpu"
+    assert "MDX-Net separator models" in reason
+    assert "3 to 4 times" not in reason and "WSL" not in reason
+
+
+def test_intel_graphics_never_gets_the_wsl_hint():
+    report = _report(gpus=(setup.GpuAdapter("Intel(R) Arc(TM) A770", "intel", None),))
+    choice, reason = setup.choose_acceleration(report)
+    assert choice == "cpu" and "WSL" not in reason and "Optional: DirectML" in reason
+
+
+def test_a_machine_without_a_known_graphics_card_uses_the_cpu():
+    report = _report(gpus=(setup.GpuAdapter("Microsoft Basic Display Adapter", "other", None),))
+    assert setup.choose_acceleration(report) == (
+        "cpu", "No NVIDIA, AMD or Intel graphics card was found, so separation and alignment "
+               "use the CPU, which needs no setup.")
+    assert setup.choose_acceleration(_report(gpus=()))[0] == "cpu"
+
+
+def test_every_choice_is_a_documented_one():
+    for report in (_report(), _report(gpus=())):
+        assert setup.choose_acceleration(report)[0] in setup.ACCELERATION_CHOICES
 
 
 # --------------------------------------------------------------------------- whisper backends

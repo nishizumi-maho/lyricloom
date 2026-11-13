@@ -16,7 +16,7 @@ lyricloom --version
 ```
 
 The packaged Windows and Linux GUI builds are windowed applications and do not expose the console
-command in 2.1.1. Use **Help > Diagnostics…** (copy the text), **Help > Models…**, the status bar and
+command in 2.2.0. Use **Help > Diagnostics…** (copy the text), **Help > Models…**, the status bar and
 the per-track logs; the source/pipx commands below are still the clearest way to inspect a machine if
 you can install them.
 
@@ -54,6 +54,28 @@ Ready.
 - **No WSL environment passes.** The probe needs `torch`, `torchaudio`, `audio_separator`, `g2p_en`,
   `nltk`, `lyricloom` and a working GPU. Read the detailed error in the combo-box tooltip or the
   setup log, or use the manual path in [docs/wsl-rocm.md](wsl-rocm.md).
+- **The GPU on Windows setup fails.** Read the last lines of the setup log on the page: they are
+  the installer's own message. *Not enough free disk space* needs about 8 GB (CUDA) or 3 GB
+  (DirectML) on the drive that holds `%LOCALAPPDATA%\LyricLoom`. A network error can simply be
+  retried with **Set up and use**: what was already downloaded is kept. *PyTorch found no CUDA
+  device* means the NVIDIA driver is missing or too old; update it and run the setup again.
+  *The GPU refused a test operation* means this build of PyTorch has no code for the card; send
+  the message with **Help > Diagnostics…** in a bug report. In every case the acceleration
+  setting is left as it was and LyricLoom keeps working on the CPU.
+- **A GPU runtime that worked now falls back to the CPU.** The status bar names the reason. A
+  power loss or crash shortly after the setup, or a cleanup tool, can leave the runtime folder
+  incomplete (for example *uv trampoline failed to spawn Python child process*). Click **Set up
+  and use** again: it rebuilds what is missing without downloading everything again. Songs keep
+  being processed on the CPU in the meantime.
+- **DirectML is set up but separation is still slow.** Without **Run RoFormer models on the GPU
+  too**, the suggested Mel-Band RoFormer model stays on the CPU and the status bar says
+  `Device: CPU (fallback)` with that reason. Tick the option on a card with about 16 GB of video
+  memory, or choose an MDX-Net model in **Help > Models…**, which needs far less memory at some
+  cost in separation quality. Both alignment models always run on the CPU with DirectML.
+- **DirectML: "not enough GPU video memory".** DirectML ran out of video memory for a RoFormer
+  model; the song was separated on the CPU instead. Close games and other programs that use the
+  graphics card and try again. If it keeps happening, untick **Run RoFormer models on the GPU
+  too** so no time is lost on the failed attempt.
 - **The setup assistant has no WSL setup script.** A source checkout does not build the wheel. Use the
   manual procedure in [docs/wsl-rocm.md](wsl-rocm.md), or a packaged Windows build.
 - **A model is missing or corrupt.** Open **Help > Models…**. Select the row and use **Download**,
@@ -292,9 +314,11 @@ The app's separation device is controlled by `LYRICLOOM_SEPARATOR_DEVICE` (`auto
 
 ### Windows
 
-Native AMD acceleration is not part of LyricLoom's Windows path. Use WSL 2 + ROCm: [docs/wsl-rocm.md](wsl-rocm.md). The Windows-side `doctor` showing `cuda=False` is expected; the WSL interpreter is the one that must see the GPU.
+**NVIDIA:** open **Help > Setup assistant… > Acceleration**, choose **NVIDIA GPU (CUDA)** under **GPU on Windows** and click **Set up and use**. The status under the backend must read *in use*. The bundled app itself is CPU-only, so the Windows-side `doctor` showing `cuda=False` is expected; the runtime's interpreter in `%LOCALAPPDATA%\LyricLoom\runtimes\cuda` is the one that must see the GPU, and the setup tests exactly that.
 
-The status bar shows where the last separation ran. `Device: CPU (fallback)` in orange means a WSL/ROCm attempt failed; hover it for the reason, then read the track log.
+**AMD and Intel:** the full path is WSL 2 + ROCm for AMD: [docs/wsl-rocm.md](wsl-rocm.md). **DirectML** under **GPU on Windows** needs no WSL, but it only speeds up MDX-Net and VR separator models (see [Setup assistant and models](#setup-assistant-and-models)).
+
+The status bar shows where the last separation ran. `Device: CPU (fallback)` in orange means a GPU attempt failed or the GPU could not run that model; hover it for the reason, then read the track log. If the runtime folder was deleted by hand, the reason says the runtime is missing: set it up again or choose **CPU only**.
 
 ### The GPU is used but the result is worse
 
@@ -463,7 +487,7 @@ Romanization uses MeCab/IPADic and pykakasi. Names, invented readings and unusua
 
 The detector looks for Japanese kana/kanji in the tags and lyric text. A Japanese song with an English title and English artist tags may be detected from the lyric text during alignment; if both the tags and lyric are ambiguous, it may use the non-Japanese path. The `.japanese.lrc`/`.romaji.lrc` files are only written when Japanese characters are found in the final lyric. Fix the tags or paste the Japanese lyric to force the issue.
 
-Chinese lyrics that use only Han characters can be ambiguous with Japanese kanji; 2.1.1 does not have a separate Chinese mode. Check the output and use manual editing if needed.
+Chinese lyrics that use only Han characters can be ambiguous with Japanese kanji; 2.2.0 does not have a separate Chinese mode. Check the output and use manual editing if needed.
 
 ## Word timing is missing or wrong
 

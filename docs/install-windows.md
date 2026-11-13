@@ -1,16 +1,17 @@
 # Install LyricLoom on Windows
 
-LyricLoom 2.1.1 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the
+LyricLoom 2.2.0 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the
 application, the worker, `whisper-cli` and the optional Starry Karaoke MusicBee plugin; you do not
-need Python, CUDA or a separate Whisper installation. The large models are not included: the setup assistant offers
+need Python, CUDA or a separate Whisper installation. With an NVIDIA card, one click in the setup
+assistant adds GPU processing (see [GPU paths](#gpu-paths)). The large models are not included: the setup assistant offers
 them on first start and **Help > Models…** downloads them at any time; processing never downloads
 a model.
 
 There are two ways to run the app:
 
-- **Installer:** `LyricLoom-Setup-2.1.1.exe` from the
+- **Installer:** `LyricLoom-Setup-2.2.0.exe` from the
   [Releases page](https://github.com/nishizumi-maho/lyricloom/releases). Recommended for most people.
-- **Portable ZIP:** `LyricLoom-2.1.1-win64.zip`. Extract and run, without an installer. Good for a
+- **Portable ZIP:** `LyricLoom-2.2.0-win64.zip`. Extract and run, without an installer. Good for a
   USB stick or a folder you control.
 
 Both use the same per-user data folder for settings, models, caches and logs. See
@@ -27,12 +28,14 @@ Both use the same per-user data folder for settings, models, caches and logs. Se
 LyricLoom reads these audio formats: `.flac`, `.mp3`, `.m4a`, `.ogg`, `.opus`, `.wav`. Other
 formats are ignored by the library scanner. Convert them first if needed.
 
-The interface is **English-only** in 2.1.1.
+The interface is **English-only** in 2.2.0, whatever the display language or regional format of
+Windows. File pickers and the installer's own Yes/No buttons are drawn by Windows and follow its
+language.
 
 ## Install with the setup program
 
 1. Open the [Releases page](https://github.com/nishizumi-maho/lyricloom/releases).
-2. Download `LyricLoom-Setup-2.1.1.exe`. Do not use a third-party download site.
+2. Download `LyricLoom-Setup-2.2.0.exe`. Do not use a third-party download site.
 3. Run the setup file.
 4. Follow the wizard. It installs for the current user under
    `%LOCALAPPDATA%\Programs\LyricLoom`, does not request administrator rights and does not create
@@ -73,7 +76,7 @@ permanently to work around a blocked installer.
 
 ## Install the portable ZIP
 
-1. Download `LyricLoom-2.1.1-win64.zip` from the
+1. Download `LyricLoom-2.2.0-win64.zip` from the
    [Releases page](https://github.com/nishizumi-maho/lyricloom/releases).
 2. Extract it to a folder you can write to, for example `D:\Apps\LyricLoom`. Do not run it from
    inside the ZIP preview window.
@@ -142,7 +145,29 @@ Click **Check again** to repeat the probes after installing a driver or WSL.
 The top of the page gives a suggested setup with a reason for each part. You can accept it or
 choose another path:
 
-- **CPU only** works on every machine and needs no extra setup.
+- **CPU only** works on every machine and needs no extra setup. Selecting it turns the GPU
+  choices below off; an installed runtime is kept.
+- **GPU on Windows** builds a GPU version of PyTorch in its own folder and uses it without WSL.
+  Choose the backend and click **Set up and use**:
+  - **NVIDIA GPU (CUDA)** is preselected when an NVIDIA card is found. It downloads about 3 GB
+    and needs about 8 GB of free disk space. Only a current NVIDIA driver is required; the CUDA
+    libraries come with PyTorch (CUDA 12.4, or 12.8 for RTX 50-series cards). Vocal separation,
+    forced alignment and the English singing model then run on the GPU.
+  - **DirectML (AMD, Intel or NVIDIA; experimental)** downloads about 600 MB and needs about
+    3 GB. It speeds up **vocal separation only**; both alignment models keep running on the
+    CPU. MDX-Net and VR separator models run on any supported GPU. RoFormer models, including
+    the suggested Mel-Band RoFormer, run on the GPU only with **Run RoFormer models on the GPU
+    too**: DirectML needs about 16 GB of video memory for them, with nothing else (a game, a
+    video editor) using the card. The box is ticked for you when the card has that much. A
+    song that does not fit is separated on the CPU after the failed attempt. Without the
+    option, RoFormer models stay on the CPU and DirectML helps only with an MDX-Net separator
+    from **Help > Models…**. Measured on a Radeon RX 6900 XT (16 GB): the suggested model 3 to
+    4 times faster than the CPU with identical output, MDX-Net Voc FT about 6 times faster.
+
+  The log on the page shows each step. At the end the new environment runs a real operation on
+  the GPU; the setting is saved only if that works, and the next song uses it with no restart.
+  **Cancel** or a failed step changes nothing, and running the setup again continues from what
+  was already downloaded. **Remove…** deletes the runtime and frees the disk space.
 - **Use an existing WSL GPU environment** checks the configured interpreter,
   `/opt/lyricloom/venv/bin/python` and every `/opt/*/bin/python` inside each WSL 2 distro. A probe
   checks `torch`, `torchaudio`, `audio_separator`, `g2p_en`, `nltk` and `lyricloom`, and whether the
@@ -231,6 +256,14 @@ LyricLoom works on the CPU everywhere. The GPU paths are optional and can be cha
 
 - **CPU only:** separation, forced alignment, the English singing model and whisper.cpp all run on
   the CPU. Separation is the slow stage.
+- **NVIDIA GPU on Windows (CUDA):** the assistant's **GPU on Windows > Set up and use** builds the
+  runtime in `%LOCALAPPDATA%\LyricLoom\runtimes\cuda`. Separation and both alignment models run
+  on the GPU. Install the **cuBLAS** whisper.cpp build on the same page to transcribe on the GPU
+  too.
+- **DirectML on Windows:** an experimental option that runs vocal separation on any vendor's
+  GPU without WSL. The suggested RoFormer model needs about 16 GB of video memory for it;
+  MDX-Net and VR models need much less. Alignment stays on the CPU. For an AMD card, WSL with
+  ROCm is the path that puts every stage on the GPU.
 - **Existing WSL GPU environment:** use the assistant's **Find WSL environments** and **Use this**
   for an environment that already has the packages and a working GPU. LyricLoom keeps the Windows
   app and sends only the heavy stages into WSL.
@@ -240,8 +273,10 @@ LyricLoom works on the CPU everywhere. The GPU paths are optional and can be cha
   (NVIDIA). A Vulkan whisper.cpp build is not published by this project, but a compatible local
   build can be selected with the `whisper_cli` setting or `LYRICLOOM_WHISPER_CLI`.
 
-If a WSL stage fails, LyricLoom falls back to the CPU and keeps processing. The status bar shows
-`Device: CPU (fallback)` in orange and the track log records why. The complete WSL setup, manual
+If a GPU stage fails, on Windows or in WSL, LyricLoom falls back to the CPU and keeps processing.
+The status bar shows `Device: CPU (fallback)` in orange and the track log records why. One
+acceleration choice is in effect at a time: selecting the Windows runtime, a WSL environment or
+**CPU only** deselects the others. The complete WSL setup, manual
 procedure, model copies and rollback are in **[docs/wsl-rocm.md](wsl-rocm.md)**.
 
 ## Process your songs
@@ -338,6 +373,7 @@ LyricLoom writes everything to `%LOCALAPPDATA%\LyricLoom` unless you override it
 | App log | `%LOCALAPPDATA%\LyricLoom\logs\app.log` | Rotating log (about 1 MB, two older files) for the app, queue and updater. |
 | AssemblyAI key | `%LOCALAPPDATA%\LyricLoom\assemblyai.key` | Encrypted with Windows DPAPI for your user; only present if you added a key. |
 | whisper.cpp builds | `%LOCALAPPDATA%\LyricLoom\backends` | Installed BLAS/cuBLAS builds and their downloads. Safe to remove from the assistant or by hand. |
+| GPU runtimes | `%LOCALAPPDATA%\LyricLoom\runtimes` | The CUDA or DirectML Python environment, its Python and the `uv` installer; several GB for CUDA. Remove it with the assistant's **Remove…** button. |
 | whisper-cli fallback | `%LOCALAPPDATA%\LyricLoom\bin` | Used only if no bundled or `PATH` copy is found. |
 | Update downloads | `%TEMP%\LyricLoom-update` | Verified installer downloads; removed on the next start. |
 | Lyrics | Next to each audio file | `<song>.lrc`, `<song>.original.lrc`, and for Japanese songs the two script variants. |
@@ -433,7 +469,8 @@ written by the current engine unless you use **Force**.
 3. Find **LyricLoom**, choose **Uninstall**, and follow the prompt.
 4. The uninstaller removes the program folder, shortcuts, the registry key and the plugin files it
    installed. It then asks once whether to also delete LyricLoom's own data folders: settings and
-   logs, work cache, kept vocals, models, installed whisper.cpp builds and the AssemblyAI key.
+   logs, work cache, kept vocals, models, installed whisper.cpp builds, GPU runtimes and the
+   AssemblyAI key.
    **No** is the default.
 
 If you answer yes, only the files and folders LyricLoom itself creates in
@@ -469,8 +506,8 @@ Only do this after you have backed up anything you want to keep:
 Remove-Item -LiteralPath "$env:LOCALAPPDATA\LyricLoom" -Recurse -Force
 ```
 
-This removes settings, logs, models, caches, kept vocals, installed whisper.cpp builds and the
-AssemblyAI key. It does **not** remove the `.lrc` files next to your music. Delete those separately
+This removes settings, logs, models, caches, kept vocals, installed whisper.cpp builds, GPU
+runtimes and the AssemblyAI key. It does **not** remove the `.lrc` files next to your music. Delete those separately
 if you want to undo the lyric changes; the `.original.lrc` files and `.lrc.bak` backups are also
 left in place.
 
@@ -485,8 +522,12 @@ If you used a custom `LYRICLOOM_DATA_DIR` or `LYRICLOOM_MODELS`, delete those fo
 - **The assistant says a WSL environment did not pass.** It needs `torch`, `torchaudio`,
   `audio_separator`, `g2p_en`, `nltk`, `lyricloom` and a working GPU. Read the error in the combo
   box tooltip or the setup log, or use the manual path in [docs/wsl-rocm.md](wsl-rocm.md).
-- **Separation is extremely slow.** You are on the CPU. That is expected. See
+- **Separation is extremely slow.** You are on the CPU. That is expected. With an NVIDIA card,
+  open **Help > Setup assistant… > Acceleration** and use **GPU on Windows > Set up and use**. See
   [What runs where](../README.md#what-runs-where) and, for AMD, [docs/wsl-rocm.md](wsl-rocm.md).
+- **The GPU on Windows setup did not finish.** Nothing was changed and the CPU is still used.
+  The reasons and fixes are in
+  [docs/troubleshooting.md](troubleshooting.md#setup-assistant-and-models).
 - **SmartScreen or antivirus blocks the app.** Verify the download hash, then allow the file. Do
   not turn off real-time protection permanently.
 - **Lyrics cannot be written.** The music folder is read-only, controlled by antivirus "Controlled

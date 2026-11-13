@@ -11,7 +11,8 @@ import numpy as np
 import soundfile as sf
 import soxr
 
-from .. import config, models
+from .. import config, gpu_runtime, models
+from ..errtext import message_text
 from ..workers import WorkerError, run_worker, windows_path, wsl_path
 from .instrumental import find_instrumental, subtract
 
@@ -187,10 +188,21 @@ def keep_vocals(audio: Path, vocals: Path, model: models.ModelSpec | None = None
     return dst
 
 
+def _runtime_cpu_note(backend: str, spec: models.ModelSpec) -> str:
+    """Why a GPU runtime finished the separation on the CPU."""
+    if backend == "directml":
+        return (f"DirectML keeps {spec.label} on the CPU. To use the GPU, choose an MDX-Net model "
+                "in Help > Models, or, with about 16 GB of video memory, turn on \"Run RoFormer "
+                "models on the GPU too\" in Help > Setup assistant > Acceleration.")
+    return ("PyTorch found no CUDA device, so separation ran on the CPU. Update the NVIDIA "
+            "driver, or set the GPU runtime up again in Help > Setup assistant.")
+
+
 def _run_separator(audio: Path, work: Path, spec: models.ModelSpec | None = None,
                    cancel: threading.Event | None = None) -> tuple[Path, str, str | None]:
-    """Runs the separator: in WSL on the GPU when possible, else on Windows. Returns the stem it
-    wrote, the device used and, after a failed WSL run, why it failed."""
+    """Runs the separator: on the Windows GPU runtime or in WSL when one is selected, else on
+    the CPU.  Returns the stem it wrote, the device used and, when the GPU was not used although
+    one was selected, why."""
     spec = spec or config.resolve_model("separate")
     model_path = spec.dest(spec.model_file(), config.MODELS)
     payload = {"audio": str(audio), "out_dir": str(work), "model": model_path.name,
@@ -198,7 +210,29 @@ def _run_separator(audio: Path, work: Path, spec: models.ModelSpec | None = None
                "model_sizes": {f.filename: f.size for f in spec.files},
                "device": config.SEPARATOR_DEVICE, "overlap": config.SEPARATOR_OVERLAP}
     fallback = None
-    if config.SEPARATOR_WSL_ENABLED:
+    runtime = config.gpu_runtime() if config.SEPARATOR_DEVICE != "cpu" else None
+    if runtime is not None:
+        backend, python = runtime
+        try:
+            res = run_worker("lyricloom.workers.separate",
+                             {**payload, "device": backend, **gpu_runtime.worker_options(backend)},
+                             python=gpu_runtime.worker_python(python),
+                             extra_env=gpu_runtime.worker_env(), cancel=cancel)
+            device = res.get("device") or "cpu"
+            if device == "cpu":
+                fallback = _runtime_cpu_note(backend, spec)
+            return Path(res["vocals"]), device, fallback
+        except (WorkerError, OSError, subprocess.TimeoutExpired) as e:
+            fallback = (f"the Windows GPU runtime ({backend}) failed, so separation ran on the "
+                        f"CPU: {message_text(e)[-500:]}")
+            if "memory" in fallback.lower():
+                fallback += (" (The GPU ran out of video memory: close programs that use it, or "
+                             "choose a smaller separator model.)")
+            else:
+                # A runtime damaged by a power loss or a cleanup tool is rebuilt by its setup.
+                fallback += (" (If this repeats, run \"Set up and use\" again in Help > Setup "
+                             "assistant > Acceleration to repair the runtime.)")
+    elif config.SEPARATOR_WSL_ENABLED:
         try:
             mnt_model_dir = wsl_path(payload["model_dir"])
             candidates = [d for d in (config.WSL_MODELS_DIR, mnt_model_dir) if d]
