@@ -1,5 +1,6 @@
 """The assistant's "GPU on Windows" group, with a fake in place of the real installation."""
 import os
+import sys
 import time
 
 import pytest
@@ -10,6 +11,10 @@ from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 from lyricloom import config, gpu_runtime, setup  # noqa: E402
 from lyricloom.app.setup_assistant import SetupAssistant  # noqa: E402
 from lyricloom.workers import WorkerCancelled  # noqa: E402
+
+
+# The page drives a Windows-only feature, and the assistant's summary reads the Windows registry.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="the Windows GPU runtime")
 
 
 @pytest.fixture(scope="module")
