@@ -10,13 +10,13 @@ This repository ships two products in one release:
 - **Starry Karaoke** is an optional MusicBee plugin in `musicbee/`. It displays the same `.lrc` in a
   starry full-screen window, with word-by-word highlighting, romaji, recording and auto-open.
 
-LyricLoom 2.1.1 and Starry Karaoke 1.3.1 are free software. The app is licensed under the **GNU GPL
+LyricLoom 2.2.0 and Starry Karaoke 1.3.1 are free software. The app is licensed under the **GNU GPL
 v3 or later**; the plugin is **MIT-licensed**. The interface is English-only. Windows and Linux are
 the supported app platforms; the plugin is for MusicBee on Windows.
 
 [![CI](https://github.com/nishizumi-maho/lyricloom/actions/workflows/ci.yml/badge.svg)](https://github.com/nishizumi-maho/lyricloom/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-2.1.1-informational)
+![Version](https://img.shields.io/badge/version-2.2.0-informational)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
 - **Repository:** <https://github.com/nishizumi-maho/lyricloom>
@@ -68,14 +68,14 @@ does not need MusicBee at all.
 
 ## Download
 
-Download only from the official **Releases** page. The 2.1.1 release publishes:
+Download only from the official **Releases** page. The 2.2.0 release publishes:
 
 | File | What it is |
 |---|---|
-| `LyricLoom-Setup-2.1.1.exe` | Windows installer, per-user, no administrator rights |
+| `LyricLoom-Setup-2.2.0.exe` | Windows installer, per-user, no administrator rights |
 | `LyricLoom-Setup.exe` | Stable copy of the latest installer, used by the in-app updater |
-| `LyricLoom-2.1.1-win64.zip` | Portable Windows build; extract and run |
-| `LyricLoom-2.1.1-linux-x86_64.tar.gz` | Linux bundle with a per-user `install.sh` |
+| `LyricLoom-2.2.0-win64.zip` | Portable Windows build; extract and run |
+| `LyricLoom-2.2.0-linux-x86_64.tar.gz` | Linux bundle with a per-user `install.sh` |
 | `StarryKaraoke-MusicBee-1.3.1.zip` | MusicBee plugin release zip (also bundled with the Windows installer) |
 | `SHA256SUMS` and per-file `*.sha256` | Checksums for every asset |
 
@@ -84,7 +84,7 @@ include the large neural models; LyricLoom downloads those only after you approv
 
 ## Quick start
 
-1. **Install.** Download `LyricLoom-Setup-2.1.1.exe` and run it. The installer is per-user: it
+1. **Install.** Download `LyricLoom-Setup-2.2.0.exe` and run it. The installer is per-user: it
    installs under `%LOCALAPPDATA%\Programs\LyricLoom`, needs no administrator rights and creates a
    Start-menu shortcut. The desktop shortcut is optional and unchecked. If MusicBee is installed,
    the optional **Install the Starry Karaoke plugin for MusicBee** task is offered and checked (an earlier
@@ -93,8 +93,9 @@ include the large neural models; LyricLoom downloads those only after you approv
    [docs/install-windows.md](docs/install-windows.md#if-smartscreen-appears).
 2. **Run the setup assistant.** The first start opens **LyricLoom setup assistant**. Choose your
    music folder, review the system check, then accept or change the suggested acceleration. CPU
-   works everywhere; the assistant can reuse or create a WSL GPU environment for AMD/NVIDIA, and it
-   can install a faster whisper.cpp build. See
+   works everywhere. With an NVIDIA card, **GPU on Windows > Set up and use** downloads a CUDA
+   build of PyTorch and uses it once the GPU passes a test; DirectML and a WSL GPU environment are
+   optional, and the assistant can install a faster whisper.cpp build. See
    [docs/install-windows.md](docs/install-windows.md#the-setup-assistant-page-by-page).
 3. **Get the models.** The assistant's **Models** page lists the suggested models (about 5 GB)
    and downloads only the ones you approve to `%LOCALAPPDATA%\LyricLoom\models`. You can skip them
@@ -115,12 +116,20 @@ The full Windows walkthrough, including SmartScreen, portable mode, updates and 
 | Setup | Vocal separation | Forced alignment (MMS_FA) | English singing model (MTL) | Whisper transcription |
 |---|---|---|---|---|
 | **CPU only** (default everywhere) | CPU | CPU | CPU | Bundled whisper.cpp on CPU |
+| **Windows + NVIDIA**, GPU on Windows (CUDA) | NVIDIA GPU | NVIDIA GPU | NVIDIA GPU | whisper.cpp cuBLAS on the NVIDIA GPU (the assistant's faster build) |
+| **Windows + DirectML** (AMD, Intel or NVIDIA; experimental) | GPU for MDX-Net and VR models; CPU for RoFormer models, including the suggested one | CPU | CPU | whisper.cpp on Windows (CPU, or a custom Vulkan build) |
 | **Windows + WSL 2 / ROCm** (AMD GPU) | AMD GPU in WSL | AMD GPU in WSL | AMD GPU in WSL | whisper.cpp on Windows (CPU, or a custom Vulkan build) |
-| **Windows + NVIDIA** with the setup assistant's faster build | CPU by default | CPU | CPU | whisper.cpp cuBLAS on the NVIDIA GPU |
 | **Linux + CUDA or ROCm** | GPU | GPU | CPU on native Linux | whisper.cpp as built (CPU, CUDA or Vulkan) |
 
 - **CPU:** no extra setup beyond the models. Vocal separation is the slow stage; start with a few
   songs.
+- **GPU on Windows:** the installer carries a CPU-only PyTorch, so the GPU build lives in its own
+  Python environment under `%LOCALAPPDATA%\LyricLoom\runtimes`. The setup assistant builds it with
+  one click: about 3 GB for **CUDA** (NVIDIA; only a current driver is needed) or about 600 MB for
+  **DirectML**. It is used only after a real operation ran on the GPU, takes effect on the next
+  song without a restart, and falls back to the CPU if a stage fails. DirectML speeds up MDX-Net
+  and VR separator models only; the suggested RoFormer model and both alignment models stay on
+  the CPU, so for an AMD card the CPU default or WSL/ROCm remain the better choices.
 - **WSL GPU:** the app stays on Windows and runs the heavy stages in WSL 2. ROCm is the AMD path;
   CUDA is available for NVIDIA. The setup assistant can use an existing environment or create one
   with the bundled script. If a WSL stage fails, LyricLoom falls back to the CPU, the status bar
@@ -206,9 +215,12 @@ The full Windows walkthrough, including SmartScreen, portable mode, updates and 
 - Windows installer and portable ZIP; native Linux packages/source install.
 - Windows default is CPU for separation and forced alignment; whisper.cpp can use Vulkan when a
   custom build supports it.
+- NVIDIA GPUs on Windows run separation, forced alignment and the English singing model on CUDA
+  after the setup assistant's one-click runtime setup. DirectML is an experimental option for
+  MDX-Net and VR separator models on any vendor's GPU.
 - AMD GPUs on Windows can run separation, forced alignment and the English singing model inside
   WSL 2 with ROCm. The app stays on Windows.
-- Linux can use CUDA or ROCm PyTorch for separation and MMS alignment. On native Linux in 2.1.1
+- Linux can use CUDA or ROCm PyTorch for separation and MMS alignment. On native Linux in 2.2.0
   the English singing model runs on the CPU.
 - No telemetry, no account, and no audio upload unless you explicitly enable cloud transcription.
 
@@ -229,8 +241,8 @@ it is sung.*
 The release tarball is the easiest path:
 
 ```bash
-tar -xzf LyricLoom-2.1.1-linux-x86_64.tar.gz
-cd LyricLoom-2.1.1-linux-x86_64
+tar -xzf LyricLoom-2.2.0-linux-x86_64.tar.gz
+cd LyricLoom-2.2.0-linux-x86_64
 ./install.sh
 ```
 
@@ -299,7 +311,7 @@ For `01 - Synthetic Song.flac`, LyricLoom writes `01 - Synthetic Song.lrc` next 
 ```lrc
 [ti:Synthetic Song]
 [ar:Demo Artist]
-[re:LyricLoom 2.1.1]
+[re:LyricLoom 2.2.0]
 [#source:uta-net conf:0.94]
 [#engine:8]
 [#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]
@@ -350,7 +362,7 @@ turn it off. The short version is in **[PRIVACY.md](PRIVACY.md)**.
 - **[docs/lrc-format.md](docs/lrc-format.md)** — the enhanced LRC contract.
 - **[docs/privacy.md](docs/privacy.md)** and **[PRIVACY.md](PRIVACY.md)** — network requests and
   local data.
-- **[docs/release-notes-2.1.1.md](docs/release-notes-2.1.1.md)** — what changed in this release (and [2.1.0](docs/release-notes-2.1.0.md)).
+- **[docs/release-notes-2.2.0.md](docs/release-notes-2.2.0.md)** — what changed in this release (and [2.1.0](docs/release-notes-2.1.0.md)).
 - **[CHANGELOG.md](CHANGELOG.md)** — release history.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — development setup and the monorepo layout.
 
@@ -413,5 +425,5 @@ LyricLoom builds on the work of many open-source projects and researchers, inclu
   `pyproject.toml`.
 - **MusicBee**, and the NMeCab, IPADic and RomajiCore components used by the plugin.
 
-The project was previously called **Lyrics Boca**. LyricLoom 2.1.1 keeps reading `.lrc` files and
+The project was previously called **Lyrics Boca**. LyricLoom 2.2.0 keeps reading `.lrc` files and
 settings written by that name; see **[CHANGELOG.md](CHANGELOG.md)**.

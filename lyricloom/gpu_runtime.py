@@ -107,12 +107,16 @@ def plan_for(backend: str, gpu_name: str = "") -> RuntimePlan:
     """The install plan for ``backend``; ``gpu_name`` picks the CUDA build the card can run."""
     if backend == "cuda":
         if _is_rtx_50(gpu_name):
-            torch, index, label = "2.7.1", "https://download.pytorch.org/whl/cu128", "CUDA 12.8"
+            torch, vision, label = "2.7.1", "0.22.1", "CUDA 12.8"
+            index = "https://download.pytorch.org/whl/cu128"
         else:
-            torch, index, label = "2.5.1", "https://download.pytorch.org/whl/cu124", "CUDA 12.4"
+            torch, vision, label = "2.5.1", "0.20.1", "CUDA 12.4"
+            index = "https://download.pytorch.org/whl/cu124"
         return RuntimePlan(
             backend="cuda", label=f"NVIDIA GPU ({label}, PyTorch {torch})", torch_index=index,
-            torch_packages=(f"torch=={torch}", f"torchaudio=={torch}"),
+            # torchvision is a dependency of audio-separator; taking it from the same index keeps
+            # it a CUDA build that matches this torch instead of the CPU build on PyPI.
+            torch_packages=(f"torch=={torch}", f"torchaudio=={torch}", f"torchvision=={vision}"),
             packages=(f"audio-separator[gpu]=={AUDIO_SEPARATOR}", "g2p_en", "nltk"),
             required_imports=_GPU_IMPORTS,
             download_bytes=int(3.2 * GiB), disk_bytes=8 * GiB, note=_CUDA_NOTE)

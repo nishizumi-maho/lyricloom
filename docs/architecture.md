@@ -1,6 +1,6 @@
 # Architecture
 
-This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.1.1 (`ENGINE_VERSION = "10"`).
+This page describes the pipeline, data flow, cache layout and extension points for contributors. It matches LyricLoom 2.2.0 (`ENGINE_VERSION = "10"`).
 
 ## The short version
 
@@ -43,6 +43,8 @@ Every stage except `probe` has its own JSON cache. `write` also reads cached res
 | `lyricloom/downloads.py` | Verified, resumable HTTPS downloads (`.part` + size + SHA-256). |
 | `lyricloom/runtime.py` | Model downloads and readiness checks. |
 | `lyricloom/setup.py` | System detection, WSL environment discovery/setup and whisper.cpp backend install, with no Qt. |
+| `lyricloom/gpu_runtime.py` | The Windows GPU runtime: pinned `uv`, a CUDA or DirectML Python environment under `<data>/runtimes`, its GPU probe and the `gpu_backend`/`gpu_python` settings, with no Qt. |
+| `lyricloom/errtext.py` | English text for OS errors, whatever the Windows display language. |
 | `lyricloom/updater.py` | GitHub release check, fail-closed installer download and launch modes. |
 | `lyricloom/animation.py` | Qt-free playback clock, smooth scroll path, line emphasis and frame-rate helpers. |
 | `lyricloom/musicbee.py` | Finds MusicBee and installs the bundled Starry Karaoke files. |
@@ -128,14 +130,15 @@ If no candidate is accepted, the transcript becomes the lyric (`source = "transc
    - not the song itself.
 3. If an instrumental is found, `stages/instrumental.py` aligns it to the mix with a short least-squares filter (delay, gain, slight EQ), block by block in float32 and streamed in chunks, and writes `mix - instrumental` only when the cancellation is convincing (at least 3 seconds that cancel by 25 dB or more). A failed subtraction is logged and the full mix is separated instead.
 4. Run the separator on the chosen source (full mix or subtracted mix):
-   - in WSL/ROCm when `SEPARATOR_WSL_ENABLED`;
+   - in the Windows GPU runtime when `config.gpu_runtime()` names one (read at stage start);
+   - else in WSL/ROCm when `SEPARATOR_WSL_ENABLED`;
    - otherwise on Windows/Linux with the current Python.
 5. Write `vocals.wav`, then a mono 16 kHz `vocals16k.wav`; both reads and the resample are streamed. A container libsndfile cannot read (M4A/AAC and others) is decoded through `imageio-ffmpeg`.
 6. Keep a lossless FLAC copy outside the library.
 
 The separator worker uses the resolved separator model (Mel-Band RoFormer by default) with batch size 1, segment size 256, overlap from `LYRICLOOM_SEPARATOR_OVERLAP` (default 2), and device `auto`/`cuda`/`cpu`/`dml`. In WSL it prefers the copy in `wsl_models_dir` when its size matches and falls back to the Windows folder through `/mnt`.
 
-If the WSL attempt fails, the exception tail is stored as `fallback`, the Windows/Linux worker runs on the CPU, and the track result records both the device and the fallback reason. If the WSL worker succeeded but reports `device="cpu"`, the result says `cpu` with a "WSL had no usable GPU" fallback reason; it is never labelled ROCm.
+If the GPU runtime or the WSL attempt fails (a deleted runtime folder included), the reason is stored as `fallback`, the Windows/Linux worker runs on the CPU, and the track result records both the device and the fallback reason. The worker reports the device the model really used: under DirectML, audio-separator keeps RoFormer models on the CPU, so the result says `cpu` with that reason instead of `dml`. If the WSL worker succeeded but reports `device="cpu"`, the result says `cpu` with a "WSL had no usable GPU" fallback reason; it is never labelled ROCm.
 
 Keeping the vocal stem and the instrumental subtraction are optional work: an unreadable instrumental, a failed subtraction or a read-only vocals cache is logged (`instrumental.error` / `kept_error`) and the separation result is still used.
 
@@ -297,6 +300,7 @@ The GUI must stay responsive and must not hold VRAM between stages. Heavy work r
 - **Source checkout:** `python -m lyricloom.workers.<name>`.
 - **Frozen build:** `LyricLoomWorker.exe <name>` next to the GUI; if missing, the frozen GUI's `--worker` mode.
 - **WSL:** `wsl.exe -d <distro> --cd <cwd> --exec env KEY=VALUE ... <python> -m lyricloom.workers.<name>`.
+- **Windows GPU runtime:** `<data>\runtimes\<backend>\Scripts\python.exe -m lyricloom.workers.<name>` with `PYTHONPATH` set to the running app's own copy of the package (the bundled wheel in a packaged build, the checkout otherwise). LyricLoom is never installed into the runtime, so an app update cannot leave a stale worker behind. A packaged build clears PyInstaller's inherited DLL search directory while it starts a program that is not its own.
 
 The parent writes a JSON payload to the worker's stdin. The worker writes a single marked JSON result line to stdout:
 
@@ -376,7 +380,9 @@ Environment variables that affect behavior:
 Settings are JSON at `<data>/settings.json`. They include the library and cache paths, Japanese
 script, `model_choices` (default, language, custom), `smooth_animation` (1/2/3), `check_updates`,
 `update_install` (`auto`/`ask`/`notify`), `skipped_update_version`, `assemblyai_enabled`,
-`assemblyai_ask_before_upload`, `setup_complete` and the WSL keys. WSL keys are documented in
+`assemblyai_ask_before_upload`, `setup_complete`, `gpu_backend` (`""`, `cuda` or `directml`) with
+`gpu_python`, and the WSL keys. One acceleration choice is in effect at a time: selecting the
+Windows runtime clears `wsl_gpu`, and selecting a WSL environment clears `gpu_backend`. WSL keys are documented in
 [docs/wsl-rocm.md](wsl-rocm.md#7-configure-lyricloom).
 
 ## Extension points
@@ -458,7 +464,8 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for setup and pull-request guidance.
 
 - **Official lyrics first.** Whisper text is a fallback, not the default. The official lyric is kept in `.original.lrc`.
 - **Local by default.** Lyric search, model/backend downloads, the optional update check,
-  WSL package setup and the optional AssemblyAI path are the only network users; each is listed in
+  the WSL and Windows GPU runtime setups and the optional AssemblyAI path are the only network
+  users; each is listed in
   [docs/privacy.md](privacy.md).
 - **One song at a time.** Memory/VRAM predictability beats parallel throughput for a desktop tool.
 - **Every expensive stage is cacheable and versioned.**

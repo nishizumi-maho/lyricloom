@@ -1,7 +1,7 @@
 ; Inno Setup 6 script for the per-user LyricLoom installer.
 ;
 ; Build (normally through scripts/build-windows.ps1, which passes the version):
-;   ISCC.exe /DMyAppVersion=2.1.1 packaging\windows\LyricLoom.iss
+;   ISCC.exe /DMyAppVersion=2.2.0 packaging\windows\LyricLoom.iss
 ;
 ; Expected input:
 ;   dist\LyricLoom\        (PyInstaller one-folder output)
@@ -15,7 +15,7 @@
 ; runtime and are deliberately not part of the installer.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.1.1"
+  #define MyAppVersion "2.2.0"
 #endif
 
 #define MyAppName "LyricLoom"
@@ -320,9 +320,13 @@ begin
           // A junction or symlink can point back to an ancestor; following it would loop.
           if (FindRec.Attributes and FILE_ATTRIBUTE_REPARSE_POINT) = 0 then
           begin
+            // The GPU runtimes hold tens of thousands of package files, some of them sample
+            // .wav files; they are LyricLoom's own downloads, never the user's music.
             if (CompareText(FindRec.Name, 'work') <> 0) and
                (CompareText(FindRec.Name, 'vocals') <> 0) and
-               (CompareText(FindRec.Name, 'models') <> 0) then
+               (CompareText(FindRec.Name, 'models') <> 0) and
+               (CompareText(FindRec.Name, 'runtimes') <> 0) and
+               (CompareText(FindRec.Name, 'backends') <> 0) then
             begin
               Sub := Dir + '\' + FindRec.Name;
               if ContainsMusicOutsideCaches(Sub) then
@@ -368,6 +372,8 @@ begin
   DelTree(DataDir + '\models', True, True, True);
   DelTree(DataDir + '\logs', True, True, True);
   DelTree(DataDir + '\bin', True, True, True);
+  DelTree(DataDir + '\backends', True, True, True);
+  DelTree(DataDir + '\runtimes', True, True, True);
   DeleteFile(DataDir + '\settings.json');
   DeleteFile(DataDir + '\settings.json.tmp');
   DeleteFile(DataDir + '\assemblyai.key');
@@ -458,8 +464,8 @@ begin
 
   MessageText := 'LyricLoom can also delete the data it created in:' + #13#10 +
     '  ' + DataDir + #13#10 +
-    '  (settings, the AssemblyAI key, logs, the scan and work caches, kept vocals, models' + #13#10 +
-    '  and a downloaded whisper build; any other file there is kept)';
+    '  (settings, the AssemblyAI key, logs, the scan and work caches, kept vocals, models,' + #13#10 +
+    '  a downloaded whisper build and a GPU runtime; any other file there is kept)';
   if Manual <> '' then
     MessageText := MessageText + #13#10#13#10 +
       'These custom or environment-provided folders are not LyricLoom default locations. ' +
