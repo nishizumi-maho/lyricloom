@@ -172,6 +172,9 @@ class Recommendation:
     whisper_backend_reason: str
     whisper_model: str               # "whisper-large-v3" | "whisper-large-v3-turbo"
     whisper_model_reason: str
+    # Where separation and alignment should run: "cuda" | "directml" | "wsl" | "cpu".
+    acceleration: str = "cpu"
+    acceleration_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -584,6 +587,25 @@ def detect(runner: Runner | None = None) -> SystemReport:
     )
 
 
+ACCELERATION_CHOICES = ("cuda", "directml", "wsl", "cpu")
+
+
+def choose_acceleration(report: SystemReport) -> tuple[str, str]:
+    """Where the assistant suggests running separation and alignment, and why.
+
+    Returns ``(choice, reason)`` with ``choice`` one of :data:`ACCELERATION_CHOICES`.  The reason is
+    one plain English sentence shown to a non-technical user under "Suggested setup"; the choice
+    preselects the matching control on the Acceleration page.  Nothing is installed here.
+
+    What the report offers: ``report.gpus`` (each with ``name``, ``vendor`` in nvidia/amd/intel/
+    other and ``memory_bytes``), ``report.wsl.installed``/``.version2``, ``report.disk_free_bytes``
+    (the drive the runtime is installed on) and ``report.ram_bytes``.  A CUDA runtime needs about
+    8 GB of free disk; a DirectML one about 3 GB and only speeds up MDX-Net/VR separator models.
+    """
+    # TODO(human): decide the suggestion from the report.
+    return "cpu", ("CPU processing needs no extra setup and runs on every machine.")
+
+
 def recommend(report: SystemReport) -> Recommendation:
     """Turns a report into the assistant's plain recommendations, each explained in one sentence."""
     gpu = next((adapter for adapter in report.gpus if adapter.vendor in ("nvidia", "amd")), None)
@@ -616,7 +638,10 @@ def recommend(report: SystemReport) -> Recommendation:
         model = "whisper-large-v3"
         reason = ("With at least 12 GB of RAM and 6 CPU cores, the full large-v3 model gives the "
                   "best accuracy.")
+    acceleration, acceleration_reason = choose_acceleration(report)
     return Recommendation(
+        acceleration=acceleration,
+        acceleration_reason=acceleration_reason,
         cpu_available=True,
         cpu_reason=("CPU processing needs no extra setup beyond downloading the Whisper model "
                     "and runs on every machine."),
@@ -768,6 +793,9 @@ def use_wsl_environment(environment: WslEnvironment) -> bool:
         "wsl_gpu": True,
         "wsl_distro": environment.distro,
         "wsl_python": environment.python,
+        # One choice is in effect at a time: the Windows GPU runtime is deselected, not removed.
+        "gpu_backend": "",
+        "gpu_python": "",
     })
     return True
 
@@ -994,6 +1022,7 @@ def use_bundled_whisper() -> Path:
 
 
 __all__ = [
+    "ACCELERATION_CHOICES",
     "BackendError",
     "CommandResult",
     "GpuAdapter",
@@ -1012,6 +1041,7 @@ __all__ = [
     "WslSetupResult",
     "WslState",
     "bundled_wsl_files",
+    "choose_acceleration",
     "detect",
     "find_wsl_environments",
     "install_whisper_backend",

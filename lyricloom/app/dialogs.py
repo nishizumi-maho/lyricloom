@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
                                QProgressDialog, QPushButton, QVBoxLayout, QWidget)
 
-from .. import VERSION, config, runtime, setup, updater
+from .. import VERSION, config, gpu_runtime, runtime, setup, updater
 from ..errtext import os_error_text
 
 ASK_BEFORE_UPLOAD = "assemblyai_ask_before_upload"
@@ -133,7 +133,7 @@ class SettingsDialog(QDialog):
         aform.addRow(animation_note)
         layout.addWidget(animation)
 
-        gpu = QGroupBox("GPU through WSL (Windows + AMD ROCm)")
+        gpu = QGroupBox("GPU through WSL (advanced)")
         gform = QFormLayout(gpu)
         self.wsl = QCheckBox("Run separation and forced alignment in WSL")
         self.wsl.setChecked(bool(data.get("wsl_gpu", False)))
@@ -148,7 +148,8 @@ class SettingsDialog(QDialog):
         self.hsa = QLineEdit(str(data.get("wsl_hsa_override", "")))
         self.hsa.setPlaceholderText("Only if ROCm needs it, e.g. 10.3.0 for gfx1030")
         gform.addRow("HSA_OVERRIDE_GFX_VERSION", self.hsa)
-        note = QLabel("WSL changes take effect after restarting LyricLoom. See docs/wsl-rocm.md.")
+        note = QLabel("WSL changes take effect after restarting LyricLoom. See docs/wsl-rocm.md. "
+                      "For a GPU on Windows without WSL, use Acceleration > Change… below.")
         note.setWordWrap(True)
         gform.addRow(note)
         layout.addWidget(gpu)
@@ -222,9 +223,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(buttons)
 
     def _acceleration_text(self) -> str:
-        selected = (f"WSL {config.setting('wsl_distro') or 'auto'} · "
-                    f"{config.setting('wsl_python') or 'python3'}"
-                    if config.setting("wsl_gpu", False) else "CPU only")
+        selected = gpu_runtime.acceleration_text()
         whisper = config.whisper_cli()
         state = "found" if whisper.is_file() else "missing"
         return f"Separation/alignment: {selected}\nwhisper-cli: {whisper} ({state})"
@@ -279,7 +278,7 @@ class SettingsDialog(QDialog):
             f"GPU: {', '.join(gpu.name for gpu in report.gpus) or 'none detected'}\n"
             f"{wsl}\n"
             f"whisper-cli: {whisper}\n\n"
-            f"Suggested: {recommendation.wsl_gpu_reason}\n"
+            f"Suggested: {recommendation.acceleration_reason}\n"
             f"{recommendation.whisper_backend_reason}")
         QMessageBox.information(self, "Acceleration", text)
 
@@ -324,6 +323,10 @@ class SettingsDialog(QDialog):
                 edit.selectAll()
                 return
             values[field] = path
+        # One acceleration choice is in effect at a time: turning WSL on here deselects the
+        # Windows GPU runtime (it stays installed), exactly as the assistant does.
+        runtime_off = ({"gpu_backend": "", "gpu_python": ""}
+                       if self.wsl.isChecked() and not config.setting("wsl_gpu", False) else {})
         try:
             key = self.key.text().strip()
             if key:
@@ -351,6 +354,7 @@ class SettingsDialog(QDialog):
                 "wsl_python": self.wsl_python.text().strip() or "python3",
                 "wsl_torch_home": self.torch_home.text().strip() or "/opt/lyricloom/models/torch",
                 "wsl_hsa_override": self.hsa.text().strip(),
+                **runtime_off,
             })
         except OSError as exc:
             QMessageBox.critical(
