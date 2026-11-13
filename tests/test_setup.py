@@ -211,7 +211,7 @@ def test_find_wsl_environments_probes_the_configured_and_opt_interpreters(monkey
     assert "env" in argv
     assert "HSA_OVERRIDE_GFX_VERSION=10.3.0" in argv
     assert "PYTHONIOENCODING=utf-8" in argv
-    assert script.startswith(b'"""Probe one WSL interpreter')
+    assert script.startswith(b'"""Probe one interpreter')
     assert probe_calls[0][0][-2:] == ["/opt/torch/bin/python", "-"]
 
 
