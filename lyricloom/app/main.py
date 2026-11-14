@@ -1636,9 +1636,8 @@ class MainWindow(QMainWindow):
         act_search = menu.addAction("Search lyrics again")
         act_details = menu.addAction("Details…")
         act_vocals = menu.addAction("Save isolated vocals…")
+        # Greyed out until the song has been processed: there are no isolated vocals to save yet.
         act_vocals.setEnabled(vocal_source(path) is not None)
-        if not act_vocals.isEnabled():
-            act_vocals.setToolTip("Process the song first: there are no isolated vocals yet")
         menu.addSeparator()
         act_folder = menu.addAction("Open folder")
         act_copy = menu.addAction("Copy path")
