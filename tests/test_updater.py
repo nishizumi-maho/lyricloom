@@ -403,3 +403,34 @@ def test_the_app_holds_the_mutex_the_installer_waits_for(monkeypatch):
         if handle:
             kernel32.CloseHandle(handle)
         kernel32.CloseHandle(updater._APP_MUTEX)
+
+
+def _streamed(body: bytes) -> httpx.Response:
+    """A response whose body has not been read yet, as a real network response is."""
+    return httpx.Response(200, stream=httpx.ByteStream(body))
+
+
+def test_check_reads_the_release_from_a_streamed_response(monkeypatch):
+    # The real API answers with an unread stream; a mock built with ``content=`` hides that.
+    body = (b'{"tag_name": "v9.9.9", "html_url": "https://github.com/nishizumi-maho/lyricloom/'
+            b'releases/tag/v9.9.9", "body": "notes", "assets": [{"name": "LyricLoom-Setup.exe", '
+            b'"browser_download_url": "https://github.com/nishizumi-maho/lyricloom/releases/download/'
+            b'v9.9.9/LyricLoom-Setup.exe", "size": 15, "digest": "sha256:' + SHA.encode() + b'"}]}')
+    monkeypatch.setattr(updater, "_client", _mock_client(lambda request: _streamed(body)))
+    info = updater.check()
+    assert info is not None
+    assert (info.version, info.asset_name, info.asset_sha256) == ("9.9.9", "LyricLoom-Setup.exe", SHA)
+
+
+def test_download_reads_the_checksum_file_from_a_streamed_response(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater, "UPDATE_DIR", tmp_path / "updates")
+    monkeypatch.setattr(updater, "_VERIFIED", {})
+
+    def handler(request):
+        if request.url.path.endswith(".sha256"):
+            return _streamed(f"{SHA}  LyricLoom-Setup.exe\n".encode())
+        return _streamed(PAYLOAD)
+
+    monkeypatch.setattr(updater, "_client", _mock_client(handler))
+    path = updater.download(_info(asset_sha256="", checksum_url=ASSET_URL + ".sha256"))
+    assert path.read_bytes() == PAYLOAD

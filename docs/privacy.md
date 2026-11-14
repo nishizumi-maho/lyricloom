@@ -51,7 +51,7 @@ that allowlist, over HTTPS, checked at every hop.
 LyricLoom respects sites that block scripted requests (HTTP 401, 403 or 429). It skips them instead
 of trying to bypass the block.
 
-**Turn it off:** there is no separate switch in 2.2.0, because finding lyrics is the purpose of the
+**Turn it off:** there is no separate switch in 2.2.1, because finding lyrics is the purpose of the
 lyrics stage. To avoid these requests entirely, do not process songs, or use an offline DNS/firewall
 rule for the hosts above. Skipped providers do not stop a local transcription from succeeding.
 
@@ -366,7 +366,7 @@ tool for processing audio files. It is not directed at children.
 
 ## Changes
 
-This page describes LyricLoom 2.2.0 and Starry Karaoke 1.3.1. If a later version adds a network
+This page describes LyricLoom 2.2.1 and Starry Karaoke 1.3.1. If a later version adds a network
 feature, it should be documented here and in the release notes. The short summary is in
 [PRIVACY.md](../PRIVACY.md).
 

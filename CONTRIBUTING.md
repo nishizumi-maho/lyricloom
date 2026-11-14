@@ -145,7 +145,7 @@ The project does not require 100% coverage, but new behavior should have a test 
 - Keep the engine free of Qt imports. The GUI may import the engine; the engine may not import the
   GUI.
 - Heavy torch/audio-separator work belongs in a worker under `lyricloom/workers/`, not in `app/`.
-- Keep user-facing text in English. The UI is English-only in 2.2.0.
+- Keep user-facing text in English. The UI is English-only in 2.2.1.
 - Prefer small functions with a clear data contract (`TrackMeta`, `Candidate`, `Transcript`, `Line`,
   `Segment`).
 - Do not silently swallow errors that the user needs to see; log them with enough context to diagnose
@@ -207,7 +207,7 @@ it. A missing source is better than a fragile or abusive one.
 
 ## Documentation
 
-- User-facing docs are English in 2.2.0.
+- User-facing docs are English in 2.2.1.
 - Use relative links between docs and the README so they work on GitHub and in a local checkout.
 - Do not add screenshot links until the image files actually exist in the repository.
 - Do not include personal paths, machine names, API keys or copyrighted lyrics in examples.

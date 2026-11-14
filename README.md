@@ -10,13 +10,13 @@ This repository ships two products in one release:
 - **Starry Karaoke** is an optional MusicBee plugin in `musicbee/`. It displays the same `.lrc` in a
   starry full-screen window, with word-by-word highlighting, romaji, recording and auto-open.
 
-LyricLoom 2.2.0 and Starry Karaoke 1.3.1 are free software. The app is licensed under the **GNU GPL
+LyricLoom 2.2.1 and Starry Karaoke 1.3.1 are free software. The app is licensed under the **GNU GPL
 v3 or later**; the plugin is **MIT-licensed**. The interface is English-only. Windows and Linux are
 the supported app platforms; the plugin is for MusicBee on Windows.
 
 [![CI](https://github.com/nishizumi-maho/lyricloom/actions/workflows/ci.yml/badge.svg)](https://github.com/nishizumi-maho/lyricloom/actions/workflows/ci.yml)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-![Version](https://img.shields.io/badge/version-2.2.0-informational)
+![Version](https://img.shields.io/badge/version-2.2.1-informational)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
 - **Repository:** <https://github.com/nishizumi-maho/lyricloom>
@@ -68,14 +68,14 @@ does not need MusicBee at all.
 
 ## Download
 
-Download only from the official **Releases** page. The 2.2.0 release publishes:
+Download only from the official **Releases** page. The 2.2.1 release publishes:
 
 | File | What it is |
 |---|---|
-| `LyricLoom-Setup-2.2.0.exe` | Windows installer, per-user, no administrator rights |
+| `LyricLoom-Setup-2.2.1.exe` | Windows installer, per-user, no administrator rights |
 | `LyricLoom-Setup.exe` | Stable copy of the latest installer, used by the in-app updater |
-| `LyricLoom-2.2.0-win64.zip` | Portable Windows build; extract and run |
-| `LyricLoom-2.2.0-linux-x86_64.tar.gz` | Linux bundle with a per-user `install.sh` |
+| `LyricLoom-2.2.1-win64.zip` | Portable Windows build; extract and run |
+| `LyricLoom-2.2.1-linux-x86_64.tar.gz` | Linux bundle with a per-user `install.sh` |
 | `StarryKaraoke-MusicBee-1.3.1.zip` | MusicBee plugin release zip (also bundled with the Windows installer) |
 | `SHA256SUMS` and per-file `*.sha256` | Checksums for every asset |
 
@@ -84,7 +84,7 @@ include the large neural models; LyricLoom downloads those only after you approv
 
 ## Quick start
 
-1. **Install.** Download `LyricLoom-Setup-2.2.0.exe` and run it. The installer is per-user: it
+1. **Install.** Download `LyricLoom-Setup-2.2.1.exe` and run it. The installer is per-user: it
    installs under `%LOCALAPPDATA%\Programs\LyricLoom`, needs no administrator rights and creates a
    Start-menu shortcut. The desktop shortcut is optional and unchecked. If MusicBee is installed,
    the optional **Install the Starry Karaoke plugin for MusicBee** task is offered and checked (an earlier
@@ -227,7 +227,7 @@ The full Windows walkthrough, including SmartScreen, portable mode, updates and 
   memory).
 - AMD GPUs on Windows can run separation, forced alignment and the English singing model inside
   WSL 2 with ROCm. The app stays on Windows.
-- Linux can use CUDA or ROCm PyTorch for separation and MMS alignment. On native Linux in 2.2.0
+- Linux can use CUDA or ROCm PyTorch for separation and MMS alignment. On native Linux in 2.2.1
   the English singing model runs on the CPU.
 - No telemetry, no account, and no audio upload unless you explicitly enable cloud transcription.
 
@@ -248,8 +248,8 @@ it is sung.*
 The release tarball is the easiest path:
 
 ```bash
-tar -xzf LyricLoom-2.2.0-linux-x86_64.tar.gz
-cd LyricLoom-2.2.0-linux-x86_64
+tar -xzf LyricLoom-2.2.1-linux-x86_64.tar.gz
+cd LyricLoom-2.2.1-linux-x86_64
 ./install.sh
 ```
 
@@ -318,7 +318,7 @@ For `01 - Synthetic Song.flac`, LyricLoom writes `01 - Synthetic Song.lrc` next 
 ```lrc
 [ti:Synthetic Song]
 [ar:Demo Artist]
-[re:LyricLoom 2.2.0]
+[re:LyricLoom 2.2.1]
 [#source:uta-net conf:0.94]
 [#engine:8]
 [#models:transcribe=whisper-large-v3;separate=separator-mel-band-roformer;align=align-mms-fa]
@@ -369,7 +369,7 @@ turn it off. The short version is in **[PRIVACY.md](PRIVACY.md)**.
 - **[docs/lrc-format.md](docs/lrc-format.md)** — the enhanced LRC contract.
 - **[docs/privacy.md](docs/privacy.md)** and **[PRIVACY.md](PRIVACY.md)** — network requests and
   local data.
-- **[docs/release-notes-2.2.0.md](docs/release-notes-2.2.0.md)** — what changed in this release (and [2.1.0](docs/release-notes-2.1.0.md)).
+- **[docs/release-notes-2.2.1.md](docs/release-notes-2.2.1.md)** — what changed in this release (and [2.2.0](docs/release-notes-2.2.0.md), [2.1.0](docs/release-notes-2.1.0.md)).
 - **[CHANGELOG.md](CHANGELOG.md)** — release history.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — development setup and the monorepo layout.
 
@@ -432,5 +432,5 @@ LyricLoom builds on the work of many open-source projects and researchers, inclu
   `pyproject.toml`.
 - **MusicBee**, and the NMeCab, IPADic and RomajiCore components used by the plugin.
 
-The project was previously called **Lyrics Boca**. LyricLoom 2.2.0 keeps reading `.lrc` files and
+The project was previously called **Lyrics Boca**. LyricLoom 2.2.1 keeps reading `.lrc` files and
 settings written by that name; see **[CHANGELOG.md](CHANGELOG.md)**.

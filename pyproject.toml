@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lyricloom"
-version = "2.2.0"
+version = "2.2.1"
 description = "Word-by-word synced .lrc lyrics from official lyrics, aligned against isolated vocals."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
