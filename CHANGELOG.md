@@ -4,6 +4,22 @@ All notable changes to LyricLoom and Starry Karaoke are documented here. The for
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning for
 the application release.
 
+## [2.2.1] - 2026-11-14
+
+A bug-fix release. Starry Karaoke stays at 1.3.1. Versions 2.1.0 to 2.2.0 cannot update
+themselves, so 2.2.1 has to be installed by hand once.
+
+### Fixed
+
+- **Update check.** Since 2.1.0 the release description and the checksum file were requested as
+  a stream and used without being read, so every check failed with `ResponseNotRead`: silently
+  at start-up, and with that text under **Help > Check for updates…**. The tests replaced the
+  network layer with answers that were already read, which hid it; they now use unread streams.
+- **Search in a large library.** The table was sorted by `QSortFilterProxyModel`, which sorted
+  the whole library again on every change of the search text or status filter, asking Python
+  for two keys per comparison. The table model now sorts its own rows, and the proxy only
+  filters. With 30,000 songs a keystroke went from 2–11 s to about 0.15 s.
+
 ## [2.2.0] - 2026-11-13
 
 LyricLoom 2.2.0 adds GPU processing on Windows without WSL and keeps the interface English on any

@@ -133,12 +133,14 @@ def _stream(url: str, *, allowed: Callable[[str], bool], headers: dict[str, str]
 
 def _get_text(url: str, *, allowed: Callable[[str], bool], timeout: float = 20) -> str:
     with _stream(url, allowed=allowed, headers={"User-Agent": USER_AGENT}, timeout=timeout) as response:
+        response.read()   # a streamed response has no body until it is read
         return response.text
 
 
 def _get_json(url: str) -> dict:
     headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
     with _stream(url, allowed=_is_api_url, headers=headers, timeout=20) as response:
+        response.read()   # a streamed response has no body until it is read
         data = response.json()
     if not isinstance(data, dict):
         raise RuntimeError("GitHub returned an unexpected release description")

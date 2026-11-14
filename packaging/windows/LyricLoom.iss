@@ -1,7 +1,7 @@
 ; Inno Setup 6 script for the per-user LyricLoom installer.
 ;
 ; Build (normally through scripts/build-windows.ps1, which passes the version):
-;   ISCC.exe /DMyAppVersion=2.2.0 packaging\windows\LyricLoom.iss
+;   ISCC.exe /DMyAppVersion=2.2.1 packaging\windows\LyricLoom.iss
 ;
 ; Expected input:
 ;   dist\LyricLoom\        (PyInstaller one-folder output)
@@ -15,7 +15,7 @@
 ; runtime and are deliberately not part of the installer.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.2.0"
+  #define MyAppVersion "2.2.1"
 #endif
 
 #define MyAppName "LyricLoom"

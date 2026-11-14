@@ -1,6 +1,6 @@
 # Install LyricLoom on Windows
 
-LyricLoom 2.2.0 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the
+LyricLoom 2.2.1 runs on 64-bit Windows 10 and Windows 11. The normal installer includes the
 application, the worker, `whisper-cli` and the optional Starry Karaoke MusicBee plugin; you do not
 need Python, CUDA or a separate Whisper installation. With an NVIDIA card, one click in the setup
 assistant adds GPU processing (see [GPU paths](#gpu-paths)). The large models are not included: the setup assistant offers
@@ -9,9 +9,9 @@ a model.
 
 There are two ways to run the app:
 
-- **Installer:** `LyricLoom-Setup-2.2.0.exe` from the
+- **Installer:** `LyricLoom-Setup-2.2.1.exe` from the
   [Releases page](https://github.com/nishizumi-maho/lyricloom/releases). Recommended for most people.
-- **Portable ZIP:** `LyricLoom-2.2.0-win64.zip`. Extract and run, without an installer. Good for a
+- **Portable ZIP:** `LyricLoom-2.2.1-win64.zip`. Extract and run, without an installer. Good for a
   USB stick or a folder you control.
 
 Both use the same per-user data folder for settings, models, caches and logs. See
@@ -28,14 +28,14 @@ Both use the same per-user data folder for settings, models, caches and logs. Se
 LyricLoom reads these audio formats: `.flac`, `.mp3`, `.m4a`, `.ogg`, `.opus`, `.wav`. Other
 formats are ignored by the library scanner. Convert them first if needed.
 
-The interface is **English-only** in 2.2.0, whatever the display language or regional format of
+The interface is **English-only** in 2.2.1, whatever the display language or regional format of
 Windows. File pickers and the installer's own Yes/No buttons are drawn by Windows and follow its
 language.
 
 ## Install with the setup program
 
 1. Open the [Releases page](https://github.com/nishizumi-maho/lyricloom/releases).
-2. Download `LyricLoom-Setup-2.2.0.exe`. Do not use a third-party download site.
+2. Download `LyricLoom-Setup-2.2.1.exe`. Do not use a third-party download site.
 3. Run the setup file.
 4. Follow the wizard. It installs for the current user under
    `%LOCALAPPDATA%\Programs\LyricLoom`, does not request administrator rights and does not create
@@ -76,7 +76,7 @@ permanently to work around a blocked installer.
 
 ## Install the portable ZIP
 
-1. Download `LyricLoom-2.2.0-win64.zip` from the
+1. Download `LyricLoom-2.2.1-win64.zip` from the
    [Releases page](https://github.com/nishizumi-maho/lyricloom/releases).
 2. Extract it to a folder you can write to, for example `D:\Apps\LyricLoom`. Do not run it from
    inside the ZIP preview window.
