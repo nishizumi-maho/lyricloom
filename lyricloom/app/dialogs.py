@@ -661,6 +661,8 @@ class UpdateController(QObject):
 
     @Slot(str)
     def check_failed(self, message: str) -> None:
+        # Always logged: the automatic check shows nothing, so the log is the only trace of it.
+        LOG.warning("update check failed: %s", message)
         if not self._silent:
             QMessageBox.warning(self._window, "Updates", "Could not check for updates:\n" + message)
 

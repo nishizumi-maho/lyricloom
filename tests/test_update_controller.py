@@ -315,3 +315,12 @@ def test_skip_during_a_download_never_arms_the_skipped_version(app, tmp_path, mo
     assert not path.exists()
     assert window.prepared == []
     window.close()
+
+
+def test_a_failed_silent_check_is_written_to_the_log(app, caplog):
+    window = QMainWindow()
+    controller = UpdateController(window)
+    controller._silent = True
+    with caplog.at_level("WARNING", logger="lyricloom.app.dialogs"):
+        controller.check_failed("ResponseNotRead: no body")
+    assert "update check failed: ResponseNotRead: no body" in caplog.text
