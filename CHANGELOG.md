@@ -4,7 +4,7 @@ All notable changes to LyricLoom and Starry Karaoke are documented here. The for
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses semantic versioning for
 the application release.
 
-## [2.2.1] - 2026-11-13
+## [2.2.1] - 2026-11-14
 
 A bug-fix release. Starry Karaoke stays at 1.3.1. Versions 2.1.0 to 2.2.0 cannot update
 themselves, so 2.2.1 has to be installed by hand once.
