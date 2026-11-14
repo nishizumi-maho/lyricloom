@@ -11,7 +11,7 @@ import numpy as np
 import soundfile as sf
 import soxr
 
-from .. import config, gpu_runtime, models
+from .. import config, gpu_runtime, models, vocal_export
 from ..errtext import message_text
 from ..workers import WorkerError, run_worker, windows_path, wsl_path
 from .instrumental import find_instrumental, subtract
@@ -299,6 +299,15 @@ def separate(audio: Path, work: Path, model: models.ModelSpec | None = None,
         except Exception as e:  # noqa: BLE001 - keeping a copy is optional, separation is not
             log.exception("could not keep the vocals for %s", audio)
             out["kept_error"] = f"{type(e).__name__}: {e}"
+    # The user's own copy (<song>_vocal.flac), when they asked for one.  It is optional work: a
+    # read-only music folder or a file of that name that is not ours never loses the track.
+    try:
+        exported = vocal_export.export(audio, vocals, fresh=out["device"] != "kept")
+        if exported is not None:
+            out["exported"] = str(exported)
+    except Exception as e:  # noqa: BLE001 - optional, like keeping the stem
+        log.warning("could not export the vocals of %s: %s", audio, e)
+        out["export_error"] = message_text(e)
     vocals16k = work / "vocals16k.wav"
     to_mono16k(vocals, vocals16k)
     return {**out, "vocals": str(vocals), "vocals16k": str(vocals16k), "kept": str(kept)}

@@ -123,6 +123,18 @@ def set_vocals_root(path: Path) -> None:
     _save_setting("vocals", str(path))
 
 
+def vocal_export_mode() -> str:
+    """Whether a plain copy of the isolated vocals is also saved for the user:
+    "off" (default), "beside" (next to each song) or "folder" (``vocal_export_folder()``)."""
+    value = str(_settings().get("vocal_export") or "off").strip().lower()
+    return value if value in ("beside", "folder") else "off"
+
+
+def vocal_export_folder() -> Path | None:
+    chosen = _settings().get("vocal_export_folder")
+    return Path(str(chosen)).expanduser() if chosen else None
+
+
 def work_root() -> Path:
     """Scratch/cache folder for the pipeline. Large libraries can put it on another drive."""
     chosen = os.environ.get("LYRICLOOM_WORK") or _settings().get("work")

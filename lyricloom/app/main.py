@@ -26,10 +26,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QSplitter, QSystemTrayIcon, QTableView, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import cache, config, gpu_runtime, runner, runtime
+from .. import cache, config, gpu_runtime, runner, runtime, vocal_export
 from .. import models as model_catalog
 from .. import VERSION, updater
-from ..errtext import os_error_text
+from ..errtext import message_text, os_error_text
 from ..lrc import format_ts, parse_lrc
 from ..model import LrcDoc, Segment
 from ..stages.write import apply_script_preference, japanese_path, write_lyrics
@@ -1635,6 +1635,10 @@ class MainWindow(QMainWindow):
         act_redo = menu.addAction("Redo word timing")
         act_search = menu.addAction("Search lyrics again")
         act_details = menu.addAction("Details…")
+        act_vocals = menu.addAction("Save isolated vocals…")
+        act_vocals.setEnabled(vocal_source(path) is not None)
+        if not act_vocals.isEnabled():
+            act_vocals.setToolTip("Process the song first: there are no isolated vocals yet")
         menu.addSeparator()
         act_folder = menu.addAction("Open folder")
         act_copy = menu.addAction("Copy path")
@@ -1655,6 +1659,8 @@ class MainWindow(QMainWindow):
         elif chosen is act_details:
             self.table.selectRow(index.row())
             self.show_details()
+        elif chosen is act_vocals:
+            self.save_isolated_vocals(paths)
         elif chosen is act_folder:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
         elif chosen is act_copy:
@@ -1662,6 +1668,50 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Path copied", 3000)
         elif chosen is act_log:
             self._open_track_log(row)
+
+    def save_isolated_vocals(self, paths: list[Path]) -> None:
+        """Writes ``<song>_vocal.flac`` for the given songs from the vocals LyricLoom already has.
+
+        The place is the one chosen in Settings; with the automatic copies turned off, the user
+        picks a folder for this one time.  A file of that name that LyricLoom did not write is
+        never replaced."""
+        mode = config.vocal_export_mode()
+        folder: Path | None = None
+        if vocal_export.target(paths[0]) is None:
+            chosen = QFileDialog.getExistingDirectory(
+                self, "Save the isolated vocals in", str(paths[0].parent))
+            if not chosen:
+                return
+            mode, folder = "folder", Path(chosen)
+        saved: list[Path] = []
+        missing = 0
+        problems: list[str] = []
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for audio in paths:
+                source = vocal_source(audio)
+                if source is None:
+                    missing += 1
+                    continue
+                try:
+                    destination = vocal_export.target(audio, mode, folder)
+                    saved.append(vocal_export.export(audio, source, destination=destination))
+                except Exception as exc:  # noqa: BLE001 - one song must not stop the others
+                    problems.append(f"{audio.name}: {message_text(exc)}")
+                QApplication.processEvents()
+        finally:
+            QApplication.restoreOverrideCursor()
+        parts = []
+        if saved:
+            where = saved[0].parent if len({p.parent for p in saved}) == 1 else "their folders"
+            parts.append(f"Saved {len(saved)} vocal file(s) in {where}")
+        if missing:
+            parts.append(f"{missing} song(s) have no isolated vocals yet (process them first)")
+        if problems:
+            parts.append(f"{len(problems)} could not be saved")
+        self.statusBar().showMessage("; ".join(parts) or "Nothing to save", 12000)
+        if problems:
+            QMessageBox.warning(self, "Save isolated vocals", "\n\n".join(problems[:8]))
 
     def _track_log(self, path: Path) -> Path | None:
         try:
