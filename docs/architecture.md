@@ -45,6 +45,7 @@ Every stage except `probe` has its own JSON cache. `write` also reads cached res
 | `lyricloom/setup.py` | System detection, WSL environment discovery/setup and whisper.cpp backend install, with no Qt. |
 | `lyricloom/gpu_runtime.py` | The Windows GPU runtime: pinned `uv`, a CUDA or DirectML Python environment under `<data>/runtimes`, its GPU probe and the `gpu_backend`/`gpu_python` settings, with no Qt. |
 | `lyricloom/errtext.py` | English text for OS errors, whatever the Windows display language. |
+| `lyricloom/vocal_export.py` | The user's optional copy of the isolated vocals (`<song>_vocal.flac`, tagged `LYRICLOOM` so a file that is not ours is never replaced), and the name test the library scanner uses to ignore those copies. |
 | `lyricloom/updater.py` | GitHub release check, fail-closed installer download and launch modes. |
 | `lyricloom/animation.py` | Qt-free playback clock, smooth scroll path, line emphasis and frame-rate helpers. |
 | `lyricloom/musicbee.py` | Finds MusicBee and installs the bundled Starry Karaoke files. |

@@ -302,6 +302,7 @@ that the running app downloaded and verified itself can be launched.
 | `work/<hash>/vocals.wav`, `vocals16k.wav` | Player and aligner input. | Audio from your songs. |
 | `work/<hash>/log.txt` | Errors, source URL, device used, fallback reason, whether cloud transcription was used. The AssemblyAI key is redacted. | Contains the audio path and error details. |
 | `vocals/<artist>/<album>/<song>.vocals.flac` and `.json` | Kept lossless vocal stem and its manifest, so redo does not re-separate. | Audio from your songs. |
+| `<song>_vocal.flac`, next to the song or in the folder you chose | A copy of the isolated vocals for your own use, only when you turn on **Settings > Save isolated vocals** or use **Save isolated vocals…**. | Audio from your songs. It stays on your computer and is never uploaded. |
 | `logs/app.log` | Rotation log of the app, queue, setup and update activity. | Contains local paths and error details; never the API key or lyric text. |
 | `assemblyai.key` | API key, if you added one. | **Secret.** DPAPI-encrypted on Windows; mode 0600 on Linux/macOS. |
 | `assemblyai*.json` | Cloud transcript response. | Contains transcript text. |
@@ -331,6 +332,8 @@ log lines. It never reads the API key.
   files even when you uninstall the app.
 - **Work cache** can be deleted at any time when the app is closed. It is recreated on the next run.
 - **Kept vocals** can be deleted at any time. They are recreated by separating again.
+- **Saved vocals** (`<song>_vocal.flac`) are your files: LyricLoom and its uninstaller never delete
+  them. Delete them yourself if you no longer want them.
 - **Models and installed whisper.cpp builds** can be deleted at any time. See
   [docs/models.md](models.md#deleting-models).
 - **AssemblyAI key** can be removed in the app or by deleting `assemblyai.key`.

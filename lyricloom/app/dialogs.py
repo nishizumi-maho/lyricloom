@@ -102,6 +102,25 @@ class SettingsDialog(QDialog):
         self.vocals_btn = QPushButton("Browse…")
         self.vocals_btn.clicked.connect(lambda: self._browse(self.vocals))
         form.addRow("Vocals cache", self._with_button(self.vocals, self.vocals_btn))
+        self.vocal_export = QComboBox()
+        self.vocal_export.addItem("Only in the vocals cache", "off")
+        self.vocal_export.addItem("Also next to each song, as <song>_vocal.flac", "beside")
+        self.vocal_export.addItem("Also in another folder, as <song>_vocal.flac", "folder")
+        self.vocal_export.setCurrentIndex(
+            max(0, self.vocal_export.findData(config.vocal_export_mode())))
+        self.vocal_export.setToolTip(
+            "A lossless copy of the isolated vocals for your own use, written when a song is "
+            "separated. LyricLoom's library ignores these files; another player that scans the "
+            "music folder will list them as tracks.")
+        self.vocal_export.currentIndexChanged.connect(self._vocal_export_changed)
+        form.addRow("Save isolated vocals", self.vocal_export)
+        self.vocal_folder = QLineEdit(str(config.vocal_export_folder() or ""))
+        self.vocal_folder.setPlaceholderText("Folder for the <song>_vocal.flac copies")
+        self.vocal_folder_btn = QPushButton("Browse…")
+        self.vocal_folder_btn.clicked.connect(lambda: self._browse(self.vocal_folder))
+        form.addRow("Vocal copies folder",
+                    self._with_button(self.vocal_folder, self.vocal_folder_btn))
+        self._vocal_export_changed()
         self.work = QLineEdit(str(config.WORK_ROOT))
         self.work.setPlaceholderText("Scratch folder for processing caches")
         self.work_btn = QPushButton("Browse…")
@@ -222,6 +241,11 @@ class SettingsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _vocal_export_changed(self, *_args) -> None:
+        folder = self.vocal_export.currentData() == "folder"
+        self.vocal_folder.setEnabled(folder)
+        self.vocal_folder_btn.setEnabled(folder)
+
     def _acceleration_text(self) -> str:
         selected = gpu_runtime.acceleration_text()
         whisper = config.whisper_cli()
@@ -323,6 +347,17 @@ class SettingsDialog(QDialog):
                 edit.selectAll()
                 return
             values[field] = path
+        export_mode = self.vocal_export.currentData()
+        export_folder = self.vocal_folder.text().strip()
+        if export_mode == "folder":
+            path, error = validate_folder("Vocal copies folder", export_folder,
+                                          must_exist=False, create=True)
+            if error:
+                QMessageBox.warning(self, "Vocal copies folder", error)
+                self.vocal_folder.setFocus()
+                self.vocal_folder.selectAll()
+                return
+            export_folder = str(path)
         # One acceleration choice is in effect at a time: turning WSL on here deselects the
         # Windows GPU runtime (it stays installed), exactly as the assistant does.
         runtime_off = ({"gpu_backend": "", "gpu_python": ""}
@@ -342,6 +377,8 @@ class SettingsDialog(QDialog):
                 "library": str(values["Music library"]),
                 "vocals": str(values["Vocals cache"]),
                 "work": str(values["Work cache"]),
+                "vocal_export": export_mode,
+                "vocal_export_folder": export_folder,
                 "japanese_script": "romaji" if self.script.currentIndex() else "japanese",
                 "check_updates": self.check_updates.isChecked(),
                 "assemblyai_enabled": self.cloud.isChecked(),

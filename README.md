@@ -174,6 +174,9 @@ The full Windows walkthrough, including SmartScreen, portable mode, updates and 
   `<song>.japanese.lrc` and `<song>.romaji.lrc` are kept; the main `.lrc` uses the script you choose.
 - Songs with no official lyric can be aligned from lyrics you paste into the app, as long as the
   song has been processed once before.
+- The isolated vocals can be saved for your own use as `<song>_vocal.flac`, next to each song or
+  in a folder you choose (**Settings > Save isolated vocals**, off by default), and for songs
+  already processed with **Save isolated vocals…** in the track's menu.
 
 ### Processing and library
 

@@ -26,6 +26,12 @@ this release is unchanged.
 - **CPU stays the default and the safety net.** A cancelled or failed setup changes no setting
   and can simply be run again. If a GPU stage fails while a song is processed, that song finishes
   on the CPU and the status bar and the track log say why.
+- **Save the isolated vocals.** LyricLoom already kept each song's isolated vocals in its own
+  cache; now you can have a plain copy too. **Settings > Save isolated vocals** writes a lossless
+  `<song>_vocal.flac` next to each song, or in a folder you choose, whenever a song is
+  separated. For songs you processed before, select them, right-click and choose **Save isolated
+  vocals…**. It is off by default, the library ignores the copies, and a file of that name that
+  you made yourself is never overwritten.
 - **English everywhere.** Windows error messages appeared in the system's display language, and
   numbers and dates followed the Windows regional format; both are now English. On a non-English
   Windows, WSL without a distro was reported as "not installed"; that check no longer depends on
@@ -57,6 +63,8 @@ before; the GPU runtime is downloaded only if you ask for it.
 - The engine version is unchanged, so no song is processed again because of this update.
 - The GPU setup downloads from GitHub (`uv` and a standalone Python), `download.pytorch.org` and
   PyPI, only when you click the button. See [docs/privacy.md](privacy.md#windows-gpu-runtime-setup).
+- With **Also next to each song**, MusicBee and other players that scan your music folder will
+  list the `_vocal.flac` copies as tracks. Choose **Also in another folder** to avoid that.
 - Settings, library choice, models, caches and kept vocal stems are kept. The uninstaller now also
   removes the GPU runtimes and installed whisper.cpp builds when you ask it to delete LyricLoom's
   data.

@@ -338,6 +338,14 @@ Main window:
   exists.
 - The current line in the player uses the same smooth animation as the karaoke window. The window
   follows the Windows light/dark setting, and every control is reachable by keyboard.
+- **Settings > Save isolated vocals** writes a lossless copy of each song's isolated vocals as
+  `<song>_vocal.flac` when the song is separated: **Also next to each song**, or **Also in
+  another folder** (the folder keeps your library's artist/album layout). It is off by default.
+  For songs that are already processed, select them, right-click and choose **Save isolated
+  vocals…**; with the setting off, it asks for a folder that one time. LyricLoom's library
+  ignores these files, but MusicBee or another player that scans your music folder will list
+  them as tracks, so choose another folder if you do not want that. A file named
+  `<song>_vocal.flac` that LyricLoom did not write is never replaced.
 - **Settings > Smooth animation** offers **Match display (default)**, **Half refresh** and **Third
   refresh**. Lower rates are exact integer divisors of the monitor refresh rate, so motion does not
   judder. The main player's animation stops while nothing is playing.
@@ -377,6 +385,7 @@ LyricLoom writes everything to `%LOCALAPPDATA%\LyricLoom` unless you override it
 | whisper-cli fallback | `%LOCALAPPDATA%\LyricLoom\bin` | Used only if no bundled or `PATH` copy is found. |
 | Update downloads | `%TEMP%\LyricLoom-update` | Verified installer downloads; removed on the next start. |
 | Lyrics | Next to each audio file | `<song>.lrc`, `<song>.original.lrc`, and for Japanese songs the two script variants. |
+| Saved vocals (optional) | Next to each audio file, or the folder you chose | `<song>_vocal.flac`, only when **Settings > Save isolated vocals** is on or you used **Save isolated vocals…**. Never deleted by LyricLoom or its uninstaller. |
 
 Each track also has its own log at:
 

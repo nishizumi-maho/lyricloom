@@ -27,6 +27,11 @@ Windows language. Starry Karaoke stays at 1.3.1.
 - A failed, cancelled or interrupted setup changes no setting and can be resumed. A GPU stage
   that fails during a song falls back to the CPU and records the reason, including a runtime
   folder that was deleted by hand.
+- **Save isolated vocals.** **Settings > Save isolated vocals** writes a lossless
+  `<song>_vocal.flac` when a song is separated, next to the song or in a folder you choose (off
+  by default), and **Save isolated vocals…** in the track menu does it for songs already
+  processed. The library ignores these files, and a file of that name that LyricLoom did not
+  write is never replaced.
 - **Remove…** deletes a runtime; the uninstaller deletes the runtimes and installed whisper.cpp
   builds with the rest of LyricLoom's data.
 - Settings, the assistant's summary, **Help > Diagnostics…** and `lyricloom doctor` name the

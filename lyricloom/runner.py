@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from . import ENGINE_VERSION, VERSION, cache, config
+from . import ENGINE_VERSION, VERSION, cache, config, vocal_export
 from . import models as model_catalog
 from .brand import is_ours, tag
 from .align.confidence import REVIEW_THRESHOLD
@@ -137,9 +137,14 @@ def _extra_passes(audio: Path, work: Path, sep: dict, first: Transcript, lang: s
 def _separate(audio: Path, work: Path, cancel: threading.Event | None = None) -> dict:
     sep = separate(audio, work, cancel=cancel)
     if sep.get("fallback"):
-        _log(audio, f"separation in WSL failed, ran on {sep['device']} instead: {sep['fallback']}")
+        _log(audio, f"separation did not run on the GPU as set up; it ran on {sep['device']}: "
+                    f"{sep['fallback']}")
     else:
         _log(audio, f"separated on {sep['device']}")
+    if sep.get("exported"):
+        _log(audio, f"saved a copy of the isolated vocals: {sep['exported']}")
+    if sep.get("export_error"):
+        _log(audio, f"could not save the copy of the isolated vocals: {sep['export_error']}")
     return sep
 
 
@@ -581,7 +586,12 @@ def _is_link_or_junction(path: str) -> bool:
 
 def _excluded_cache_roots() -> list[Path]:
     roots = []
-    for value in (config.vocals_root(), config.WORK_ROOT):
+    folders = [config.vocals_root(), config.WORK_ROOT]
+    # A folder that receives the exported vocals may sit inside the library; its files are
+    # copies of songs' vocals, never songs.
+    if config.vocal_export_mode() == "folder" and config.vocal_export_folder() is not None:
+        folders.append(config.vocal_export_folder())
+    for value in folders:
         try:
             roots.append(Path(value).resolve())
         except OSError:
@@ -601,9 +611,16 @@ def find_audio(root: Path) -> list[Path]:
     """Every supported audio file under ``root``.
 
     Kept vocal stems and the work cache are skipped even when the user points one of those
-    folders inside the library, so a scan never treats cache files as songs (R1-22)."""
+    folders inside the library, so a scan never treats cache files as songs (R1-22).  The same
+    goes for an exported ``<song>_vocal.flac`` lying next to its song."""
     if root.is_file():
-        return [] if root.name.lower().endswith(".vocals.flac") else [root]
+        if root.name.lower().endswith(".vocals.flac"):
+            return []
+        try:
+            siblings = {name.lower() for name in os.listdir(root.parent)}
+        except OSError:
+            siblings = set()
+        return [] if vocal_export.is_export_name(root.name, siblings, AUDIO_EXT) else [root]
     excluded = _excluded_cache_roots()
     if _under(root, excluded):
         return []
@@ -617,8 +634,11 @@ def find_audio(root: Path) -> list[Path]:
         dirnames[:] = [name for name in dirnames
                        if not _is_link_or_junction(os.path.join(dirpath, name))
                        and not _under(Path(dirpath) / name, excluded)]
+        siblings = {name.lower() for name in filenames}
         for name in filenames:
-            if Path(name).suffix.lower() in AUDIO_EXT and not name.lower().endswith(".vocals.flac"):
+            if (Path(name).suffix.lower() in AUDIO_EXT
+                    and not name.lower().endswith(".vocals.flac")
+                    and not vocal_export.is_export_name(name, siblings, AUDIO_EXT)):
                 found.append(Path(dirpath) / name)
     return sorted(found)
 
